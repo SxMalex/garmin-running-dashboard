@@ -1,0 +1,28 @@
+# Configuration Streamlit
+#
+# Sécurité : XSRF et CORS sont activés (défauts Streamlit).
+# Ne les désactiver QUE pour des cas spécifiques (embedding, dev local
+# avec proxy custom). En déploiement public, garder ces flags à `true`.
+#
+# `browser.serverAddress` est l'hôte annoncé au navigateur. Par défaut
+# `localhost` pour le dev. En production, remplacer par le hostname public
+# (ex. "running.exemple.com") via la variable d'env STREAMLIT_BROWSER_SERVER_ADDRESS.
+
+[server]
+headless = true
+port = 8501
+address = "0.0.0.0"
+enableXsrfProtection = true
+enableCORS = true
+
+[browser]
+gatherUsageStats = false
+serverAddress = "localhost"
+serverPort = 8501
+
+[theme]
+base = "dark"
+primaryColor = "#3987e5"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#161a23"
+textColor = "#e6e8ee"

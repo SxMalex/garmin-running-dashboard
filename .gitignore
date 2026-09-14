@@ -1,0 +1,24 @@
+# Secrets et sessions
+.env
+.garmin/
+.garminconnect/
+app/.garmin/
+
+# Caches
+app/.cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+
+# Environnements
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Réglages locaux d'outils
+.claude/settings.local.json
+.DS_Store

@@ -1,0 +1,59 @@
+# Stack de production : Caddy en frontal HTTPS, Streamlit en interne.
+#
+# Démarrage :
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Pré-requis : .env contient PUBLIC_DOMAIN, ACME_EMAIL et les identifiants Garmin.
+# Les ports 80 et 443 doivent être ouverts (challenge Let's Encrypt + HTTPS).
+#
+# Différences vs docker-compose.yml (dev) :
+#  - Pas de bind mount du code source ; l'image contient le code via COPY.
+#    Mettre à jour le code → `docker compose -f docker-compose.prod.yml build app`.
+#  - Cache disque et tokens Garmin sur volumes nommés → survivent aux rebuilds.
+#  - Service Caddy en frontal, port 8501 non exposé.
+
+services:
+  app:
+    build: ./app
+    image: garmin-dashboard:latest
+    env_file: .env
+    volumes:
+      - app_cache:/app/.cache
+      - garmin_tokens:/app/.garmin
+    expose:
+      - "8501"
+    networks:
+      - web
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  caddy:
+    image: caddy:2-alpine
+    env_file: .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - web
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  web:
+
+volumes:
+  app_cache:
+  garmin_tokens:
+  caddy_data:
+  caddy_config:

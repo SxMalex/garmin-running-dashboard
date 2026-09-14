@@ -1,0 +1,36 @@
+# Reverse-proxy Caddy pour le déploiement public.
+# HTTPS automatique via Let's Encrypt (le port 80 doit être ouvert pour le challenge ACME).
+#
+# Variables d'env attendues (cf. .env) :
+#   PUBLIC_DOMAIN   ex. running.exemple.com
+#   ACME_EMAIL      adresse pour les notifications de certificat
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$PUBLIC_DOMAIN} {
+	encode gzip
+
+	# Headers de sécurité
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Frame-Options            "DENY"
+		X-Content-Type-Options     "nosniff"
+		Referrer-Policy            "strict-origin-when-cross-origin"
+		Permissions-Policy         "geolocation=(), microphone=(), camera=(), interest-cohort=()"
+		Content-Security-Policy    "frame-ancestors 'none'"
+		# Cache l'identité du serveur upstream
+		-Server
+	}
+
+	# Streamlit utilise un WebSocket sur /_stcore/stream pour les mises à jour live ;
+	# Caddy gère le upgrade automatiquement avec reverse_proxy.
+	# Healthcheck actif : Caddy stoppe le proxy vers app si /_stcore/health
+	# ne répond plus (crash Streamlit, redémarrage container, etc.).
+	reverse_proxy app:8501 {
+		health_uri      /_stcore/health
+		health_interval 10s
+		health_timeout  5s
+	}
+}
