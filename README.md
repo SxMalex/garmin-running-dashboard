@@ -77,10 +77,12 @@ utilisateur**. Quelques points à connaître avant de l'installer :
 - **Ton mot de passe Garmin est stocké en clair** dans le fichier `.env` (il n'est
   utilisé qu'au premier login : ensuite ce sont les tokens garth). Garde ce fichier
   hors de tout dépôt — il est dans `.gitignore`.
-- **L'application n'a aucune authentification propre.** Streamlit écoute sur
-  `0.0.0.0:8501`, donc toute machine de ton réseau local peut ouvrir le dashboard
-  et voir tes données. Pour une exposition sur Internet, passe par
-  `docker-compose.prod.yml` (Caddy + HTTPS) et ajoute une protection d'accès.
+- **L'application n'a aucune authentification propre** : quiconque atteint le port
+  voit tes données Garmin. C'est pourquoi la stack de dev publie le port sur
+  `127.0.0.1:8501` uniquement — le dashboard n'est joignable que **depuis la machine
+  qui le fait tourner**, pas depuis le reste du réseau local. Voir
+  [Accès depuis un autre appareil](#4-optionnel--accès-depuis-un-autre-appareil)
+  pour ouvrir cet accès en connaissance de cause.
 - **Chacun installe sa propre instance.** L'app est mono-utilisateur : elle ne sait
   pas gérer plusieurs comptes Garmin en parallèle.
 
@@ -127,7 +129,8 @@ ORS_API_KEY=ta_cle_ors
 docker compose up -d
 ```
 
-Streamlit démarre sur le port `8501` avec hot-reload.
+Streamlit démarre avec hot-reload sur **[http://localhost:8501](http://localhost:8501)**,
+accessible uniquement depuis cette machine.
 
 ### 3. Se connecter à Garmin
 
@@ -139,6 +142,32 @@ pour saisir le code reçu par email.
 Les tokens garth sont ensuite persistés dans `app/.garmin/` (dev) ou le volume
 `garmin_tokens` (prod) : les démarrages suivants se connectent **automatiquement**,
 sans mot de passe ni MFA, pendant environ un an.
+
+### 4. (Optionnel) Accès depuis un autre appareil
+
+Par défaut, `docker-compose.yml` publie le port sur la seule interface de loopback :
+
+```yaml
+ports:
+  - "127.0.0.1:8501:8501"   # local uniquement
+```
+
+Pour ouvrir le dashboard au **réseau local** (consulter depuis ton téléphone, par
+exemple), remplace cette ligne par `- "8501:8501"` et relance
+`docker compose up -d`. Mesure les conséquences avant : l'app n'ayant aucune
+authentification, **tout appareil du réseau** — y compris sur un wifi partagé,
+au bureau ou en coworking — pourra lire l'intégralité de tes données Garmin en
+ouvrant `http://<ip-de-la-machine>:8501`.
+
+> ⚠️ Un pare-feu ne suffit pas à corriger ça après coup : Docker insère ses
+> propres règles iptables et **contourne UFW**, donc un `ufw deny 8501` ne bloque
+> pas un port publié sur `0.0.0.0`. C'est bien l'adresse de publication qui
+> protège.
+
+Pour une exposition sur **Internet**, n'utilise pas cette stack : passe par
+`docker-compose.prod.yml` (Caddy + HTTPS, port 8501 non publié) et ajoute une
+protection d'accès — l'authentification basique de Caddy, un tunnel VPN
+(WireGuard, Tailscale) ou un proxy d'identité.
 
 ---
 
@@ -207,7 +236,7 @@ Pour se déconnecter : bouton **« Déconnexion »** dans la barre latérale
 
 ```
 gar/
-├── docker-compose.yml          # Stack dev (Streamlit avec hot-reload)
+├── docker-compose.yml          # Stack dev (hot-reload, port limité à 127.0.0.1)
 ├── docker-compose.prod.yml     # Stack prod (Caddy + Streamlit, volumes nommés)
 ├── Caddyfile                   # Reverse-proxy HTTPS + headers de sécurité
 ├── .env.example                # Template de configuration

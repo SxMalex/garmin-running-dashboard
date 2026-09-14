@@ -1,8 +1,19 @@
+# Stack de développement local.
+#
+# Le port est publié sur 127.0.0.1 uniquement : le dashboard n'est joignable que
+# depuis cette machine, jamais depuis le reste du réseau local. C'est important
+# car l'app n'a aucune authentification propre — quiconque atteint le port voit
+# les données Garmin. Ne pas remplacer par "8501:8501" (= 0.0.0.0, tout le LAN) ;
+# pour une exposition volontaire, passer par docker-compose.prod.yml (Caddy+HTTPS).
+#
+# `--server.address=0.0.0.0` (Dockerfile) reste correct : c'est l'écoute DANS le
+# conteneur, sans laquelle la redirection de port ne fonctionnerait pas.
+
 services:
   app:
     build: ./app
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"
     env_file: .env
     volumes:
       - ./app:/app

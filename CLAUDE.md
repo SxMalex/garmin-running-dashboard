@@ -33,13 +33,19 @@ les slots catégoriels ni réutiliser les couleurs status comme séries).
 ## Lancer le projet
 
 ```bash
-docker compose up            # dev local — Streamlit sur :8501
+docker compose up            # dev local — Streamlit sur 127.0.0.1:8501
 .venv/bin/python -m pytest tests/ -v   # tests (351), hors Docker
 .venv/bin/python test_connection.py    # test CLI de connexion Garmin
 ```
 
 Le venv local `.venv/` contient toutes les dépendances de `app/requirements.txt`
 + pytest. Le dossier `garmin_mcp/` est un serveur MCP indépendant du dashboard.
+
+**Publication du port** : `docker-compose.yml` publie sur `127.0.0.1:8501:8501`,
+jamais `8501:8501`. L'app n'a aucune authentification : un bind `0.0.0.0` expose
+les données Garmin à tout le réseau local, et Docker contourne UFW (le pare-feu
+ne rattraperait pas le coup). `--server.address=0.0.0.0` dans le Dockerfile est
+l'écoute *interne* au conteneur et doit rester telle quelle.
 
 ## Règles Streamlit
 
