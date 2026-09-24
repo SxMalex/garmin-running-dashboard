@@ -621,3 +621,116 @@ class TestRangeMethods:
         rows = client.get_resting_hr_range("2026-01-01", "2026-02-10")
         assert len(api.paths) == 2      # les deux fenêtres ont été tentées
         assert len(rows) == 1           # seule la seconde a produit des lignes
+
+
+# ---------------------------------------------------------------------------
+# Écriture : push / retrait de séances (calendrier Garmin)
+# ---------------------------------------------------------------------------
+
+class WriteApi(FakeApi):
+    def __init__(self, schedule_error=None, delete_error=None, library=None):
+        super().__init__()
+        self.schedule_error, self.delete_error = schedule_error, delete_error
+        self.library = dict(library or {})
+        self.deleted, self.unscheduled = [], []
+
+    def upload_workout(self, payload):
+        wid = 100 + len(self.library)
+        self.library[wid] = payload
+        return {"workoutId": wid}
+
+    def schedule_workout(self, workout_id, date_str):
+        if self.schedule_error:
+            raise self.schedule_error
+        return {"workoutScheduleId": 900 + workout_id}
+
+    def unschedule_workout(self, schedule_id):
+        self.unscheduled.append(schedule_id)
+
+    def delete_workout(self, workout_id):
+        if self.delete_error:
+            raise self.delete_error
+        self.deleted.append(workout_id)
+        self.library.pop(workout_id, None)
+
+    def get_workout_by_id(self, workout_id):
+        if workout_id not in self.library:
+            raise RuntimeError("API Error 404 - Not Found")
+        return self.library[workout_id]
+
+    def get_workouts(self, start=0, limit=100):
+        items = [{"workoutId": k, **v} for k, v in sorted(self.library.items())]
+        return items[start:start + limit]
+
+
+class TestPushWorkout:
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self, monkeypatch):
+        monkeypatch.setattr(gc, "API_COOLDOWN_S", 0)
+
+    def test_push_returns_ids(self):
+        client = GarminClient(api=WriteApi(), athlete_id=1)
+        ids = client.push_workout({"workoutName": "x [GD-a-]"}, "2026-10-01")
+        assert ids == {"workout_id": 100, "schedule_id": 1000}
+
+    def test_failed_schedule_rolls_back(self):
+        api = WriteApi(schedule_error=RuntimeError("API Error 429"))
+        client = GarminClient(api=api, athlete_id=1)
+        with pytest.raises(RuntimeError):
+            client.push_workout({"workoutName": "x"}, "2026-10-01")
+        assert api.library == {} and api.deleted == [100]
+
+    def test_remove_tolerates_real_404_only(self):
+        api = WriteApi(library={5: {"workoutName": "a [GD-p-]"}},
+                       delete_error=RuntimeError("API Error 404 - gone"))
+        assert GarminClient(api=api, athlete_id=1).remove_workout(5, 9) is True
+        api.delete_error = RuntimeError("API Error 500 - /workout/9404 failed")
+        with pytest.raises(RuntimeError):
+            GarminClient(api=api, athlete_id=1).remove_workout(5, 9)
+
+    def test_remove_checks_tag(self):
+        api = WriteApi(library={5: {"workoutName": "Séance du club"}})
+        client = GarminClient(api=api, athlete_id=1)
+        assert client.remove_workout(5, 9, required_tag="[GD-p-") is False
+        assert api.deleted == [] and api.unscheduled == []
+
+    def test_remove_already_deleted_is_ok(self):
+        api = WriteApi()
+        assert GarminClient(api=api, athlete_id=1).remove_workout(5, None, required_tag="[GD-") is True
+
+    def test_list_workouts_paginates(self):
+        api = WriteApi(library={i: {"workoutName": f"w{i}"} for i in range(230)})
+        assert len(GarminClient(api=api, athlete_id=1).list_workouts(page_size=100)) == 230
+
+
+@pytest.mark.parametrize("exc,status", [
+    (RuntimeError("API Error 404 - Not Found"), 404),
+    (RuntimeError("HTTP 503 Service Unavailable"), 503),
+    (RuntimeError("500 error at /workout/9404"), None),
+])
+def test_http_status(exc, status):
+    assert gc._http_status(exc) == status
+
+
+def test_http_status_from_response_attribute():
+    class Resp:
+        status_code = 404
+    err = RuntimeError("boom")
+    err.response = Resp()
+    assert gc._http_status(err) == 404
+
+
+def test_training_plans_strict_bypasses_cache():
+    class PlansApi(FakeApi):
+        plans = {"trainingPlanList": []}
+
+        def get_training_plans(self):
+            self.calls += 1
+            return self.plans
+    api = PlansApi()
+    client = GarminClient(api=api, athlete_id=1)
+    client.get_training_plans()
+    client.get_training_plans()
+    assert api.calls == 1
+    client.get_training_plans(strict=True)
+    assert api.calls == 2

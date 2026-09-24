@@ -890,13 +890,17 @@ class GarminClient:
             logger.warning("Prédictions de course indisponibles : %s", e)
             return {}
 
-    def get_training_plans(self) -> dict:
+    def get_training_plans(self, strict: bool = False) -> dict:
         """
         Plans d'entraînement Garmin du compte (Garmin Run Coach compris), bruts.
-        Retourne {} si l'endpoint n'est pas disponible.
+        Retourne {} si l'endpoint n'est pas disponible — sauf `strict=True`
+        qui relève l'erreur : une garde « pas de plan Garmin actif » ne doit
+        pas confondre « aucun plan » et « Garmin n'a pas répondu ».
         """
         cache_key = "training_plans"
-        cached = _cache_get(self.athlete_id, cache_key)
+        # strict = garde avant une ÉCRITURE : lecture fraîche, un plan Run Coach
+        # démarré depuis moins d'une heure doit être vu.
+        cached = None if strict else _cache_get(self.athlete_id, cache_key)
         if cached is not None:
             return cached
         try:
@@ -905,6 +909,8 @@ class GarminClient:
             time.sleep(API_COOLDOWN_S)
             return data
         except Exception as e:
+            if strict:
+                raise
             logger.warning("Plans d'entraînement indisponibles : %s", e)
             return {}
 
@@ -1092,6 +1098,127 @@ class GarminClient:
         )
 
     # ------------------------------------------------------------------
+    # Écriture : séances du plan dans le calendrier Garmin
+    # ------------------------------------------------------------------
+
+    def push_workout(self, payload: dict, date_str: str) -> dict:
+        """
+        Crée la séance puis la planifie. Si la planification échoue, la séance
+        créée est supprimée (pas d'orpheline dans la bibliothèque) et l'erreur
+        est relevée. Retourne {"workout_id", "schedule_id"}.
+        """
+        created = self.api.upload_workout(payload) or {}
+        workout_id = created.get("workoutId")
+        if not workout_id:
+            raise RuntimeError(f"Garmin n'a pas renvoyé d'identifiant de séance : {created}")
+        try:
+            scheduled = self.api.schedule_workout(workout_id, date_str) or {}
+        except Exception:
+            try:
+                self.api.delete_workout(workout_id)
+            except Exception as cleanup:
+                logger.warning("Séance %s orpheline (suppression impossible) : %s",
+                               workout_id, cleanup)
+            raise
+        schedule_id = (scheduled.get("workoutScheduleId") or scheduled.get("scheduleId")
+                       or scheduled.get("id"))
+        time.sleep(API_COOLDOWN_S)
+        return {"workout_id": int(workout_id),
+                "schedule_id": int(schedule_id) if schedule_id else None}
+
+    def remove_workout(self, workout_id: int, schedule_id: Optional[int] = None,
+                       required_tag: Optional[str] = None) -> bool:
+        """
+        Retire une séance poussée : déplanifie puis supprime le modèle. Une
+        séance déjà supprimée côté Garmin (404) n'est pas une erreur.
+
+        `required_tag` : la séance n'est supprimée que si son nom le contient
+        (étiquette du dashboard) — garde-fou contre un journal corrompu qui
+        pointerait vers une séance de l'utilisateur. Retourne False si refusé.
+        """
+        if required_tag:
+            try:
+                current = self.api.get_workout_by_id(workout_id) or {}
+            except Exception as e:
+                if _http_status(e) != 404:
+                    raise
+                current = None  # déjà supprimée
+            if current is not None and required_tag not in (current.get("workoutName") or ""):
+                logger.warning("Séance %s non retirée : étiquette %s absente", workout_id, required_tag)
+                return False
+        for call, arg in ((self.api.unschedule_workout, schedule_id),
+                          (self.api.delete_workout, workout_id)):
+            if not arg:
+                continue
+            try:
+                call(arg)
+            except Exception as e:
+                if _http_status(e) != 404:
+                    raise
+        time.sleep(API_COOLDOWN_S)
+        return True
+
+    def find_schedule(self, workout_id: int, date_str: str) -> Optional[int]:
+        """
+        Identifiant de planification de `workout_id` au `date_str`, ou None s'il
+        n'est pas au calendrier. Le format de `get_scheduled_workouts` n'est pas
+        documenté : on cherche récursivement une entrée qui porte ce workoutId
+        et cette date.
+        """
+        y, m, _ = date_str.split("-")
+        data = self.api.get_scheduled_workouts(int(y), int(m)) or {}
+
+        def walk(node):
+            if isinstance(node, dict):
+                wid = node.get("workoutId") or (node.get("workout") or {}).get("workoutId")
+                day = str(node.get("date") or node.get("calendarDate")
+                          or node.get("scheduledDate") or "")[:10]
+                if wid and int(wid) == int(workout_id) and day == date_str:
+                    return node.get("workoutScheduleId") or node.get("scheduleId") or node.get("id")
+                for value in node.values():
+                    found = walk(value)
+                    if found:
+                        return found
+            elif isinstance(node, list):
+                for value in node:
+                    found = walk(value)
+                    if found:
+                        return found
+            return None
+
+        found = walk(data)
+        return int(found) if found else None
+
+    def ensure_scheduled(self, workout_id: int, date_str: str) -> Optional[int]:
+        """
+        Réconciliation : une séance retrouvée dans la bibliothèque n'est pas
+        forcément au calendrier (création réussie mais réponse perdue, puis
+        planification jamais faite). La planifie si besoin, retourne l'id.
+        """
+        existing = self.find_schedule(workout_id, date_str)
+        if existing:
+            return existing
+        scheduled = self.api.schedule_workout(workout_id, date_str) or {}
+        time.sleep(API_COOLDOWN_S)
+        sid = (scheduled.get("workoutScheduleId") or scheduled.get("scheduleId")
+               or scheduled.get("id"))
+        return int(sid) if sid else None
+
+    def list_workouts(self, page_size: int = 100, max_items: int = 2000) -> list[dict]:
+        """Bibliothèque de séances complète, paginée (non cachée : réconciliation)."""
+        out: list[dict] = []
+        start = 0
+        while start < max_items:
+            page = self.api.get_workouts(start, page_size) or []
+            if not isinstance(page, list) or not page:
+                break
+            out.extend(page)
+            if len(page) < page_size:
+                break
+            start += page_size
+        return out
+
+    # ------------------------------------------------------------------
     # Cache
     # ------------------------------------------------------------------
 
@@ -1113,6 +1240,22 @@ class GarminClient:
             else:
                 child.unlink(missing_ok=True)
         logger.info("Cache invalidé pour l'athlète %s.", self.athlete_id)
+
+
+def _http_status(exc: BaseException) -> Optional[int]:
+    """
+    Code HTTP d'une erreur garminconnect : attribut `status_code` /
+    `response.status_code`, sinon motif « API Error NNN » / « HTTP NNN » en
+    tête du message — jamais un « 404 » trouvé n'importe où (une URL
+    `/workout/9404` dans une erreur 500 n'est pas un 404).
+    """
+    for obj in (exc, getattr(exc, "response", None)):
+        status = getattr(obj, "status_code", None)
+        if isinstance(status, int):
+            return status
+    import re
+    match = re.search(r"\b(?:API Error|HTTP)\s+(\d{3})\b", str(exc))
+    return int(match.group(1)) if match else None
 
 
 def _sweep_streams(folder: Path) -> None:

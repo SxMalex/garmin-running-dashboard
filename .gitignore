@@ -6,6 +6,7 @@ app/.garmin/
 
 # Caches
 app/.cache/
+app/.data/
 __pycache__/
 *.pyc
 .pytest_cache/

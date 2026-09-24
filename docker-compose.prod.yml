@@ -26,6 +26,9 @@ services:
     volumes:
       - app_cache:/app/.cache
       - garmin_tokens:/app/.garmin
+      # Objectif, plan validé et journal des séances poussées : à conserver
+      # entre deux rebuilds (sinon « retirer du calendrier » perd sa mémoire).
+      - app_data:/app/.data
     expose:
       - "8501"
     networks:
@@ -67,6 +70,7 @@ networks:
 
 volumes:
   app_cache:
+  app_data:
   garmin_tokens:
   caddy_data:
   caddy_config:

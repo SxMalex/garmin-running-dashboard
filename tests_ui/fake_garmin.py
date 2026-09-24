@@ -169,7 +169,55 @@ class FakeGarmin:
                                "lastNightAvg": 55, "weeklyAvg": 54}}
 
     def get_training_plans(self, *args, **kwargs):
-        return {"trainingPlanList": []}
+        if getattr(self, "plans_error", None):
+            raise self.plans_error
+        return {"trainingPlanList": list(getattr(self, "plans", []))}
+
+    # -- écriture (calendrier) ---------------------------------------------------
+    def _library(self):
+        if not hasattr(self, "workouts"):
+            self.workouts, self.scheduled, self._next_id = {}, {}, 5000
+        return self.workouts
+
+    def upload_workout(self, payload):
+        self._library()
+        self._next_id += 1
+        self.workouts[self._next_id] = payload
+        self.calls.append("upload_workout")
+        return {"workoutId": self._next_id, "workoutName": payload["workoutName"]}
+
+    def schedule_workout(self, workout_id, date_str):
+        self._library()
+        if getattr(self, "schedule_error", None):
+            raise self.schedule_error
+        self._next_id += 1
+        self.scheduled[self._next_id] = (workout_id, date_str)
+        self.calls.append("schedule_workout")
+        return {"workoutScheduleId": self._next_id}
+
+    def unschedule_workout(self, schedule_id):
+        self._library().pop(None, None)
+        self.scheduled.pop(int(schedule_id), None)
+
+    def delete_workout(self, workout_id):
+        self._library().pop(int(workout_id), None)
+
+    def get_workouts(self, start=0, limit=100):
+        items = [{"workoutId": k, **v} for k, v in self._library().items()]
+        return items[start:start + limit]
+
+    def get_scheduled_workouts(self, year, month):
+        self._library()
+        items = [{"workoutScheduleId": sid, "date": day, "workout": {"workoutId": wid}}
+                 for sid, (wid, day) in self.scheduled.items()
+                 if day.startswith(f"{int(year):04d}-{int(month):02d}")]
+        return {"calendarItems": items}
+
+    def get_workout_by_id(self, workout_id):
+        lib = self._library()
+        if int(workout_id) not in lib:
+            raise RuntimeError("API Error 404 - Not Found")
+        return {"workoutId": int(workout_id), **lib[int(workout_id)]}
 
     def get_race_predictions(self, *args, **kwargs):
         return {}

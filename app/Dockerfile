@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Créer les répertoires de cache et de tokens, et un utilisateur non-root
-RUN mkdir -p /app/.cache /app/.garmin && \
+RUN mkdir -p /app/.cache /app/.garmin /app/.data && \
     useradd -m appuser && \
     chown -R appuser /app
 
