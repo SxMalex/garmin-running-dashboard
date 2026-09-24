@@ -1,3 +1,7 @@
 garminconnect>=0.3.3
 python-dotenv>=1.0.0
-mcp[cli]>=1.27.0
+# mcp 2.x a renommé FastMCP (MCPServer) : server.py est écrit pour l'API 1.x.
+mcp[cli]>=1.27.0,<2
+# Logique de app/ réutilisée par les outils « raisonnement » (garmin_mcp/insights.py)
+pandas==2.2.3
+numpy==2.1.3

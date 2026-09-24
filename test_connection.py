@@ -26,7 +26,9 @@ def main() -> int:
 
     email = os.environ.get("GARMIN_EMAIL")
     password = os.environ.get("GARMIN_PASSWORD")
-    tokenstore = os.environ.get("GARMIN_TOKENSTORE", DEFAULT_TOKENSTORE)
+    # Amorce la session du SERVEUR MCP : son tokenstore est distinct de celui du
+    # dashboard (deux processus sur un même jeton se l'invalideraient).
+    tokenstore = os.environ.get("GARMIN_TOKENSTORE_MCP") or DEFAULT_TOKENSTORE
 
     if not email or not password:
         print(

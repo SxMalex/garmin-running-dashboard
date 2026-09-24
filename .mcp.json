@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "garmin": {
+      "command": "uv",
+      "args": ["run", "--no-project", "--with-requirements", "requirements.txt",
+               "python", "garmin_mcp/server.py"]
+    }
+  }
+}
