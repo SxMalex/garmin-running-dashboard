@@ -71,7 +71,9 @@ MIN_WEEK_KM = 12.0
 PACE_ZONES = {
     "easy": (1.17, 1.28),
     "long": (1.15, 1.25),
-    "tempo": (1.03, 1.06),
+    # Seuil : entre l'allure 10 km et l'allure semi (≈ 1,046 × par Riegel) —
+    # au-delà de 1,04 la « séance seuil » serait plus lente que l'allure semi.
+    "tempo": (1.01, 1.04),
     "interval": (0.95, 0.97),
     "strides": (0.88, 0.92),
 }

@@ -389,3 +389,11 @@ def test_floor_jump_warned():
     df = history(weeks=4, km=0.5, runs_per_week=1)
     plan = plan_for(df=df, distance="Semi-marathon")
     assert any("minimum du plan" in w for w in plan["warnings"])
+
+
+def test_threshold_faster_than_half_marathon_pace():
+    """Vu à l'écran : un « seuil » plus lent que l'allure semi n'est pas un seuil."""
+    from race_plan_logic import PACE_ZONES, RIEGEL_EXPONENT
+    half_ratio = (21.0975 / 10) ** RIEGEL_EXPONENT / (21.0975 / 10)
+    assert PACE_ZONES["tempo"][1] < half_ratio
+    assert PACE_ZONES["tempo"][0] > PACE_ZONES["interval"][1]
