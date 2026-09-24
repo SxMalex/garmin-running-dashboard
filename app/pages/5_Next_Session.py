@@ -531,12 +531,12 @@ if route:
     r1.metric(
         "Distance réelle", f"{route['distance_km']} km",
         delta=f"{dist_delta:+.1f} km vs objectif",
-        delta_color="off",
+        delta_color="off", delta_arrow="off",
     )
     r2.metric(
         "D+ réel", f"{route['ascent_m']} m",
         delta=f"{elev_delta:+.0f} m vs objectif",
-        delta_color="off",
+        delta_color="off", delta_arrow="off",
     )
     r3.metric("Durée estimée", f"{duration_real} min")
 

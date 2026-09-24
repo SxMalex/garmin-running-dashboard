@@ -170,7 +170,7 @@ c2.metric(
     "💓 HRV nuit",
     f"{int(hrv_last)} ms" if hrv_last else "—",
     delta=(hrv_status or "").capitalize() or None,
-    delta_color="off",
+    delta_color="off", delta_arrow="off",
     help=_baseline_str or "Variabilité de la fréquence cardiaque pendant le sommeil",
 )
 
@@ -178,7 +178,7 @@ c3.metric(
     "😴 Sommeil",
     _fmt_hm(sleep_sec),
     delta=f"Score {sleep_score}" if sleep_score is not None else None,
-    delta_color="off",
+    delta_color="off", delta_arrow="off",
 )
 
 bb_high = daily.get("bodyBatteryHighestValue")
@@ -187,7 +187,7 @@ c4.metric(
     "🔋 Body Battery",
     f"{int(bb_high)}" if bb_high is not None else "—",
     delta=f"min {int(bb_low)}" if bb_low is not None else None,
-    delta_color="off",
+    delta_color="off", delta_arrow="off",
 )
 
 rhr = daily.get("restingHeartRate")
@@ -209,7 +209,7 @@ if is_pro() and not df.empty:
                        "vigilance": "Vigilance", "risque": "Hausse brutale"}
         r1, r2, r3, r4 = st.columns(4)
         r1.metric("ACWR 7/28 j", f"{risk['acwr']:.2f}" if risk["acwr"] is not None else "—",
-                  delta=_zone_label.get(risk["acwr_zone"]), delta_color="off",
+                  delta=_zone_label.get(risk["acwr_zone"]), delta_color="off", delta_arrow="off",
                   help=help_text("acwr") + " Zones Gabbett 2016 ; indicateur discuté (Impellizzeri 2020).")
         r2.metric("Monotonie 7 j", f"{risk['monotony']:.2f}" if risk["monotony"] is not None else "—",
                   delta="élevée" if risk["monotony_high"] else None, delta_color="inverse",

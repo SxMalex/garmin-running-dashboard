@@ -23,6 +23,8 @@ services:
       # Le dashboard ne lit jamais le mot de passe : il n'a rien à faire dans
       # l'environnement d'un conteneur exposé (docker inspect, /proc/1/environ).
       GARMIN_PASSWORD: ""
+      # « Aujourd'hui » dans le fuseau de l'athlète (le conteneur est en UTC).
+      TZ: ${TZ:-Europe/Paris}
     volumes:
       - app_cache:/app/.cache
       - garmin_tokens:/app/.garmin

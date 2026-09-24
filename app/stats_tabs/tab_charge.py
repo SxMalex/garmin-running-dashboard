@@ -107,7 +107,7 @@ def render(activities_df: pd.DataFrame, cutoff: datetime) -> None:
     m4.metric(
         "TSS aujourd'hui", f"{last['tss']:.0f}",
         delta=f"dont {_cross_today:.0f} hors course" if _cross_today else None,
-        delta_color="off",
+        delta_color="off", delta_arrow="off",
         help="Training Stress Score du jour, course et autres sports confondus",
     )
 

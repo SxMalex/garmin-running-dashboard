@@ -101,7 +101,7 @@ if predictions or riegel:
                     label=f"{_ICONS[label]} {label}",
                     value=fmt_race_time(garmin_sec),
                     delta=fmt_race_pace(garmin_sec, dist_km),
-                    delta_color="off",
+                    delta_color="off", delta_arrow="off",
                 )
                 if riegel_sec:
                     st.caption(f"Riegel : {fmt_race_time(riegel_sec)}")
@@ -110,7 +110,7 @@ if predictions or riegel:
                     label=f"{_ICONS[label]} {label}",
                     value=fmt_race_time(riegel_sec),
                     delta=fmt_race_pace(riegel_sec, dist_km),
-                    delta_color="off",
+                    delta_color="off", delta_arrow="off",
                 )
                 st.caption("Estimation Riegel")
     st.caption(
@@ -186,7 +186,7 @@ if not vo2.empty:
     v1, v2 = st.columns([1, 4])
     current = vo2.iloc[-1]["vo2max"]
     best = vo2["vo2max"].max()
-    v1.metric("Actuel", f"{current:.0f}", delta=f"max {best:.0f}", delta_color="off")
+    v1.metric("Actuel", f"{current:.0f}", delta=f"max {best:.0f}", delta_color="off", delta_arrow="off")
     with v2:
         fig_vo2 = go.Figure(go.Scatter(
             x=vo2["startTimeLocal"], y=vo2["vo2max"],
@@ -229,7 +229,7 @@ else:
         for i, pr in enumerate(group_rows):
             with cols[i % len(cols)]:
                 st.metric(pr["label"], pr["value_str"],
-                          delta=pr["date_str"] or None, delta_color="off")
+                          delta=pr["date_str"] or None, delta_color="off", delta_arrow="off")
                 if pr["activity_name"]:
                     st.caption(pr["activity_name"])
 

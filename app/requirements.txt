@@ -1,4 +1,6 @@
-streamlit>=1.42.0,<2.0.0
+# ≥ 1.52 : width="stretch" (1.44+), polices de config.toml (theme.fontFaces),
+# st.metric(delta_arrow=...) (1.52)
+streamlit>=1.52.0,<2.0.0
 pandas==2.2.3
 plotly==5.24.1
 requests==2.32.3

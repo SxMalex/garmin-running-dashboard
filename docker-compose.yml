@@ -20,6 +20,8 @@ services:
       # ici parce que le port n'écoute que sur 127.0.0.1. Désactivé par défaut
       # ailleurs (prod) : une instance exposée ne doit pas pouvoir écrire.
       GARMIN_WRITE_ENABLED: "true"
+      # « Aujourd'hui » (titre, séance du jour) dans le fuseau de l'athlète, pas en UTC.
+      TZ: ${TZ:-Europe/Paris}
     volumes:
       - ./app:/app
     restart: unless-stopped

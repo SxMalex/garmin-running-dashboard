@@ -30,7 +30,8 @@ def _validated(logged_in):
 def test_plan_rendered_with_why(logged_in, goal):
     at = logged_in(PAGE).run()
     assert not at.exception, [e.value for e in at.exception]
-    assert {m.label for m in at.metric} >= {"Semaines", "Volume", "Temps estimé"}
+    labels = " | ".join(m.label for m in at.metric)
+    assert all(k in labels for k in ("Semaines", "Volume", "Temps estimé", "Allure course"))
     assert any(c.value.startswith("Pourquoi :") for c in at.caption)
     assert any("Renfo" in m.value for m in at.markdown)
 

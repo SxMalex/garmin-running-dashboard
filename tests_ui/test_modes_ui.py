@@ -15,7 +15,7 @@ def test_every_page_in_both_modes(logged_in, name, mode):
 
 
 def _explains(at):
-    return [e for e in at.expander if e.label.startswith("💡 C'est quoi")]
+    return [e for e in at.expander if e.label.startswith("💡 ") and "c'est quoi" in e.label]
 
 
 def test_light_explains_pro_does_not(logged_in):

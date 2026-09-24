@@ -11,6 +11,7 @@ import chart_theme  # active le template Plotly gar_dark
 from coach_logic import load_coach_context
 from formatting import map_zoom
 from ui_mode import render_mode_toggle
+from ui_theme import inject_theme
 from garmin_client import (
     ACTIVITY_HISTORY_LIMIT,
     GarminClient,
@@ -65,6 +66,7 @@ def require_login() -> None:
         # Bascule Light/Pro rendue sur CHAQUE page (toutes passent par ici) :
         # un widget absent d'une page perdrait son état.
         render_mode_toggle()
+        inject_theme()
         return
     st.title("🔒 Connexion requise")
     st.warning(

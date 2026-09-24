@@ -37,6 +37,7 @@ from ui_helpers import (
     require_login,
 )
 from ui_mode import decoupling_params, explain, lock_params
+from ui_theme import bib
 from workout_export import (
     TAG_PREFIX,
     coach_state,
@@ -146,17 +147,19 @@ for key, value in _defaults.items():
 if st.session_state["goal_date"] < TODAY + timedelta(days=1):
     st.session_state["goal_date"] = TODAY + timedelta(days=1)
 
-with st.form("goal_form"):
-    c1, c2, c3 = st.columns([2, 2, 2])
-    c1.selectbox("Distance", list(DISTANCES), key="goal_distance")
-    c2.date_input("Date de la course", key="goal_date", min_value=TODAY + timedelta(days=1),
-                  format="DD/MM/YYYY")
-    c3.text_input("Temps visé (optionnel)", key="goal_target", placeholder="ex. 1:55:00")
-    c4, c5, c6 = st.columns([2, 2, 2])
-    c4.slider("Sorties par semaine", 3, 6, step=1, key="goal_runs")
-    c5.selectbox("Jour de la sortie longue", WEEKDAYS, key="goal_long_day")
-    c6.checkbox("Inclure le renforcement musculaire", key="goal_strength")
-    submitted = st.form_submit_button("💾 Enregistrer l'objectif", width="stretch")
+# Une fois l'objectif posé, le plan passe devant : le formulaire se replie.
+with st.expander("✏️ Modifier l'objectif" if goal else "🎯 Ta course", expanded=not goal):
+    with st.form("goal_form"):
+        c1, c2, c3 = st.columns([2, 2, 2])
+        c1.selectbox("Distance", list(DISTANCES), key="goal_distance")
+        c2.date_input("Date de la course", key="goal_date", min_value=TODAY + timedelta(days=1),
+                      format="DD/MM/YYYY")
+        c3.text_input("Temps visé (optionnel)", key="goal_target", placeholder="ex. 1:55:00")
+        c4, c5, c6 = st.columns([2, 2, 2])
+        c4.slider("Sorties par semaine", 3, 6, step=1, key="goal_runs")
+        c5.selectbox("Jour de la sortie longue", WEEKDAYS, key="goal_long_day")
+        c6.checkbox("Inclure le renforcement musculaire", key="goal_strength")
+        submitted = st.form_submit_button("💾 Enregistrer l'objectif", width="stretch")
 
 if submitted:
     target_text = st.session_state["goal_target"].strip()
@@ -223,22 +226,38 @@ plan = frozen or live_plan
 sessions = plan_sessions(plan)
 summary = plan["summary"]
 
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Semaines", summary["n_weeks"], delta=f"J-{(race_date - TODAY).days}", delta_color="off")
-k2.metric("Volume", f"{summary['start_km']:.0f} → {summary['peak_km']:.0f} km/sem")
+st.markdown(f"#### {goal['distance']} le {race_date.strftime('%d/%m/%Y')} — "
+            f"dans {(race_date - TODAY).days} jours")
+k1, k2, k3, k4 = st.container(key="lanes-goal").columns(4)
+k1.metric("📆 Semaines", summary["n_weeks"])
+k2.metric("📈 Volume de pointe", f"{summary['peak_km']:.0f} km/sem",
+          delta=f"départ {summary['start_km']:.0f} km", delta_color="off", delta_arrow="off")
 _SOURCE_TEXT = {
     "race": "D'après ta dernière compétition (formule de Riegel).",
     "prediction": "D'après les prédictions Garmin, majorées de 3 % (elles sont réputées optimistes).",
     "training": "D'après tes entraînements récents : probablement trop prudent.",
     "default": "Valeur par défaut, faute de données.",
 }
-k3.metric("Temps estimé", fmt_race_time(summary["predicted_time_s"]),
+k3.metric("⏱️ Temps estimé", fmt_race_time(summary["predicted_time_s"]),
           help=_SOURCE_TEXT.get(summary.get("pace_source"), ""))
-k4.metric("Allure course", f"{int(summary['race_pace_sec'] // 60)}:{int(summary['race_pace_sec'] % 60):02d}/km",
+k4.metric("🎯 Allure course", f"{int(summary['race_pace_sec'] // 60)}:{int(summary['race_pace_sec'] % 60):02d}/km",
           delta=("objectif " + fmt_race_time(summary["target_time_s"])) if summary.get("target_time_s") else None,
-          delta_color="off")
+          delta_color="off", delta_arrow="off")
 for w in plan["warnings"]:
     st.info(w)
+
+# Prochaine séance du plan, sur le dossard (même pièce forte que l'Accueil)
+_next = next((x for x in sessions if date.fromisoformat(x["date"]) >= TODAY), None)
+if _next:
+    _day = date.fromisoformat(_next["date"])
+    _is_run = _next["kind"] not in ("strength",)
+    bib(band_text=f"Prochaine séance · {PHASE_LABELS.get(_next['phase'], '')}",
+        band_color=PHASE_COLORS.get(_next["phase"]),
+        number=f"{_next['distance_km']:g}" if _is_run else str(_next["duration_min"]),
+        unit="km" if _is_run else "min", title=_next["title"], target=_next.get("target", ""),
+        when=("Aujourd'hui" if _day == TODAY else f"{WEEKDAYS[_day.weekday()]} {_day.strftime('%d/%m')}"),
+        why=_next.get("why", ""), aria_label="Prochaine séance du plan")
+    st.write("")
 
 # Volume hebdomadaire par phase
 fig = go.Figure()
@@ -254,6 +273,11 @@ for phase in PHASE_COLORS:
         customdata=part[["week"]].to_numpy(),
         hovertemplate="Semaine %{customdata[0]} · %{y:.0f} km<extra>" + PHASE_LABELS[phase] + "</extra>",
     ))
+_race_week = next((w["start"] for w in plan["weeks"]
+                   if any(x["kind"] == "race" for x in w["sessions"])), None)
+if _race_week:
+    fig.add_annotation(x=_race_week, y=0, yshift=-2, text="🏁", showarrow=False,
+                       yanchor="top", font=dict(size=16))
 fig.update_layout(height=240, barmode="overlay", yaxis=dict(title="km / semaine"),
                   legend=dict(orientation="h", y=1.15), margin=dict(l=0, r=0, t=30, b=0))
 st.plotly_chart(fig)

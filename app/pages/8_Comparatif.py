@@ -256,7 +256,7 @@ def _render_snapshot(
     if not any(char in "123456789" for char in delta_text):
         container.metric(
             label, fmt(current),
-            delta=f"stable vs {reference_year}", delta_color="off", help=help_text,
+            delta=f"stable vs {reference_year}", delta_color="off", delta_arrow="off", help=help_text,
         )
         return
     # Le signe moins doit rester un tiret ASCII : Streamlit déduit le sens du

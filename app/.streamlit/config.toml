@@ -14,6 +14,9 @@ port = 8501
 address = "0.0.0.0"
 enableXsrfProtection = true
 enableCORS = true
+# Sert app/static/ (polices embarquées) : aucune police chargée depuis un CDN,
+# donc aucune requête vers un tiers à l'ouverture du dashboard.
+enableStaticServing = true
 
 [browser]
 gatherUsageStats = false
@@ -26,3 +29,16 @@ primaryColor = "#3987e5"
 backgroundColor = "#0e1117"
 secondaryBackgroundColor = "#161a23"
 textColor = "#e6e8ee"
+# Condensée athlétique (chronos, dossards) pour titres et chiffres ; le texte
+# courant garde la police Streamlit. Licence OFL : app/static/fonts/OFL.txt.
+headingFont = "Barlow Condensed"
+
+[[theme.fontFaces]]
+family = "Barlow Condensed"
+url = "app/static/fonts/BarlowCondensed-SemiBold.ttf"
+weight = 600
+
+[[theme.fontFaces]]
+family = "Barlow Condensed"
+url = "app/static/fonts/BarlowCondensed-Bold.ttf"
+weight = 700

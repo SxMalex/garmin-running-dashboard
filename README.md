@@ -258,7 +258,7 @@ Pour se déconnecter : bouton **« Déconnexion »** dans la barre latérale
 | `GARMIN_WRITE_ENABLED` | `false` (`true` dans `docker-compose.yml`) | Autorise l'envoi de séances dans le calendrier Garmin (page Objectif). Activé en dev car le port n'écoute que sur 127.0.0.1 ; à n'activer en prod que derrière l'authentification |
 | `DATA_DIR` | `/app/.data` (Docker) ou `~/.local/share/garmin-dashboard` | Objectif, plan validé et journal des séances envoyées (à sauvegarder : volume `app_data` en prod) |
 | `GARMIN_TOKENSTORE_MCP` | `~/.garminconnect` | Tokens du serveur MCP (volontairement distincts de ceux du dashboard) |
-| `TZ` | fuseau du conteneur (UTC) | Fuseau utilisé pour « aujourd'hui » (ex. `Europe/Paris`) |
+| `TZ` | `Europe/Paris` (compose) | Fuseau de « aujourd'hui » (titre, séance du jour) ; le conteneur serait sinon en UTC |
 
 ---
 

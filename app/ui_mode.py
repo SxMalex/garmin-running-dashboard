@@ -109,7 +109,7 @@ def explain(key: str, *, expanded: bool = False) -> None:
     if is_pro():
         return
     t = term(key)
-    with st.expander(f"💡 C'est quoi, {t['label'].lower()} ?", expanded=expanded):
+    with st.expander(f"💡 {t['label']} : c'est quoi ?", expanded=expanded):
         st.write(t["light"])
         if t.get("source"):
             st.caption(f"📚 {t['source']}")

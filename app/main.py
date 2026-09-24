@@ -22,7 +22,8 @@ from coach_logic import (
 from formatting import weekday_fr
 from forme_logic import compute_forme_verdict, parse_recovery
 from next_session_logic import SESSION_TYPES, compute_tsb, todays_session
-from ui_mode import explain, render_mode_toggle
+from ui_mode import explain, is_pro, render_mode_toggle
+from ui_theme import bib, freshness_gauge, inject_theme
 from ui_helpers import (
     cached_coach_context,
     cached_load_activities,
@@ -43,7 +44,8 @@ st.set_page_config(
     page_title="Running Dashboard",
     page_icon="🏃",
     layout="wide",
-    initial_sidebar_state="expanded",
+    # "auto" : ouverte sur ordinateur, repliée sur téléphone (sinon elle couvre la page).
+    initial_sidebar_state="auto",
     menu_items={
         "Get Help": None,
         "Report a bug": None,
@@ -157,6 +159,7 @@ def load_streams(athlete_id: int, activity_id: int) -> dict:
 # Barre latérale
 # ---------------------------------------------------------------------------
 render_mode_toggle()
+inject_theme()
 
 with st.sidebar:
     st.markdown("## ⚙️ Paramètres")
@@ -182,12 +185,14 @@ df, error = cached_load_activities(_athlete_id)
 # ---------------------------------------------------------------------------
 # En-tête principal
 # ---------------------------------------------------------------------------
-st.title("🏃 Running Dashboard")
+# Un cockpit du matin : la date du jour est le titre.
+_MONTHS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août",
+           "septembre", "octobre", "novembre", "décembre"]
+_today_date = date.today()
+st.title(f"{weekday_fr(_today_date).capitalize()} {_today_date.day} {_MONTHS[_today_date.month - 1]}")
 _name = load_full_name(_athlete_id)
-st.caption(
-    "Analyse de tes performances de course — Données Garmin Connect"
-    + (f" · {_name}" if _name else "")
-)
+_first = (_name.split() or [""])[0] if _name else ""
+st.caption((f"Bonjour {_first} — " if _first else "") + "ta journée d'entraînement")
 
 # ---------------------------------------------------------------------------
 # Gestion des erreurs Garmin
@@ -225,15 +230,10 @@ running_df = df[df["activityType"] == "running"]
 client = get_garmin_client()
 
 # ---------------------------------------------------------------------------
-# Aujourd'hui — sommeil, HRV, Body Battery, FC repos + verdict de forme
+# Aujourd'hui : le dossard de la séance du jour + la jauge de fraîcheur
 # ---------------------------------------------------------------------------
-st.subheader("🌅 Aujourd'hui")
-
 today = load_today(_athlete_id, date.today().isoformat())
-sleep_dto = today["sleep_dto"]
-hrv_summary = today["hrv_summary"]
 daily = today["daily"]
-
 sleep_sec = today["sleep_sec"]
 sleep_score = today["sleep_score"]
 hrv_status = today["hrv_status"]
@@ -241,113 +241,101 @@ hrv_last = today["hrv_last"]
 
 # Toutes les activités, pas seulement la course : le wing, le vélo ou la
 # muscu fatiguent aussi (cf. compute_pmc_series).
-_, _, tsb = compute_tsb(df) if not df.empty else (0.0, 0.0, None)
+ctl, atl, tsb = compute_tsb(df) if not df.empty else (0.0, 0.0, None)
 verdict = compute_forme_verdict(tsb, hrv_status, sleep_score)
 
-t1, t2, t3, t4, t5 = st.columns(5)
+rec = _coach = _today_session = None
+if len(running_df) >= 3:
+    # Même chaîne que la page Prochaine sortie : plan Garmin d'abord, logique
+    # interne en repli, modulée par la récupération du jour.
+    _coach = cached_coach_context(_athlete_id)
+    _today_session = todays_session(df, hrv_status, sleep_score, _coach)
+    rec = _today_session["rec"]
 
+hero_bib, hero_gauge = st.columns([3, 2], gap="large")
+with hero_bib:
+    band = verdict["label"]   # la couleur de la bande porte déjà l'état
+    if rec is None:
+        bib(band_text=band, band_level=verdict["level"], number="—", unit="",
+            title="Pas encore de séance suggérée",
+            why="Il faut au moins 3 courses dans l'historique pour proposer une séance.")
+    else:
+        s = SESSION_TYPES[rec["session_key"]]
+        _task = rec.get("coach_task")
+        if _task:
+            _when = ("Aujourd'hui" if _task["date"] == date.today()
+                     else weekday_fr(_task["date"]).capitalize() + _task["date"].strftime(" %d/%m"))
+            _plan_bits = [_coach["plan"]["name"]]
+            if _coach["phase"]:
+                _plan_bits.append(f"phase {_coach['phase']['label']}")
+            if _coach["days_to_event"] is not None:
+                _plan_bits.append(f"J−{_coach['days_to_event']}")
+            # duration_min vaut 0 quand Garmin ne fournit pas la durée : la reco
+            # fusionnée porte la valeur de repli.
+            _dur = _task.get("duration_min") or rec.get("duration_min")
+            bib(band_text=band, band_level=verdict["level"],
+                number=str(_dur) if _dur else "—", unit="min" if _dur else "", title=_task["name"],
+                target=target_label(_task), when=f"{_when} — {', '.join(_plan_bits)}",
+                why=verdict["headline"])
+        else:
+            bib(band_text=band, band_level=verdict["level"],
+                number=f"{rec['target_dist_km']:g}", unit="km", title=s["label"],
+                target=f"à {rec['target_pace_str']}", when=rec["suggested_date_str"],
+                why=verdict["headline"])
+        if _today_session["alert"]:
+            st.warning(_today_session["alert"], icon="🛟")
+        st.page_link("pages/5_Next_Session.py", label="Parcours et export GPX", icon="🗺️")
+with hero_gauge:
+    st.markdown("#### Fraîcheur")
+    st.plotly_chart(freshness_gauge(tsb), config={"displayModeBar": False})
+    st.caption(f"TSB {tsb:+.0f} (forme {ctl:.0f} − fatigue {atl:.0f}). Sous −20 : lève "
+               "le pied ; au-dessus de +5 : frais pour une course." if tsb is not None
+               else "Pas assez d'historique pour la fraîcheur.")
+    st.page_link("pages/3_Forme.py", label="Détail de la forme", icon="⚡")
+explain("tsb")
+
+# Récupération : quatre couloirs
+st.markdown("#### Récupération de la nuit")
+_lanes_recovery = st.container(key="lanes-recovery")
+t1, t2, t3, t4 = _lanes_recovery.columns(4)
 if sleep_sec:
     h, m = divmod(int(sleep_sec) // 60, 60)
     t1.metric("😴 Sommeil", f"{h}h{m:02d}",
-              delta=f"Score {sleep_score}" if sleep_score is not None else None,
-              delta_color="off")
+              delta=f"score {sleep_score}" if sleep_score is not None else None, delta_color="off", delta_arrow="off")
 else:
     t1.metric("😴 Sommeil", "—")
-
-t2.metric("💓 HRV nuit", f"{int(hrv_last)} ms" if hrv_last else "—",
-          delta=(hrv_status or "").capitalize() or None, delta_color="off")
-
+t2.metric("💓 HRV", f"{int(hrv_last)} ms" if hrv_last else "—",
+          delta=(hrv_status or "").capitalize() or None, delta_color="off", delta_arrow="off")
 bb_high = daily.get("bodyBatteryHighestValue")
 t3.metric("🔋 Body Battery", f"{int(bb_high)}" if bb_high is not None else "—")
-
 rhr = daily.get("restingHeartRate")
 t4.metric("❤️ FC repos", f"{int(rhr)} bpm" if rhr else "—")
 
-t5.metric("🎯 Forme", f"{verdict['icon']} {verdict['label']}",
-          delta=f"TSB {tsb:+.0f}" if tsb is not None else None, delta_color="off")
-
-st.page_link("pages/3_Forme.py", label="Voir le détail de la forme", icon="⚡")
-explain("tsb")
-
-st.divider()
-
 # ---------------------------------------------------------------------------
-# Métriques de la semaine / du mois
+# Semaine / mois : l'essentiel, le détail en mode Pro
 # ---------------------------------------------------------------------------
 metrics = client.get_summary_metrics(df)
-
-col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
-
 _now = datetime.now()
 _month_mask = running_df["startTimeLocal"] >= _now.replace(
     day=1, hour=0, minute=0, second=0, microsecond=0
 )
 _dplus_mois = int(running_df.loc[_month_mask, "elevationGain"].fillna(0).sum())
 
-metric_data = [
-    (col1, metrics["km_semaine"], "km", "Cette semaine", "🗓️"),
-    (col2, metrics["km_mois"], "km", "Ce mois", "📅"),
-    (col3, metrics["nb_sorties_semaine"], "", "Sorties / semaine", "👟"),
-    (col4, metrics["nb_sorties_mois"], "", "Sorties / mois", "📊"),
-    (col5, metrics["pace_moyen"], "", "Allure moyenne", "⏱️"),
-    (col6, metrics["hr_moyen"], "", "FC moyenne", "❤️"),
-    (col7, _dplus_mois, "m", "D+ ce mois", "⛰️"),
-]
-
-for col, value, unit, label, icon in metric_data:
-    with col:
-        st.metric(label=f"{icon} {label}", value=f"{value} {unit}".strip())
+st.markdown("#### Volume")
+_lanes_volume = st.container(key="lanes-volume")
+w1, w2, w3, w4 = _lanes_volume.columns(4)
+w1.metric("🗓️ Cette semaine", f"{metrics['km_semaine']} km",
+          delta=f"{metrics['nb_sorties_semaine']} sortie(s)", delta_color="off", delta_arrow="off")
+w2.metric("📅 Ce mois", f"{metrics['km_mois']} km",
+          delta=f"{metrics['nb_sorties_mois']} sortie(s)", delta_color="off", delta_arrow="off")
+w3.metric("⏱️ Allure moyenne", f"{metrics['pace_moyen']}")
+w4.metric("⛰️ D+ du mois", f"{_dplus_mois} m")
+if is_pro():
+    p1, p2, _, _ = _lanes_volume.columns(4)
+    p1.metric("❤️ FC moyenne", f"{metrics['hr_moyen']}")
+    p2.metric("📊 Sorties / mois", f"{metrics['nb_sorties_mois']}")
 
 st.divider()
-
-# ---------------------------------------------------------------------------
-# Séance suggérée (teaser — le détail et le parcours sur Prochaine sortie)
-# ---------------------------------------------------------------------------
-if len(running_df) >= 3:
-    # Même chaîne que la page Prochaine sortie : plan Garmin d'abord, logique
-    # interne en repli, modulée par la récupération du jour.
-    _coach = cached_coach_context(_athlete_id)
-    _today_session = todays_session(df, hrv_status, sleep_score, _coach)
-    rec, _downgrade = _today_session["rec"], _today_session["downgrade"]
-    s = SESSION_TYPES[rec["session_key"]]
-    _task = rec.get("coach_task")
-
-    st.subheader("🗓️ Séance du coach" if _task else "🗓️ Séance suggérée")
-
-    if _task:
-        _when = (
-            "Aujourd'hui" if _task["date"] == date.today()
-            else weekday_fr(_task["date"]).capitalize() + _task["date"].strftime(" %d/%m")
-        )
-        r1, r2, r3, r4 = st.columns([2, 1, 1, 1])
-        r1.metric(f"{s['icon']} Séance", _task["name"])
-        r2.metric("🎯 Cible", target_label(_task))
-        r3.metric("⏱️ Durée", f"{_task['duration_min']} min")
-        r4.metric("📅 Quand", _when)
-
-        _plan_bits = [_coach["plan"]["name"]]
-        if _coach["phase"]:
-            _plan_bits.append(f"phase {_coach['phase']['label']}")
-        if _coach["days_to_event"] is not None:
-            _plan_bits.append(f"J−{_coach['days_to_event']}")
-        st.caption(" · ".join(_plan_bits))
-
-        _alert = _today_session["alert"]
-        if _alert:
-            st.warning(_alert, icon="🛟")
-    else:
-        r1, r2, r3, r4 = st.columns([2, 1, 1, 1])
-        r1.metric(f"{s['icon']} Type", s["label"])
-        r2.metric("📏 Distance", f"{rec['target_dist_km']} km")
-        r3.metric("🐇 Allure", rec["target_pace_str"])
-        r4.metric("📅 Quand", rec["suggested_date_str"])
-
-    st.page_link(
-        "pages/5_Next_Session.py",
-        label="Générer le parcours et l'export GPX",
-        icon="🗺️",
-    )
-    st.divider()
 
 # ---------------------------------------------------------------------------
 # Dernière sortie (résumé — le détail complet est sur la page Activités)
@@ -361,15 +349,18 @@ if not running_df.empty:
     st.markdown(f"#### {last['activityName']}")
     st.caption(f"📅 {date_fmt}")
 
-    m1, m2, m3, m4, m5, m6, m7, m8 = st.columns(8)
+    _lanes_last = st.container(key="lanes-last")
+    m1, m2, m3, m4 = _lanes_last.columns(4)
     m1.metric("📏 Distance",  f"{last['distance_km']:.2f} km")
     m2.metric("⏱️ Durée",     f"{int(last['duration_min'])} min")
     m3.metric("🐇 Allure",    last["avgPace"])
     m4.metric("❤️ FC moy",    f"{int(last['avgHR'])} bpm"       if pd.notna(last.get("avgHR"))       else "—")
-    m5.metric("❤️‍🔥 FC max",   f"{int(last['maxHR'])} bpm"       if pd.notna(last.get("maxHR"))       else "—")
-    m6.metric("🦶 Cadence",   f"{int(last['avgCadence'])} spm"  if pd.notna(last.get("avgCadence"))  else "—")
-    m7.metric("🔥 Calories",  f"{int(last['calories'])} kcal"   if pd.notna(last.get("calories"))    else "—")
-    m8.metric("⛰️ D+",        f"{int(last['elevationGain'])} m" if pd.notna(last.get("elevationGain")) else "—")
+    if is_pro():
+        m5, m6, m7, m8 = _lanes_last.columns(4)
+        m5.metric("❤️‍🔥 FC max",   f"{int(last['maxHR'])} bpm"       if pd.notna(last.get("maxHR"))       else "—")
+        m6.metric("🦶 Cadence",   f"{int(last['avgCadence'])} spm"  if pd.notna(last.get("avgCadence"))  else "—")
+        m7.metric("🔥 Calories",  f"{int(last['calories'])} kcal"   if pd.notna(last.get("calories"))    else "—")
+        m8.metric("⛰️ D+",        f"{int(last['elevationGain'])} m" if pd.notna(last.get("elevationGain")) else "—")
 
     streams = load_streams(_athlete_id, int(last["activityId"]))
     render_activity_map(streams, height=320)
