@@ -167,7 +167,12 @@ def _render_annual_lines(
     en pointillé : la comparaison à date reste lisible sans masquer la fin des
     saisons passées.
     """
-    plot_df = df.dropna(subset=[value_col])
+    # Colonne absente = Garmin n'a renvoyé aucune ligne pour cette métrique
+    # (montre qui ne la mesure pas, compte récent) : même message que « vide ».
+    if value_col not in df.columns:
+        plot_df = df.iloc[0:0]
+    else:
+        plot_df = df.dropna(subset=[value_col])
     if plot_df.empty:
         st.info("Pas de données sur cette métrique pour les années sélectionnées.")
         return

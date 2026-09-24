@@ -1,0 +1,10 @@
+# Le code est copié par `COPY . .` : sans ce fichier, les tokens Garmin, le
+# cache et les données locales du bind mount de dev finiraient dans l'image.
+.garmin/
+.cache/
+.data/
+.env*
+.streamlit/secrets.toml
+# Sans `**/`, ces motifs ne s'appliqueraient qu'à la racine du contexte.
+**/__pycache__/
+**/*.pyc

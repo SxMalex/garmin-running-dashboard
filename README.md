@@ -134,9 +134,9 @@ accessible uniquement depuis cette machine.
 
 ### 3. Se connecter à Garmin
 
-Ouvre **[http://localhost:8501](http://localhost:8501)**. Si `GARMIN_EMAIL` /
-`GARMIN_PASSWORD` sont dans `.env`, le formulaire est pré-rempli — clique sur
-**« Se connecter à Garmin »**. Si ton compte a le MFA activé, un champ apparaît
+Ouvre **[http://localhost:8501](http://localhost:8501)**, saisis ton mot de passe Garmin (l'email est pré-rempli si `GARMIN_EMAIL` est
+dans `.env`) et clique sur **« Se connecter à Garmin »**. Le dashboard n'utilise
+jamais `GARMIN_PASSWORD` : les tokens obtenus tiennent ~1 an. Si ton compte a le MFA activé, un champ apparaît
 pour saisir le code reçu par email.
 
 Les tokens garth sont ensuite persistés dans `app/.garmin/` (dev) ou le volume
@@ -176,13 +176,16 @@ protection d'accès — l'authentification basique de Caddy, un tunnel VPN
 Identique au projet `run` : Caddy en frontal HTTPS (Let's Encrypt auto).
 
 ```bash
-# .env : compléter PUBLIC_DOMAIN, ACME_EMAIL, STREAMLIT_BROWSER_SERVER_ADDRESS
+# .env : compléter PUBLIC_DOMAIN, ACME_EMAIL, STREAMLIT_BROWSER_SERVER_ADDRESS,
+#        BASIC_AUTH_USER et BASIC_AUTH_HASH (entre quotes simples)
+docker run --rm caddy:2-alpine caddy hash-password --plaintext 'mon-mot-de-passe'
 docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-⚠️ L'app étant **mono-utilisateur** et l'authentification simple, ne pas exposer
-publiquement sans protection supplémentaire (auth basique Caddy, VPN, Tailscale…) :
-quiconque accède à l'URL voit tes données une fois la session serveur connectée.
+🔒 L'app n'a pas d'authentification propre et reprend la session Garmin du
+serveur : **Caddy impose une authentification basique** (`BASIC_AUTH_USER` /
+`BASIC_AUTH_HASH`). Sans ces variables, `docker compose` refuse de démarrer —
+c'est voulu. Un VPN (WireGuard, Tailscale) reste une bonne protection en plus.
 
 ---
 
@@ -221,7 +224,7 @@ Pour se déconnecter : bouton **« Déconnexion »** dans la barre latérale
 | Variable | Défaut | Description |
 |---|---|---|
 | `GARMIN_EMAIL` | — | Email du compte Garmin (pré-remplit le formulaire) |
-| `GARMIN_PASSWORD` | — | Mot de passe (jamais stocké, sert au premier login) |
+| `GARMIN_PASSWORD` | — | Utilisé seulement par `test_connection.py` et le serveur MCP (jamais par le dashboard) |
 | `GARMIN_TOKENSTORE` | `/app/.garmin` (Docker) ou `~/.garminconnect` | Dossier des tokens garth |
 | `CACHE_DIR` | `/app/.cache` (Docker) ou `~/.cache/garmin-dashboard` | Cache disque des appels API |
 | `CACHE_TTL` | `3600` | Durée du cache disque en secondes |
@@ -229,6 +232,8 @@ Pour se déconnecter : bouton **« Déconnexion »** dans la barre latérale
 | `PUBLIC_DOMAIN` | — | *(prod)* Domaine servi par Caddy |
 | `ACME_EMAIL` | — | *(prod)* Email Let's Encrypt |
 | `STREAMLIT_BROWSER_SERVER_ADDRESS` | `localhost` | *(prod)* Hostname annoncé au navigateur |
+| `BASIC_AUTH_USER` | — | *(prod, obligatoire)* Identifiant de l'authentification Caddy |
+| `BASIC_AUTH_HASH` | — | *(prod, obligatoire)* Hash bcrypt (`caddy hash-password`), entre quotes simples |
 
 ---
 

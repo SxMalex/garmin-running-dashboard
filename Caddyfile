@@ -4,6 +4,10 @@
 # Variables d'env attendues (cf. .env) :
 #   PUBLIC_DOMAIN   ex. running.exemple.com
 #   ACME_EMAIL      adresse pour les notifications de certificat
+#   BASIC_AUTH_USER identifiant de connexion au dashboard
+#   BASIC_AUTH_HASH hash bcrypt du mot de passe :
+#                   docker run --rm caddy:2-alpine caddy hash-password --plaintext '<mdp>'
+#                   (dans .env, entourer la valeur de quotes simples : elle contient des $)
 
 {
 	email {$ACME_EMAIL}
@@ -11,6 +15,15 @@
 
 {$PUBLIC_DOMAIN} {
 	encode gzip
+
+	# Authentification OBLIGATOIRE : l'app n'en a aucune et reprend la session
+	# Garmin depuis le tokenstore — sans ce bloc, tout visiteur verrait les
+	# données du propriétaire (et pourrait écrire dans son calendrier Garmin).
+	# Variables vides → Caddy démarre mais répond 401 à tout (échec fermé) ;
+	# docker-compose.prod.yml refuse déjà de démarrer sans elles (`:?`).
+	basic_auth {
+		{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+	}
 
 	# Headers de sécurité
 	header {

@@ -91,15 +91,16 @@ if _api is None:
                 st.rerun()
             st.stop()
 
+        # GARMIN_PASSWORD n'est jamais utilisé ici : en `value=`, Streamlit
+        # l'enverrait au navigateur ; en repli côté serveur, n'importe quel
+        # visiteur pourrait déclencher un vrai login (MFA, blocage du compte)
+        # en soumettant le formulaire vide. Le mot de passe se tape une fois,
+        # les tokens tiennent ensuite ~1 an.
         with st.form("login_form"):
             email = st.text_input(
                 "Email Garmin", value=os.getenv("GARMIN_EMAIL", "")
             )
-            password = st.text_input(
-                "Mot de passe",
-                type="password",
-                value=os.getenv("GARMIN_PASSWORD", ""),
-            )
+            password = st.text_input("Mot de passe", type="password")
             submitted = st.form_submit_button("🔗 Se connecter à Garmin", width="stretch")
 
         if submitted:
