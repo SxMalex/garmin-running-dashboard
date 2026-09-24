@@ -12,6 +12,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from datetime import date, datetime, timedelta
 
+import goal_store
 from coach_logic import (
     target_label,
 )
@@ -24,6 +25,7 @@ from next_session_logic import (
     build_gpx as _build_gpx,
     todays_session,
 )
+from ui_mode import explain
 from ui_helpers import (
     cached_coach_context,
     cached_load_activities,
@@ -201,8 +203,9 @@ _coach = cached_coach_context(_athlete_id, _today.isoformat())
 # Recommandation calculée avant la sidebar pour alimenter les défauts
 # `load_df=df` : la fraîcheur qui choisit la séance intègre le sport croisé,
 # comme le TSB affiché sur l'Accueil et la page Forme.
-_today_session = todays_session(df, _hrv_status, _sleep_score, _coach)
-rec, _downgrade = _today_session["rec"], _today_session["downgrade"]
+_today_session = todays_session(df, _hrv_status, _sleep_score, _coach,
+                                goal_store.validated_sessions(_athlete_id))
+rec = _today_session["rec"]
 s = SESSION_TYPES[rec["session_key"]]
 rec["session"] = s
 _coach_task = rec.get("coach_task")
@@ -301,6 +304,11 @@ if _coach_task:
         f"*Séance programmée par le coach Garmin pour **{_when}** — "
         f"{target_label(_coach_task)}, {_coach_task['duration_min']} min.*"
     )
+elif rec.get("goal_session"):
+    _goal = rec["goal_session"]
+    st.markdown(f"## {s['icon']} {_goal['title']}")
+    st.markdown(f"*Séance de ton plan Objectif pour **{rec['suggested_date_str']}** — "
+                f"{_goal.get('target', '')}. {_goal.get('why', '')}*")
 else:
     st.markdown(f"## {s['icon']} {s['label']}")
     st.markdown(f"*{s['description']}*")
@@ -352,6 +360,7 @@ else:
 
 col3.metric("TSB — Fraîcheur", f"{tsb:.1f}", delta=tsb_delta, delta_color=tsb_dc)
 col4.metric("Repos depuis", f"{rec['days_since']} j", help="Jours depuis la dernière sortie")
+explain("tsb")
 
 st.divider()
 
@@ -383,6 +392,14 @@ if _coach_task:
         weekday_fr(_coach_task["date"]).capitalize() + _coach_task["date"].strftime(" %d/%m"),
         help=f"Effet visé : {_coach_task['effect'] or '—'}",
     )
+elif rec.get("goal_session"):
+    c1.metric("Distance cible", f"{target_dist_km} km", help="Distance prévue par ton plan Objectif")
+    c2.metric("Allure d'ensemble", rec["target_pace_str"],
+              help="Moyenne des allures de la séance pondérée par leur durée (échauffement, "
+                   "blocs, retour au calme) : c'est l'allure du parcours.")
+    c3.metric("Durée prévue", f"{duration_min} min")
+    c4.metric("D+ cible", f"{target_elev_m} m")
+    c5.metric("Date du plan", rec["suggested_date_str"])
 else:
     c1.metric("Distance cible", f"{target_dist_km} km",
               help=f"Moyenne récente : {rec['avg_dist']} km")
@@ -417,6 +434,9 @@ if _coach_task:
         )
     else:
         st.caption(f"Fourchette d'allure conseillée : **{pace_min}** → **{pace_max}**")
+elif rec.get("goal_session"):
+    st.caption(f"Cible de la séance : **{rec['goal_session'].get('target', '')}** · allure "
+               f"d'ensemble pour le parcours et le GPX : **{pace_min}** → **{pace_max}**")
 else:
     st.caption(f"Fourchette d'allure conseillée : **{pace_min}** → **{pace_max}**")
 

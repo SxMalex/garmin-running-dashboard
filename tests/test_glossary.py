@@ -26,3 +26,14 @@ def test_every_term_used_in_pages_exists():
     for path in APP.rglob("*.py"):
         used |= set(re.findall(r"(?:explain|help_text)\(\s*[\"']([a-z_0-9]+)[\"']", path.read_text()))
     assert used <= set(TERMS), used - set(TERMS)
+
+
+def test_every_term_is_rendered_somewhere():
+    """Contre-validation : des entrées du glossaire n'étaient affichées nulle part."""
+    used = set()
+    for path in APP.rglob("*.py"):
+        text = path.read_text()
+        used |= set(re.findall(r"(?:explain|help_text|term)\(\s*[\"']([a-z_0-9]+)[\"']", text))
+        used |= set(re.findall(r"for _k in \(([^)]*)\)", text) and
+                    re.findall(r"[\"']([a-z_]+)[\"']", " ".join(re.findall(r"for _k in \(([^)]*)\)", text))))
+    assert set(TERMS) <= used, set(TERMS) - used

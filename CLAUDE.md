@@ -177,7 +177,9 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   serait signalé). Dérive Pa:HR invalide si < 40 min, CV vitesse > 0,15, sortie
   progressive (+5 %), effort relâché (vitesse ET FC en baisse), dénivelé inégal ;
   ralentir à FC constante EST la dérive. Altitude lissée avant le D+. Calibré
-  sur données réelles : ne pas assouplir sans refaire la mesure.
+  sur 16 sorties réelles (non versionnées : données de santé), cas limites
+  rejoués en synthétique dans `tests/test_physio_logic.py` ; ne pas assouplir
+  sans refaire la mesure sur de vrais streams (cache local, lecture seule).
 - **Streams** : bucket `streams/` du cache, TTL `STREAMS_CACHE_TTL` (30 j),
   conservé par « Actualiser » ; les boucles multi-activités sont bornées
   (`DECOUPLING_TREND_MAX_RUNS`) et s'arrêtent au premier refus Garmin.
@@ -198,7 +200,11 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
 - **Modes Light/Pro** (`ui_mode.py`) : état hors clés de widget ; les réglages
   Pro ne portent que sur les seuils physio, jamais sur CTL/ATL (un seul TSB).
 - **Séance du jour** : `next_session_logic.todays_session` + `forme_logic.parse_recovery`
-  + `coach_logic.load_coach_context` — chemin unique Accueil / Prochaine sortie / MCP.
+  + `coach_logic.load_coach_context` + `goal_store.validated_sessions` — chemin
+  unique Accueil / Prochaine sortie / MCP. Priorité : Run Coach actif (même sans
+  séance à venir) > plan Objectif validé (celui que la page Objectif envoie) >
+  logique interne. La séance du jour du plan est ignorée si une course est déjà
+  enregistrée aujourd'hui.
 
 ## Serveur MCP (`garmin_mcp/`)
 
@@ -206,7 +212,8 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
 - Lecture seule par **liste blanche** (`get_*`, `count_*`, `download_*`, GET
   `connectapi`/`connectwebproxy` sans en-têtes ni corps). Ne pas revenir à une liste noire.
 - Tokenstore **distinct** du dashboard (`GARMIN_TOKENSTORE_MCP`, défaut
-  `~/.garminconnect`) : deux processus sur un même refresh token se l'invalident.
+  `~/.garminconnect-mcp` ; le dashboard hors Docker utilise `~/.garminconnect`) :
+  deux processus sur un même refresh token se l'invalident.
 - `mcp<2` : la v2 a renommé `FastMCP`.
 
 ## Tests

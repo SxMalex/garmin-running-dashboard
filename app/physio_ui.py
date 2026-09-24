@@ -180,15 +180,16 @@ def render_aerobic_progress(activities_df, athlete_id: int) -> None:
                               margin=dict(l=0, r=0, t=10, b=0))
             st.plotly_chart(fig)
 
-    candidates = decoupling_candidates(activities_df)
+    params = decoupling_params()
+    candidates = decoupling_candidates(activities_df, min_duration_min=params["min_moving_s"] / 60 + 5)
     if not candidates:
-        st.caption(f"Aucune sortie de plus de 45 min sur les {DECOUPLING_TREND_WEEKS} "
-                   "dernières semaines pour mesurer la dérive cardiaque.")
+        st.caption(f"Aucune sortie de plus de {params['min_moving_s'] / 60 + 5:.0f} min sur les "
+                   f"{DECOUPLING_TREND_WEEKS} dernières semaines pour mesurer la dérive cardiaque.")
         return
     ids = tuple(int(c["activityId"]) for c in candidates)
     streams_by_id, failed = _load_candidate_streams(athlete_id, ids)
     items = [(c, streams_by_id.get(int(c["activityId"]))) for c in candidates]
-    hist = decoupling_history(items, lock_params=lock_params(), **decoupling_params())
+    hist = decoupling_history(items, lock_params=lock_params(), **params)
 
     st.markdown("**Dérive cardiaque des sorties longues**")
     if hist.empty:

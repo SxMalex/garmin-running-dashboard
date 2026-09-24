@@ -862,3 +862,89 @@ def test_load_risk_on_real_pmc_series(sample_running_df):
     from next_session_logic import compute_pmc_series, load_risk
     r = load_risk(compute_pmc_series(sample_running_df, 330))
     assert set(r) >= {"acwr", "monotony", "strain"} or r == {}
+
+
+# ---------------------------------------------------------------------------
+# Plan Objectif dans la séance du jour (merge_goal_plan_into_recommendation)
+# ---------------------------------------------------------------------------
+
+def _goal_sessions(first_kind="tempo", day_offset=1):
+    from datetime import date as _d, timedelta as _td
+    base_day = _d.today() + _td(days=day_offset)
+    tempo = {"date": base_day.isoformat(), "kind": first_kind, "title": "Seuil", "distance_km": 8.0,
+             "duration_min": 50, "target": "2 × 8′ à 5:00–5:10/km", "why": "Seuil",
+             "steps": [{"type": "warmup", "duration_s": 900, "pace_fast": 400, "pace_slow": 420},
+                       {"type": "repeat", "count": 2, "steps": [
+                           {"type": "interval", "duration_s": 480, "pace_fast": 300, "pace_slow": 310},
+                           {"type": "recovery", "duration_s": 120, "pace_fast": None, "pace_slow": None}]},
+                       {"type": "cooldown", "duration_s": 600, "pace_fast": 400, "pace_slow": 420}]}
+    strength = {"date": base_day.isoformat(), "kind": "strength", "title": "Renfo", "distance_km": 0,
+                "duration_min": 40, "steps": []}
+    return [strength, tempo]
+
+
+def test_goal_session_uses_overall_pace_not_warmup(sample_running_df):
+    from next_session_logic import todays_session
+    rec = todays_session(sample_running_df, "BALANCED", 80, None, _goal_sessions())["rec"]
+    assert rec["goal_session"]["title"] == "Seuil" and rec["session_key"] == "tempo"
+    expected = (1500 * 410 + 960 * 305) / (1500 + 960)
+    assert rec["target_pace_sec"] == pytest.approx(expected)
+
+
+def test_run_coach_active_without_next_run_keeps_priority(sample_running_df):
+    """Revue : Run Coach actif sans séance à venir → PAS le plan Objectif."""
+    from next_session_logic import todays_session
+    coach = {"plan": {"name": "Run Coach"}, "next_run": None, "phase": None, "days_to_event": None}
+    rec = todays_session(sample_running_df, "BALANCED", 80, coach, _goal_sessions())["rec"]
+    assert rec.get("goal_session") is None
+
+
+@pytest.mark.parametrize("sessions", [None, [], [_goal_sessions()[0]]])
+def test_no_goal_run_falls_back_to_internal(sample_running_df, sessions):
+    from next_session_logic import recommend_session, todays_session
+    rec = todays_session(sample_running_df, "BALANCED", 80, None, sessions)["rec"]
+    assert rec.get("goal_session") is None
+    assert rec["session_key"] == recommend_session(
+        sample_running_df[sample_running_df["activityType"] == "running"],
+        downgrade=0, load_df=sample_running_df)["session_key"]
+
+
+def test_race_day_pace_and_alert(sample_running_df):
+    from next_session_logic import todays_session
+    race = [{"date": (__import__("datetime").date.today()).isoformat(), "kind": "race",
+             "title": "🏁 Semi-marathon", "distance_km": 21.1, "duration_min": 110,
+             "target": "5:14/km", "pace_sec": 314.0, "steps": []}]
+    df = sample_running_df.copy()
+    df["startTimeLocal"] = df["startTimeLocal"] - pd.Timedelta(days=1)   # pas de course aujourd'hui
+    out = todays_session(df, "UNBALANCED", 40, None, race)
+    assert out["rec"]["target_pace_sec"] == 314.0
+    assert "jour de la course" in out["alert"] and "décaler" not in out["alert"]
+
+
+def test_todays_plan_session_skipped_once_run(sample_running_df):
+    from next_session_logic import todays_session
+    df = sample_running_df.copy()
+    df.loc[df.index[0], "startTimeLocal"] = pd.Timestamp.now().normalize() + pd.Timedelta(hours=7)
+    sessions = _goal_sessions(day_offset=0) + [dict(_goal_sessions(day_offset=2)[1], title="Plus tard")]
+    rec = todays_session(df, "BALANCED", 80, None, sessions)["rec"]
+    assert rec["goal_session"]["title"] == "Plus tard"
+
+
+def test_validated_sessions_only_when_current(tmp_path, monkeypatch):
+    from datetime import date as _d, timedelta as _td
+    import goal_store
+    from race_plan_logic import athlete_baseline, build_race_plan
+    from workout_export import plan_id_of
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    goal = {"distance": "10 km", "race_date": (_d.today() + _td(weeks=6)).isoformat()}
+    prefs = {"runs_per_week": 4}
+    plan = build_race_plan(_d.fromisoformat(goal["race_date"]), "10 km",
+                           athlete_baseline(None, _d.today()), _d.today())
+    goal_store.save_goal(1, goal, prefs)
+    assert goal_store.validated_sessions(1) is None                    # pas validé
+    goal_store.validate_plan(1, plan_id_of(goal, prefs), plan)
+    assert goal_store.validated_sessions(1)                             # validé et à jour
+    goal_store.save_goal(1, goal, {"runs_per_week": 5})
+    assert goal_store.validated_sessions(1) is None                    # préférences changées
+    goal_store.save_goal(1, dict(goal, race_date="2020-01-01"), prefs)
+    assert goal_store.validated_sessions(1) is None                    # course passée

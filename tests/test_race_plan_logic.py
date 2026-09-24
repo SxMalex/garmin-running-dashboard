@@ -397,3 +397,45 @@ def test_threshold_faster_than_half_marathon_pace():
     half_ratio = (21.0975 / 10) ** RIEGEL_EXPONENT / (21.0975 / 10)
     assert PACE_ZONES["tempo"][1] < half_ratio
     assert PACE_ZONES["tempo"][0] > PACE_ZONES["interval"][1]
+
+
+def test_threshold_faster_than_realistic_target_pace():
+    """Contre-validation C : semi visé 4 % sous l'estimation → seuil < allure course."""
+    base = {"weekly_km": 35, "long_run_km": 16, "strength_sessions_8w": 0,
+            "pace_10k_sec": 300.0, "assumptions": []}
+    plan = build_race_plan(TODAY + timedelta(weeks=12), "Semi-marathon", base, TODAY,
+                           target_time_s=6360)   # 1:46:00
+    assert not any("ambitieux" in w for w in plan["warnings"])
+    to_s = lambda p: int(p.split(":")[0]) * 60 + int(p.split(":")[1])
+    assert to_s(plan["summary"]["paces"]["tempo"][1]) < plan["summary"]["race_pace_sec"]
+
+
+@pytest.mark.parametrize("distance", list(DISTANCE_PROFILE))
+@pytest.mark.parametrize("runs", [3, 4, 5, 6])
+@pytest.mark.parametrize("long_day", [0, 2, 3, 6])
+@pytest.mark.parametrize("weeks_out", [3, 10])
+def test_48h_between_key_sessions_and_between_strength_across_weeks(distance, runs, long_day, weeks_out):
+    """Contre-validation E : espacements tenus d'une semaine à l'autre."""
+    df = history(km=3.0, runs_per_week=4)
+    sessions = plan_sessions(build_race_plan(TODAY + timedelta(weeks=weeks_out), distance,
+                                             athlete_baseline(df, TODAY), TODAY,
+                                             runs_per_week=runs, long_run_weekday=long_day))
+    keys = sorted(date.fromisoformat(s["date"]) for s in sessions
+                  if s["kind"] in ("tempo", "interval", "race_pace", "long", "race"))
+    assert all((b - a).days >= 2 for a, b in zip(keys, keys[1:])), keys
+    strength = sorted(date.fromisoformat(s["date"]) for s in sessions if s["kind"] == "strength")
+    assert all((b - a).days >= 2 for a, b in zip(strength, strength[1:])), strength
+
+
+def test_zones_follow_realistic_target_but_not_slower_or_ambitious_ones():
+    base = {"weekly_km": 35, "long_run_km": 16, "strength_sessions_8w": 0,
+            "pace_10k_sec": 300.0, "assumptions": []}
+    race = TODAY + timedelta(weeks=12)
+    ref = build_race_plan(race, "Semi-marathon", base, TODAY)["summary"]["paces"]
+    realistic = build_race_plan(race, "Semi-marathon", base, TODAY, target_time_s=6360)["summary"]["paces"]
+    slower = build_race_plan(race, "Semi-marathon", base, TODAY, target_time_s=7200)["summary"]["paces"]
+    ambitious = build_race_plan(race, "Semi-marathon", base, TODAY, target_time_s=5700)
+    assert realistic["easy"] != ref["easy"]          # zones recalées sur l'objectif
+    assert slower == ref                             # objectif plus lent : forme actuelle
+    assert ambitious["summary"]["paces"] == ref      # ambitieux : forme actuelle…
+    assert any("restent calées" in w for w in ambitious["warnings"])   # …et c'est dit

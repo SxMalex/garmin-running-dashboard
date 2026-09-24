@@ -12,6 +12,7 @@ import streamlit as st
 
 from forme_logic import compute_forme_verdict, parse_recovery
 from next_session_logic import compute_pmc_series, compute_tsb, load_risk, reference_threshold_sec
+from glossary import term
 from ui_mode import explain, help_text, is_pro
 from stats_tabs import tab_charge
 from ui_helpers import (
@@ -218,6 +219,10 @@ if is_pro() and not df.empty:
                   help="Charge de la semaine × monotonie (Foster).")
         r4.metric("TSS aigu / chronique", f"{risk['acute']:.0f} / {risk['chronic']:.0f}",
                   help="Moyennes quotidiennes sur 7 et 28 jours, jours de repos inclus.")
+        with st.expander("Comprendre l'ACWR et la monotonie"):
+            for _k in ("acwr", "monotony"):
+                st.markdown(f"**{term(_k)['label']}** — {term(_k)['light']}")
+                st.caption(f"📚 {term(_k)['source']}")
 
 st.divider()
 
@@ -231,6 +236,13 @@ else:
     _period_days = {"3 derniers mois": 90, "6 derniers mois": 180, "12 derniers mois": 365}
     cutoff = datetime.now() - timedelta(days=_period_days[charge_period])
     tab_charge.render(df, cutoff)
+    x1, x2, x3 = st.columns(3)
+    with x1:
+        explain("ctl")
+    with x2:
+        explain("atl")
+    with x3:
+        explain("tss")
 
 st.divider()
 

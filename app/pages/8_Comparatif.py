@@ -33,6 +33,7 @@ from comparatif_logic import (
 from formatting import seconds_to_pace_str, weekday_fr
 from next_session_logic import compute_pmc_series, reference_threshold_sec
 from progression_logic import RACE_TARGETS, fmt_race_time
+from ui_mode import explain
 from ui_helpers import (
     cache_nonce,
     cached_load_activities,
@@ -519,6 +520,7 @@ st.caption(
     f"(**{seconds_to_pace_str(threshold_sec)}**) — sans quoi les TSS d'une année "
     "à l'autre ne seraient pas comparables."
 )
+explain("ctl")
 charge_metric = st.radio(
     "Métrique de charge",
     options=["CTL — Forme", "ATL — Fatigue", "TSB — Fraîcheur"],
@@ -588,6 +590,7 @@ st.divider()
 # 3. Physiologie
 # ---------------------------------------------------------------------------
 st.subheader("💨 Physiologie")
+explain("vo2max")
 
 physio_metric = st.radio(
     "Métrique physiologique",
@@ -643,6 +646,7 @@ st.divider()
 # 4. Récupération
 # ---------------------------------------------------------------------------
 st.subheader("😴 Récupération")
+explain("hrv")
 
 recup_metric = st.radio(
     "Métrique de récupération",

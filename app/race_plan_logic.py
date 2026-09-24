@@ -445,7 +445,7 @@ def _runs_for_volume(requested: int, volume: float) -> int:
     return min(requested, max(3, int(volume // 5)))
 
 
-def _week_runs(phase, volume, monday, long_weekday, runs, race_date, today,
+def _week_runs(phase, volume, monday, long_weekday, runs, race_date,
                p10, race_pace, idx, context, long_cap):
     """
     Séances de course d'une semaine CALENDAIRE (lundi → dimanche). Le motif
@@ -595,13 +595,21 @@ def build_race_plan(
             if race_time < predicted * 0.95:
                 warnings.append(
                     f"Objectif ambitieux : {int(race_time // 60)} min visées pour "
-                    f"{int(predicted // 60)} min estimées d'après ta forme récente."
+                    f"{int(predicted // 60)} min estimées d'après ta forme récente. Tes "
+                    "allures d'entraînement restent calées sur ta forme actuelle ; seules "
+                    "les séances « allure course » visent l'objectif."
                 )
         else:
             target_time_s = None
             warnings.append("Temps visé invraisemblable pour cette distance (allure hors "
                             "2:30–12:00/km) : ignoré, plan construit sur ta forme estimée.")
     race_pace = race_time / dist_km
+    # Zones d'entraînement : forme actuelle, SAUF objectif réaliste (≤ 5 % plus
+    # rapide que l'estimation, pas d'avertissement « ambitieux ») — elles
+    # suivent alors l'objectif, sinon le « seuil » serait prescrit plus lent
+    # que l'allure de course visée (contre-validation).
+    if target_time_s and race_time < predicted and race_time >= predicted * 0.95:
+        p10 = _riegel(race_time, dist_km, 10.0) / 10.0
 
     # 1) Courses de toutes les semaines.
     weeks_built = []
@@ -609,7 +617,7 @@ def build_race_plan(
         monday = first_monday + timedelta(weeks=idx)
         runs = _runs_for_volume(runs_per_week, volume)
         built, long_day, prescribed = _week_runs(
-            phase, volume, monday, long_run_weekday, runs, race_date, today, p10,
+            phase, volume, monday, long_run_weekday, runs, race_date, p10,
             race_pace, idx + 1, context, profile["long_cap_km"])
         is_race_week = monday <= race_date < monday + timedelta(days=7)
         if not is_race_week and prescribed > volume * (1 + VOLUME_TOLERANCE):
@@ -623,12 +631,28 @@ def build_race_plan(
                 "date": race_date.isoformat(), "kind": "race", "phase": phase, "week": idx + 1,
                 "title": f"🏁 {distance}", "distance_km": round(dist_km, 1),
                 "duration_min": round(race_time / 60), "target": f"{_pace_str(race_pace)}/km",
+                "pace_sec": round(race_pace, 1),
                 "steps": [], "why": "Le jour J : tout le plan converge ici.",
                 "explain": ("Pars prudemment, à l'allure travaillée : le premier kilomètre "
                             "trop rapide se paie à la fin."),
                 "sources": [],
             }
         weeks_built.append((idx, phase, volume, monday, built))
+
+    # 1 bis) Espacement ≥ 48 h entre séances clés, y compris d'une semaine à
+    # l'autre (le nombre de sorties varie avec le volume, donc le motif aussi) :
+    # la séance de qualité trop proche d'une autre devient un footing.
+    keyed = sorted(((d, b) for *_, built in weeks_built for d, b in built.items()
+                    if b["kind"] in KEY_KINDS), key=lambda x: x[0])
+    last_key = None
+    for day, sess in keyed:
+        if last_key is not None and (day - last_key).days < 2 and sess["kind"] in ("tempo", "interval", "race_pace"):
+            for idx_w, phase_w, _, _, built in weeks_built:
+                if day in built:
+                    built[day] = _run_session("easy", day, sess["distance_km"], p10, race_pace,
+                                              phase_w, idx_w + 1, context)
+            continue
+        last_key = day
 
     # 2) Renfo, avec les séances clés de TOUT le plan (la veille d'une séance
     # du lundi est le dimanche de la semaine précédente). Doma 2013/2017 :
@@ -637,6 +661,7 @@ def build_race_plan(
     key_days = {d for *_, built in weeks_built for d, b in built.items() if b["kind"] in KEY_KINDS}
     long_days = {d for *_, built in weeks_built for d, b in built.items() if b["kind"] == "long"}
     strength_intro_left = STRENGTH_INTRO_WEEKS if not baseline.get("strength_sessions_8w") else 0
+    strength_days: list[date] = []   # sur tout le plan : ≥ 48 h entre deux renfos
     strength_cutoff = race_date - timedelta(days=STRENGTH_STOP_DAYS_BEFORE_RACE)
     weeks = []
     for idx, phase, volume, monday, built in weeks_built:
@@ -654,8 +679,9 @@ def build_race_plan(
             for day in preferred + fallback:
                 if len(picked) >= STRENGTH_PER_WEEK[phase]:
                     break
-                if all(abs((day - p).days) >= 2 for p in picked):
+                if all(abs((day - p).days) >= 2 for p in picked + strength_days):
                     picked.append(day)
+            strength_days.extend(picked)
             for day in sorted(picked):
                 sessions.append(_strength_session(day, phase, idx + 1, strength_intro_left > 0))
             if picked and strength_intro_left > 0:

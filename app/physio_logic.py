@@ -24,8 +24,9 @@ MAX_SAMPLE_GAP_S = 30.0
 # Le capteur au poignet confond parfois le pouls avec le rythme des bras : la
 # FC affichée colle alors à la cadence. FC et cadence se croisent aussi
 # naturellement vers 170-180 lors d'un effort dur : d'où l'exigence d'un
-# plateau soutenu (calibré sur données réelles : croisements naturels
-# ≤ 72 s contigus sur 16 sorties).
+# plateau soutenu. Calibrage : 16 sorties réelles de l'auteur (mai-sept. 2026,
+# non versionnées — données de santé), croisements naturels ≤ 72 s contigus ;
+# les cas limites observés sont rejoués en synthétique dans les tests.
 LOCK_TOL_BPM = 3.0
 LOCK_MIN_DURATION_S = 120.0
 LOCK_MIN_SHARE = 0.8
@@ -33,7 +34,8 @@ LOCK_MIN_CADENCE = 140.0  # en dessous : marche, le phénomène ne s'applique pa
 # Une vraie FC monte avec l'effort ; un lock la fait SAUTER au niveau de la
 # cadence. Sans marche d'au moins ce seuil à l'entrée ou à la sortie de la
 # plage, c'est un finish accéléré où FC et cadence montent ensemble (faux
-# positif observé sur données réelles : 174 → 188 bpm en 4 min à 4:37/km).
+# positif observé sur une sortie réelle : 174 → 188 bpm en 4 min à 4:37/km,
+# rejoué dans `test_progressive_finish_is_not_a_lock`).
 LOCK_MIN_JUMP_BPM = 12.0
 
 # --- Dérive cardiaque (Pa:HR decoupling, Friel / TrainingPeaks) --------------
@@ -378,10 +380,7 @@ def decoupling_level(pct: float | None) -> str | None:
     """Clé de `DECOUPLING_LEVELS` : < 5 % solide, < 10 % à consolider, sinon marquée."""
     if pct is None or not np.isfinite(pct):
         return None
-    for key, level in DECOUPLING_LEVELS.items():
-        if pct < level["max"]:
-            return key
-    return "marquee"
+    return next(key for key, level in DECOUPLING_LEVELS.items() if pct < level["max"])
 
 
 def summary_lock_suspect(avg_hr, avg_cadence, tol_bpm: float = 2.0) -> bool:

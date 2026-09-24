@@ -56,7 +56,7 @@ l'API Garmin non officielle s'authentifie par identifiants, pas par OAuth multi-
   14 prochains jours s'envoient dans le **calendrier Garmin** (sur confirmation,
   retirables). Si un plan Garmin Run Coach est actif, il reste la référence et
   l'envoi est bloqué
-- **Modes Light / Pro** (barre latérale) — Light explique chaque indicateur (TSB,
+- **Modes Light / Pro** (barre latérale) — Light explique les indicateurs techniques (TSB,
   HRV, dérive, VO2max…) et pourquoi il compte ; Pro affiche les chiffres bruts,
   l'ACWR et la monotonie (Foster), et permet de régler les seuils des analyses
 - **Comparatif annuel** — l'année en cours superposée aux précédentes sur un axe
@@ -69,7 +69,7 @@ l'API Garmin non officielle s'authentifie par identifiants, pas par OAuth multi-
 
 | | Strava (`run`) | Garmin (`gar`) |
 |---|---|---|
-| Authentification | OAuth multi-user, token en session | Identifiants + tokens garth persistés (~1 an), mono-user |
+| Authentification | OAuth multi-user, token en session | Identifiants + tokens persistés (~1 an), mono-user |
 | Segments / KOM | ✅ page Segments | ❌ pas d'équivalent API Garmin |
 | Prédictions de course | Formule de Riegel | **Natives Garmin** + Riegel |
 | Zones FC | Configurées dans Strava | Réelles du profil Garmin (par sport) |
@@ -93,9 +93,11 @@ utilisateur**. Quelques points à connaître avant de l'installer :
   `429 Too Many Requests` en cas d'appels trop fréquents, et rien ne garantit
   contractuellement que l'usage soit toléré. Tu utilises tes propres identifiants,
   à tes risques.
-- **Ton mot de passe Garmin est stocké en clair** dans le fichier `.env` (il n'est
-  utilisé qu'au premier login : ensuite ce sont les tokens garth). Garde ce fichier
-  hors de tout dépôt — il est dans `.gitignore`.
+- **Ton mot de passe Garmin n'a pas besoin d'être dans `.env`** : le dashboard le
+  demande dans son formulaire et ne lit jamais `GARMIN_PASSWORD` ;
+  `test_connection.py` le demande aussi s'il est absent. Si tu l'y mets quand
+  même, il est en clair : garde `.env` hors de tout dépôt (il est dans
+  `.gitignore`). Ensuite, ce sont les tokens qui servent (~1 an).
 - **L'application n'a aucune authentification propre** : quiconque atteint le port
   voit tes données Garmin. C'est pourquoi la stack de dev publie le port sur
   `127.0.0.1:8501` uniquement — le dashboard n'est joignable que **depuis la machine
@@ -158,7 +160,7 @@ dans `.env`) et clique sur **« Se connecter à Garmin »**. Le dashboard n'util
 jamais `GARMIN_PASSWORD` : les tokens obtenus tiennent ~1 an. Si ton compte a le MFA activé, un champ apparaît
 pour saisir le code reçu par email.
 
-Les tokens garth sont ensuite persistés dans `app/.garmin/` (dev) ou le volume
+Les tokens sont ensuite persistés dans `app/.garmin/` (dev) ou le volume
 `garmin_tokens` (prod) : les démarrages suivants se connectent **automatiquement**,
 sans mot de passe ni MFA, pendant environ un an.
 
@@ -245,7 +247,7 @@ Pour se déconnecter : bouton **« Déconnexion »** dans la barre latérale
 |---|---|---|
 | `GARMIN_EMAIL` | — | Email du compte Garmin (pré-remplit le formulaire) |
 | `GARMIN_PASSWORD` | — | Utilisé seulement par `test_connection.py` et le serveur MCP (jamais par le dashboard) |
-| `GARMIN_TOKENSTORE` | `/app/.garmin` (Docker) ou `~/.garminconnect` | Dossier des tokens garth |
+| `GARMIN_TOKENSTORE` | `/app/.garmin` (Docker) ou `~/.garminconnect` | Dossier des tokens du dashboard |
 | `CACHE_DIR` | `/app/.cache` (Docker) ou `~/.cache/garmin-dashboard` | Cache disque des appels API |
 | `CACHE_TTL` | `3600` | Durée du cache disque en secondes |
 | `STREAMS_CACHE_TTL` | `2592000` (30 j) | Durée du cache des streams d'activité (conservés par « Actualiser ») |
@@ -257,7 +259,7 @@ Pour se déconnecter : bouton **« Déconnexion »** dans la barre latérale
 | `BASIC_AUTH_HASH` | — | *(prod, obligatoire)* Hash bcrypt (`caddy hash-password`), entre quotes simples |
 | `GARMIN_WRITE_ENABLED` | `false` (`true` dans `docker-compose.yml`) | Autorise l'envoi de séances dans le calendrier Garmin (page Objectif). Activé en dev car le port n'écoute que sur 127.0.0.1 ; à n'activer en prod que derrière l'authentification |
 | `DATA_DIR` | `/app/.data` (Docker) ou `~/.local/share/garmin-dashboard` | Objectif, plan validé et journal des séances envoyées (à sauvegarder : volume `app_data` en prod) |
-| `GARMIN_TOKENSTORE_MCP` | `~/.garminconnect` | Tokens du serveur MCP (volontairement distincts de ceux du dashboard) |
+| `GARMIN_TOKENSTORE_MCP` | `~/.garminconnect-mcp` | Tokens du serveur MCP (volontairement distincts de ceux du dashboard) |
 | `TZ` | `Europe/Paris` (compose) | Fuseau de « aujourd'hui » (titre, séance du jour) ; le conteneur serait sinon en UTC |
 
 ---
@@ -414,7 +416,7 @@ dernier compte vraiment, car chaque activité retenue coûte un fetch de streams
 
 | Couche | Fichier(s) | Rôle |
 |---|---|---|
-| Données | `garmin_client.py` | Fetch API, cache disque, auth garth, transformations |
+| Données | `garmin_client.py` | Fetch API, cache disque, auth (tokens), transformations |
 | Logique métier | `next_session_logic.py`, `heatmap_logic.py`, `comparatif_logic.py`, `coach_logic.py`, `formatting.py` | Calculs purs, testables sans Streamlit |
 | UI helpers | `ui_helpers.py` | `require_login()`, `get_garmin_client()`, rendu carte |
 | UI | `main.py` + `pages/` + `stats_tabs/` | Affichage uniquement |
@@ -492,11 +494,13 @@ et tu en discutes (« pourquoi je stagne ? », « mon plan est-il trop chargé ?
 
 Outils exposés : `daily_briefing`, `training_load`, `activity_analysis`,
 `aerobic_trend`, `race_plan_preview`, `current_goal`, plus l'accès en lecture aux
-~130 méthodes de `garminconnect` (`garmin_call`). **Lecture seule** (liste
+~100 méthodes de lecture de `garminconnect` (`garmin_call`). **Lecture seule** (liste
 blanche `get_*` / `count_*` / `download_*`) : envoyer des séances à la montre se
 fait uniquement depuis la page Objectif, sur confirmation.
 
-1. Amorcer la session du serveur (une fois, MFA compris) :
+1. Amorcer la session du serveur (une fois) : le script demande email, mot de
+   passe (s'ils ne sont pas dans `.env`) et code MFA, puis enregistre les tokens
+   dans `~/.garminconnect-mcp` :
    `uv run --no-project --with-requirements requirements.txt python test_connection.py`
 2. **Claude Code** : ouvre le dossier du projet, le fichier `.mcp.json` déclare
    le serveur (`uv` requis). Vérifie avec `/mcp`.
@@ -513,8 +517,12 @@ fait uniquement depuis la page Objectif, sur confirmation.
 Les analyses du MCP utilisent les seuils par défaut : les réglages du mode Pro
 (propres à ta session du dashboard) ne s'y appliquent pas.
 
+> **Mise à jour depuis une version précédente** : le serveur MCP utilisait
+> `~/.garminconnect`. Relance une fois `test_connection.py` (ou renomme le dossier
+> en `~/.garminconnect-mcp`) pour lui recréer sa session.
+
 Le serveur lit l'objectif enregistré par le dashboard de dev (`app/.data`) mais
-garde ses propres tokens (`~/.garminconnect`) : deux processus qui partagent un
+garde ses propres tokens (`~/.garminconnect-mcp`) : deux processus qui partagent un
 jeton de rafraîchissement se l'invalideraient mutuellement.
 
 ---
@@ -556,7 +564,6 @@ autre chose.
 
 Le projet s'appuie sur des bibliothèques open-source :
 [python-garminconnect](https://github.com/cyberjunky/python-garminconnect),
-[garth](https://github.com/matin/garth),
 [Streamlit](https://streamlit.io),
 [OpenRouteService](https://openrouteservice.org),
 [Plotly](https://plotly.com),

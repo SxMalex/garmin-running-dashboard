@@ -68,6 +68,21 @@ TERMS = {
                  "cadence (~170-180). On le repère quand la FC saute d'un coup au niveau de "
                  "la cadence sans que l'effort change. Bracelet serré ou ceinture cardio.",
     },
+    "hr_zones": {
+        "label": "Zones de fréquence cardiaque",
+        "short": "Tranches d'intensité définies par ta FC, du plus facile au maximal.",
+        "light": "Chaque zone correspond à un type d'effort : la zone 2, où l'on peut "
+                 "parler, construit l'endurance ; les zones 4-5 développent la vitesse mais "
+                 "fatiguent vite. La plupart des coureurs courent trop souvent en zone 3, "
+                 "« ni facile ni dur » : c'est la zone où l'on progresse le moins.",
+    },
+    "cadence": {
+        "label": "Cadence",
+        "short": "Nombre de pas par minute.",
+        "light": "Une cadence un peu plus élevée (pas plus courts et plus fréquents) réduit "
+                 "souvent l'impact à chaque appui. Il n'y a pas de chiffre magique : "
+                 "compare-toi à toi-même, à allure égale, plutôt qu'à la « règle des 180 ».",
+    },
     "vo2max": {
         "label": "VO2max",
         "short": "Consommation maximale d'oxygène estimée par la montre.",

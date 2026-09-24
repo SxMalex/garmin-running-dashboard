@@ -13,4 +13,4 @@ Pillow==11.0.0
 matplotlib==3.9.3
 folium==0.18.0
 streamlit-folium==0.23.1
-garminconnect>=0.3.3
+garminconnect>=0.3.6  # client interne (plus de garth), exceptions typées

@@ -534,22 +534,107 @@ def build_gpx(route: dict, session_label: str, target_pace_str: str) -> str:
     return "\n".join(lines)
 
 
-def todays_session(activities_df: pd.DataFrame, hrv_status, sleep_score,
-                   coach_context: dict | None) -> dict:
+# Plan Objectif validé → contrat de recommend_session. La page Objectif est la
+# seule à écrire ce plan dans le calendrier : une fois envoyé, c'est lui que la
+# montre affiche, donc lui que l'Accueil doit annoncer.
+_GOAL_KIND_TO_SESSION = {
+    "easy": "endurance", "strides": "endurance", "shakeout": "recuperation",
+    "long": "sortie_longue", "tempo": "tempo", "interval": "tempo",
+    "race_pace": "tempo", "race": "tempo",
+}
+_GOAL_KEY_KINDS = {"tempo", "interval", "race_pace", "long", "race"}
+
+
+def session_overall_pace(session: dict) -> float | None:
     """
-    Séance du jour telle que l'annonce toute l'app : plan Garmin Run Coach en
-    priorité, logique interne en repli, modulée par la récupération (HRV,
-    sommeil). Retourne {"rec", "downgrade", "alert"}. Accueil, Prochaine
-    sortie et serveur MCP passent tous par ici — une page qui recomposerait
-    ces appels risquerait d'annoncer une autre séance que la montre.
+    Allure d'ensemble (s/km) d'une séance du plan : moyenne des allures de ses
+    étapes pondérée par leur durée (répétitions déroulées, récupérations sans
+    cible ignorées). C'est l'allure du parcours, comme pour Run Coach ; la
+    cible de répétition reste dans `session["target"]`. Pour la course :
+    l'allure de course.
+    """
+    if session.get("pace_sec"):
+        return float(session["pace_sec"])
+    total_s = weighted = 0.0
+
+    def walk(steps, times):
+        nonlocal total_s, weighted
+        for step in steps or []:
+            if step.get("type") == "repeat":
+                walk(step.get("steps"), times * int(step.get("count") or 1))
+            elif step.get("pace_fast") and step.get("pace_slow"):
+                dur = float(step.get("duration_s") or 0) * times
+                total_s += dur
+                weighted += dur * (step["pace_fast"] + step["pace_slow"]) / 2
+
+    walk(session.get("steps"), 1)
+    return weighted / total_s if total_s else None
+
+
+def merge_goal_plan_into_recommendation(rec: dict, sessions: list[dict] | None,
+                                        today: date | None = None,
+                                        ran_today: bool = False) -> dict:
+    """
+    Fait piloter la recommandation par la prochaine séance de course du plan
+    Objectif validé (même contrat que `recommend_session`, comme
+    `merge_coach_into_recommendation`). La séance du jour est ignorée si une
+    course a déjà été enregistrée aujourd'hui. Sans plan ou sans course à
+    venir, `rec` est renvoyé tel quel avec `goal_session=None`.
+    """
+    today = today or date.today()
+    runs = [s for s in sessions or []
+            if s.get("kind") in _GOAL_KIND_TO_SESSION
+            and (date.fromisoformat(s["date"]) > today
+                 or (date.fromisoformat(s["date"]) == today and not ran_today))]
+    if not runs:
+        return dict(rec, goal_session=None)
+    s = min(runs, key=lambda x: x["date"])
+    day = date.fromisoformat(s["date"])
+    pace = session_overall_pace(s) or rec.get("target_pace_sec")
+    merged = dict(rec)
+    merged.update(
+        session_key=_GOAL_KIND_TO_SESSION[s["kind"]],
+        goal_session=s,
+        target_dist_km=s.get("distance_km") or rec.get("target_dist_km"),
+        duration_min=s.get("duration_min") or rec.get("duration_min"),
+        target_pace_sec=pace,
+        target_pace_str=seconds_to_pace_str(pace) if pace else rec.get("target_pace_str"),
+        suggested_date=day,
+        suggested_date_str=format_date_fr(day),
+        downgraded_from=None,
+    )
+    return merged
+
+
+def todays_session(activities_df: pd.DataFrame, hrv_status, sleep_score,
+                   coach_context: dict | None, goal_sessions: list[dict] | None = None) -> dict:
+    """
+    Séance du jour telle que l'annonce toute l'app : plan Garmin Run Coach s'il
+    est actif (même sans séance de course à venir : la montre le suit), sinon
+    le plan Objectif validé du dashboard, sinon la logique interne, modulée par
+    la récupération (HRV, sommeil). Retourne {"rec", "downgrade", "alert"}.
+    Accueil, Prochaine sortie et serveur MCP passent tous par ici — une page
+    qui recomposerait ces appels risquerait d'annoncer une autre séance.
     """
     from coach_logic import hard_session_alert, merge_coach_into_recommendation
 
     downgrade = forme_downgrade(hrv_status, sleep_score)
-    running = activities_df[activities_df["activityType"] == RUNNING_TYPE] \
-        if activities_df is not None and not activities_df.empty else pd.DataFrame()
-    rec = merge_coach_into_recommendation(
-        recommend_session(running, downgrade=downgrade, load_df=activities_df), coach_context
-    )
-    return {"rec": rec, "downgrade": downgrade,
-            "alert": hard_session_alert(coach_context, downgrade)}
+    has_data = activities_df is not None and not activities_df.empty
+    running = activities_df[activities_df["activityType"] == RUNNING_TYPE] if has_data else pd.DataFrame()
+    base = recommend_session(running, downgrade=downgrade, load_df=activities_df)
+    rec = merge_coach_into_recommendation(base, coach_context)
+    alert = hard_session_alert(coach_context, downgrade)
+    if coach_context is None and goal_sessions:
+        ran_today = bool(not running.empty and (
+            pd.to_datetime(running["startTimeLocal"]).dt.date == date.today()).any())
+        rec = merge_goal_plan_into_recommendation(base, goal_sessions, ran_today=ran_today)
+        rec["coach"] = rec["coach_task"] = None
+        goal = rec.get("goal_session")
+        if goal and downgrade and goal["kind"] == "race":
+            alert = ("Récupération dégradée (HRV ou sommeil) le jour de la course : pars "
+                     "prudemment, à l'allure travaillée, et ne cherche pas à rattraper un "
+                     "départ lent.")
+        elif goal and downgrade and goal["kind"] in _GOAL_KEY_KINDS:
+            alert = ("Récupération dégradée (HRV ou sommeil) et séance clé au programme de "
+                     "ton plan Objectif : écoute tes sensations, quitte à la décaler d'un jour.")
+    return {"rec": rec, "downgrade": downgrade, "alert": alert}

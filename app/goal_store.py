@@ -169,3 +169,25 @@ def clear_goal(athlete_id: int) -> dict:
         doc.pop("prefs", None)
         doc.pop("validated", None)
     return _update(athlete_id, mutate)
+
+
+def validated_sessions(athlete_id: int, today=None) -> list[dict] | None:
+    """
+    Séances du plan Objectif validé ET toujours d'actualité (objectif et
+    préférences inchangés, course à venir), ou None. C'est ce plan que la page
+    Objectif envoie à la montre : l'Accueil et le MCP l'annoncent donc aussi.
+    """
+    from datetime import date as _date
+
+    from race_plan_logic import plan_sessions
+    from workout_export import plan_id_of
+
+    doc = load(athlete_id)
+    goal, validated = doc.get("goal"), doc.get("validated") or {}
+    if not goal or not validated.get("plan"):
+        return None
+    if validated.get("plan_id") != plan_id_of(goal, doc.get("prefs") or {}):
+        return None
+    if goal.get("race_date", "") < (today or _date.today()).isoformat():
+        return None
+    return plan_sessions(validated["plan"])

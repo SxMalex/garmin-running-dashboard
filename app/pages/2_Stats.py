@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 
 from formatting import event_type_label
 from stats_tabs import tab_volume, tab_allure, tab_fc, tab_cadence, tab_regularite
+from ui_mode import explain
 from ui_helpers import (
     cached_load_activities,
     get_garmin_client,
@@ -110,10 +111,13 @@ if active_tab == "📦 Volume":
     tab_volume.render(running_filtered, client)
 elif active_tab == "🐇 Allure":
     tab_allure.render(running_filtered)
+    explain("seuil")
 elif active_tab == "❤️ Fréquence cardiaque":
     tab_fc.render(running_filtered, client, hr_zones_list)
+    explain("hr_zones")
 elif active_tab == "🦶 Cadence":
     tab_cadence.render(running_filtered)
+    explain("cadence")
 elif active_tab == "📅 Régularité":
     tab_regularite.render(running_df)
 

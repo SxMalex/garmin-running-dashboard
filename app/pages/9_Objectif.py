@@ -74,10 +74,14 @@ def load_predictions(athlete_id: int) -> dict:
     return get_garmin_client().get_race_predictions() or {}
 
 
-def current_coach_state() -> tuple[str, str | None]:
-    """État du plan Garmin Run Coach, sans confondre « aucun » et « inconnu »."""
+def current_coach_state(strict: bool = True) -> tuple[str, str | None]:
+    """
+    État du plan Garmin Run Coach, sans confondre « aucun » et « inconnu ».
+    `strict=True` (lecture fraîche) seulement avant d'écrire : la bannière
+    d'information se contente du cache, sinon chaque rerun appellerait Garmin.
+    """
     try:
-        plans = get_garmin_client().get_training_plans(strict=True)
+        plans = get_garmin_client().get_training_plans(strict=strict)
     except Exception:
         return coach_state(None, error=RuntimeError("indisponible")), None
     from coach_logic import active_plan
@@ -210,10 +214,14 @@ plan = build_race_plan(
     include_strength=prefs.get("include_strength", True),
     context=context,
 )
-if not plan["weeks"]:
-    for w in plan["warnings"]:
-        st.warning(w)
-    st.stop()
+
+# Run Coach actif : la montre suit CE plan-là. Le dire dès l'ouverture, avant
+# même la validation (contre-validation : bannière invisible jusqu'ici).
+_, coach_name = current_coach_state(strict=False)
+if coach_name:
+    st.info(f"Plan Garmin Run Coach actif : **{coach_name}**. Ta montre suit ce plan-là : "
+            "celui-ci reste consultable, mais ne pourra pas être envoyé tant que Run Coach "
+            "est actif.")
 
 plan_id = plan_id_of(goal, prefs)
 validated = doc.get("validated") or {}
@@ -282,6 +290,7 @@ fig.update_layout(height=240, barmode="overlay", yaxis=dict(title="km / semaine"
                   legend=dict(orientation="h", y=1.15), margin=dict(l=0, r=0, t=30, b=0))
 st.plotly_chart(fig)
 
+explain("seuil")
 with st.expander("🎚️ Tes allures d'entraînement"):
     names = {"easy": "Footing", "long": "Sortie longue", "tempo": "Seuil",
              "interval": "Fractionné VMA", "strides": "Lignes droites"}
@@ -352,7 +361,8 @@ st.markdown(
     "jamais la veille d'une séance clé, arrêté 9 jours avant la course, et toujours après "
     "la course si c'est le même jour.\n"
     "- **Allures** : calculées sur ta forme récente (course, prédictions Garmin), pas sur "
-    "tes meilleures années."
+    "tes meilleures années — ou sur ton temps visé s'il est réaliste (moins de 5 % plus "
+    "rapide que ta forme estimée)."
 )
 st.caption("⚠️ Chez le coureur, l'effet anti-blessure du renfo n'est net que si les "
            "mouvements sont bien exécutés (Wu et al., 2024) : fais-toi montrer la technique.")
@@ -363,7 +373,7 @@ with e2:
     explain("taper")
 
 st.subheader("📲 Envoyer dans ton calendrier Garmin")
-state, coach_name = current_coach_state()
+state, _ = current_coach_state()   # lecture fraîche : on s'apprête à écrire
 allowed, reason = push_gate(WRITE_ENABLED, state)
 pushed = goal_store.load(_athlete_id).get("pushed") or {}
 stale = stale_pushes(pushed, plan_id, TODAY.isoformat(), sessions)
@@ -395,8 +405,6 @@ def remove_entries(entries: dict) -> None:
     flash("success", f"{removed} séance(s) retirée(s) de ton calendrier.")
 
 
-if coach_name:
-    st.info(f"Plan Garmin Run Coach actif : **{coach_name}**. Ta montre suit ce plan-là.")
 if stale:
     st.warning(f"{len(stale)} séance(s) déjà envoyée(s) ne correspondent plus au plan affiché "
                "(ancien plan, ou plan recalculé) : retire-les avant d'envoyer la nouvelle "

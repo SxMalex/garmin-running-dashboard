@@ -86,7 +86,8 @@ def daily_briefing(gc, today: date | None = None) -> dict:
     n_runs = int((df["activityType"] == "running").sum()) if not df.empty else 0
     # Même garde que l'Accueil (≥ 3 courses) : sinon séance annoncée ici et
     # pas sur la page, voire plantage sur un historique vide.
-    session = (todays_session(df, recovery["hrv_status"], recovery["sleep_score"], coach)
+    session = (todays_session(df, recovery["hrv_status"], recovery["sleep_score"], coach,
+                              goal_store.validated_sessions(gc.athlete_id))
                if n_runs >= 3 else None)
     rec = session["rec"] if session else None
     task = (rec or {}).get("coach_task")
@@ -102,9 +103,10 @@ def daily_briefing(gc, today: date | None = None) -> dict:
         "verdict": {"label": verdict["label"], "headline": verdict["headline"],
                     "reasons": verdict["reasons"]},
         "session": ({
-            "source": "garmin_run_coach" if task else "dashboard",
+            "source": ("garmin_run_coach" if task else
+                       "plan_objectif" if rec.get("goal_session") else "dashboard"),
             "type": SESSION_TYPES[rec["session_key"]]["label"],
-            "name": (task or {}).get("name"),
+            "name": (task or {}).get("name") or (rec.get("goal_session") or {}).get("title"),
             "date": (task or {}).get("date") or rec.get("suggested_date_str"),
             "target_distance_km": rec.get("target_dist_km"),
             "target_pace": rec.get("target_pace_str"),
@@ -115,8 +117,10 @@ def daily_briefing(gc, today: date | None = None) -> dict:
                         "phase": (coach.get("phase") or {}).get("label"),
                         "days_to_event": coach.get("days_to_event")} if coach else None),
         "load_risk": load_risk(pmc) if pmc is not None else {},
-        "note": "La séance suit le plan Garmin Run Coach s'il est actif : c'est la montre "
-                "qui fait référence, le dashboard ne réécrit pas la séance.",
+        "note": "Priorité de la séance : plan Garmin Run Coach s'il est actif (la montre le "
+                "suit, le dashboard ne réécrit rien), sinon plan Objectif validé dans le "
+                "dashboard (source « plan_objectif »), sinon recommandation calculée depuis "
+                "la charge et la récupération.",
     })
 
 

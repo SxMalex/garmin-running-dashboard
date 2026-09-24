@@ -58,3 +58,18 @@ def test_pro_settings_stored_outside_widget(logged_in):
 def test_light_hides_pro_settings(logged_in):
     at = logged_in("4_Progression.py", **{MODE_KEY: "light"}).run()
     assert not any("effort minimal" in s.label for s in at.sidebar.slider)
+
+
+
+@pytest.mark.parametrize("name", ["main.py", "3_Forme.py", "4_Progression.py",
+                                  "5_Next_Session.py", "8_Comparatif.py", "9_Objectif.py"])
+def test_light_explains_on_metric_pages(logged_in, name):
+    """Contre-validation F : Light n'expliquait les indicateurs que sur quelques pages."""
+    import goal_store
+    from datetime import date, timedelta
+    goal_store.save_goal(42, {"distance": "10 km", "target_text": "",
+                              "race_date": (date.today() + timedelta(weeks=8)).isoformat()},
+                         {"runs_per_week": 4})
+    at = logged_in(name, **{MODE_KEY: "light"}).run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert _explains(at), name

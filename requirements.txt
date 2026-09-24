@@ -1,4 +1,4 @@
-garminconnect>=0.3.3
+garminconnect>=0.3.6  # client interne (plus de garth), exceptions typées
 python-dotenv>=1.0.0
 # mcp 2.x a renommé FastMCP (MCPServer) : server.py est écrit pour l'API 1.x.
 mcp[cli]>=1.27.0,<2

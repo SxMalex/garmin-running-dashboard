@@ -5,14 +5,14 @@ Architecture :
     verdicts CALCULÉS par le dashboard — fraîcheur, séance du jour, dérive
     cardiaque, plan vers un objectif — en réutilisant la logique de `app/` ;
   - quelques *tools* curés pour les usages fréquents (pas, sommeil, FC, stress…),
-  - un *tool* passe-plat `garmin_call(method, params)` qui donne accès aux ~130
-    méthodes de la lib `garminconnect` sans toutes les redéclarer,
+  - un *tool* passe-plat `garmin_call(method, params)` qui donne accès aux ~100
+    méthodes de lecture de la lib `garminconnect` sans toutes les redéclarer,
   - un *tool* `garmin_list_methods()` qui retourne le catalogue (nom + signature
     + docstring) pour que le modèle sache quoi appeler via le passe-plat.
 
 Le client `Garmin` est connecté paresseusement à la première utilisation, par
 les tokens du tokenstore (amorcé une fois par `test_connection.py`, MFA
-compris). Tokenstore PROPRE au serveur (`~/.garminconnect`), distinct de
+compris). Tokenstore PROPRE au serveur (`~/.garminconnect-mcp`), distinct de
 celui du dashboard : deux processus qui rafraîchissent le même jeton se
 l'invalideraient mutuellement.
 
@@ -42,7 +42,7 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 import insights  # noqa: E402
 from garmin_client import GarminClient  # noqa: E402
 
-DEFAULT_TOKENSTORE = "~/.garminconnect"
+DEFAULT_TOKENSTORE = "~/.garminconnect-mcp"  # ≠ dashboard hors Docker (~/.garminconnect)
 
 # Méthodes du cycle d'authentification : on ne les expose pas via le passe-plat,
 # le serveur gère la session lui-même.
@@ -61,10 +61,6 @@ def _is_allowed(method: str) -> bool:
         return False
     return method.startswith(_READ_PREFIXES) or method in _READ_METHODS
 
-
-def _is_destructive(method: str) -> bool:
-    """Conservé pour compatibilité : tout ce qui n'est pas en liste blanche."""
-    return not _is_allowed(method)
 
 mcp = FastMCP("garmin")
 
@@ -97,9 +93,10 @@ def _get_client() -> Garmin:
         password = os.environ.get("GARMIN_PASSWORD")
         if not email or not password:
             raise RuntimeError(
-                f"Pas de session dans {tokenstore} ({token_error}). Lance "
-                "`python test_connection.py` (demande email, mot de passe et MFA) "
-                "pour amorcer le tokenstore du serveur MCP."
+                f"Pas de session dans {tokenstore} ({token_error}). Lance une fois "
+                "`python test_connection.py` : il demande email, mot de passe (sauf "
+                "s'ils sont dans .env) et code MFA, puis enregistre les tokens du "
+                "serveur MCP."
             ) from token_error
         client = Garmin(email, password,
                         prompt_mfa=lambda: (_ for _ in ()).throw(mfa_error))
@@ -138,8 +135,8 @@ def _use_dashboard_data_dir() -> None:
 @mcp.tool()
 def daily_briefing() -> dict[str, Any]:
     """Verdict du jour : fraîcheur (CTL/ATL/TSB), récupération (HRV, sommeil),
-    séance recommandée (plan Garmin Run Coach s'il est actif, sinon logique du
-    dashboard, modulée par la récupération) et indicateurs de risque (ACWR,
+    séance recommandée (plan Garmin Run Coach s'il est actif, sinon plan
+    Objectif validé du dashboard, sinon logique interne modulée par la récupération) et indicateurs de risque (ACWR,
     monotonie). À appeler pour « dois-je m'entraîner dur aujourd'hui ? »."""
     return insights.daily_briefing(_get_gc())
 

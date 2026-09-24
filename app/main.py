@@ -20,6 +20,7 @@ from coach_logic import (
     target_label,
 )
 from formatting import weekday_fr
+import goal_store
 from forme_logic import compute_forme_verdict, parse_recovery
 from next_session_logic import SESSION_TYPES, compute_tsb, todays_session
 from ui_mode import explain, is_pro, render_mode_toggle
@@ -249,7 +250,8 @@ if len(running_df) >= 3:
     # Même chaîne que la page Prochaine sortie : plan Garmin d'abord, logique
     # interne en repli, modulée par la récupération du jour.
     _coach = cached_coach_context(_athlete_id)
-    _today_session = todays_session(df, hrv_status, sleep_score, _coach)
+    _today_session = todays_session(df, hrv_status, sleep_score, _coach,
+                                    goal_store.validated_sessions(_athlete_id))
     rec = _today_session["rec"]
 
 hero_bib, hero_gauge = st.columns([3, 2], gap="large")
@@ -277,6 +279,13 @@ with hero_bib:
                 number=str(_dur) if _dur else "—", unit="min" if _dur else "", title=_task["name"],
                 target=target_label(_task), when=f"{_when} — {', '.join(_plan_bits)}",
                 why=verdict["headline"])
+        elif rec.get("goal_session"):
+            # Plan Objectif validé (celui que la page Objectif envoie au calendrier).
+            _g = rec["goal_session"]
+            bib(band_text=band, band_level=verdict["level"],
+                number=f"{_g['distance_km']:g}", unit="km", title=_g["title"],
+                target=_g.get("target", ""), when=f"{rec['suggested_date_str']} — ton plan Objectif",
+                why=_g.get("why") or verdict["headline"])
         else:
             bib(band_text=band, band_level=verdict["level"],
                 number=f"{rec['target_dist_km']:g}", unit="km", title=s["label"],

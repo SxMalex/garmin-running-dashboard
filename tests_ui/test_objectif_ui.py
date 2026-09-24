@@ -269,3 +269,50 @@ def test_find_orphan_dashboard_workouts(logged_in, fake_api, goal, monkeypatch):
     assert any(f"{n} séance(s) du dashboard" in w.value for w in at.warning)
     _button(at, "Retirer ces séances retrouvées").click().run()
     assert list(fake_api.workouts) == [99999]
+
+
+def test_home_and_mcp_announce_the_validated_plan_session(logged_in, fake_api, goal):
+    """Contre-validation : après validation, Accueil et MCP = séance du plan (et de la montre)."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "garmin_mcp"))
+    import insights
+    from garmin_client import GarminClient
+    from race_plan_logic import plan_sessions
+
+    _validated(logged_in)
+    plan = goal_store.load(42)["validated"]["plan"]
+    first_run = next(s for s in plan_sessions(plan)
+                     if s["kind"] not in ("strength",) and s["date"] >= date.today().isoformat())
+
+    home = logged_in("main.py").run()
+    assert not home.exception, [e.value for e in home.exception]
+    html = " ".join(m.value for m in home.markdown)
+    assert first_run["title"] in html and "ton plan Objectif" in html
+
+    brief = insights.daily_briefing(GarminClient(fake_api, athlete_id=42))
+    assert brief["session"]["source"] == "plan_objectif"
+    assert brief["session"]["name"] == first_run["title"]
+
+
+
+def test_run_coach_banner_before_validation(logged_in, fake_api, goal):
+    """Contre-validation D : Run Coach actif signalé avant même la validation."""
+    fake_api.plans = [{"trainingPlanId": 7, "name": "Semi Run Coach",
+                       "trainingStatus": {"statusKey": "Scheduled"}}]
+    at = logged_in(PAGE).run()
+    assert any("Run Coach actif" in i.value for i in at.info)
+    assert any("Valider ce plan" in b.label for b in at.button)
+
+
+def test_next_session_page_shows_plan_session(logged_in, goal):
+    """Revue : la page Prochaine sortie affichait un libellé générique et l'allure d'échauffement."""
+    from race_plan_logic import plan_sessions
+    _validated(logged_in)
+    plan = goal_store.load(42)["validated"]["plan"]
+    first = next(s for s in plan_sessions(plan)
+                 if s["kind"] != "strength" and s["date"] >= date.today().isoformat())
+    at = logged_in("5_Next_Session.py").run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert any(first["title"] in m.value for m in at.markdown)
+    assert "Allure d'ensemble" in {m.label for m in at.metric}
