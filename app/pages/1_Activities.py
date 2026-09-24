@@ -12,6 +12,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 
 from formatting import decimate, seconds_to_pace_str
+from physio_ui import render_signal_quality
 from ui_helpers import (
     cached_load_activities,
     get_garmin_client,
@@ -431,7 +432,10 @@ if selected_event.selection.rows:
     m2.metric("⏱️ Durée", f"{selected_row['duration_min']:.0f} min")
     m3.metric("🐇 Allure", selected_row["avgPace"])
     m4.metric("❤️ FC moy", f"{int(selected_row['avgHR'])} bpm" if pd.notna(selected_row.get("avgHR")) else "—")
-    m5.metric("🦶 Cadence", f"{int(selected_row['avgCadence'])} spm" if pd.notna(selected_row.get("avgCadence")) else "—")
+    # avgCadence est en pas/min pour la course, en tours/min pour le vélo
+    # (repli averageBikingCadenceInRevPerMinute de activity_row).
+    cad_unit = "rpm" if selected_row.get("activityType") == "cycling" else "spm"
+    m5.metric("🦶 Cadence", f"{int(selected_row['avgCadence'])} {cad_unit}" if pd.notna(selected_row.get("avgCadence")) else "—")
 
     m6, m7, m8, _, _ = st.columns(5)
     m6.metric("🔥 Calories", f"{int(selected_row['calories'])} kcal" if pd.notna(selected_row.get("calories")) else "—")
@@ -453,6 +457,8 @@ if selected_event.selection.rows:
         max_hr_act = int(selected_row.get("maxHR") or 190)
         max_hr_act = max(150, min(220, max_hr_act))
         _render_streams(streams, max_hr=max_hr_act)
+        if selected_row.get("activityType") == "running":
+            render_signal_quality(streams)
 
     if details and details.get("splits"):
         st.subheader("📊 Laps")

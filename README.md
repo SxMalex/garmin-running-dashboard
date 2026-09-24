@@ -203,8 +203,9 @@ docker compose exec app rm -rf /app/.cache   # vider le cache disque
 python3 -m venv .venv
 .venv/bin/pip install -r app/requirements.txt -r requirements.txt pytest
 
-# Puis :
-.venv/bin/python -m pytest tests/ -v
+# Puis — deux suites, à lancer séparément (tests/ remplace streamlit par un mock) :
+.venv/bin/python -m pytest tests/ -v          # logique pure
+.venv/bin/python -m pytest tests_ui/ -q       # pages rendues en headless (AppTest, faux Garmin)
 
 # ── Test de connexion CLI ────────────────────────────────────────────
 .venv/bin/python test_connection.py
@@ -228,6 +229,7 @@ Pour se déconnecter : bouton **« Déconnexion »** dans la barre latérale
 | `GARMIN_TOKENSTORE` | `/app/.garmin` (Docker) ou `~/.garminconnect` | Dossier des tokens garth |
 | `CACHE_DIR` | `/app/.cache` (Docker) ou `~/.cache/garmin-dashboard` | Cache disque des appels API |
 | `CACHE_TTL` | `3600` | Durée du cache disque en secondes |
+| `STREAMS_CACHE_TTL` | `2592000` (30 j) | Durée du cache des streams d'activité (conservés par « Actualiser ») |
 | `ORS_API_KEY` | — | Clé OpenRouteService (page Prochaine sortie) |
 | `PUBLIC_DOMAIN` | — | *(prod)* Domaine servi par Caddy |
 | `ACME_EMAIL` | — | *(prod)* Email Let's Encrypt |
@@ -302,6 +304,12 @@ _cache_get(athlete_id, key) (fichier JSON sur disque, TTL 1h)
       ▼
 API Garmin Connect (réseau, cooldown 0.4 s après chaque appel réel)
 ```
+
+Les **streams** d'activité (FC, allure, cadence… point par point) ont leur
+propre dossier `streams/` et un TTL long (`STREAMS_CACHE_TTL`, 30 jours) : une
+sortie passée ne change plus, et la page Progression en analyse jusqu'à 12.
+Le bouton « Actualiser » vide tout le reste mais **conserve les streams**
+(il n'en purge que les expirés).
 
 Le cooldown évite le ban temporaire que Garmin applique aux clients trop agressifs.
 

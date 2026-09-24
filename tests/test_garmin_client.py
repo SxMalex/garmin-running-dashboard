@@ -316,6 +316,94 @@ class TestDiskCache:
         client.invalidate_cache()
         assert gc._cache_get(1, "clef") is None
 
+    def test_invalidate_spares_streams_unless_asked(self):
+        client = GarminClient(api=FakeApi(), athlete_id=1)
+        gc._cache_set(1, "s", {"time": [0]}, bucket=gc.STREAMS_BUCKET)
+        client.invalidate_cache()
+        assert gc._cache_get(1, "s", bucket=gc.STREAMS_BUCKET) == {"time": [0]}
+        client.invalidate_cache(include_streams=True)
+        assert gc._cache_get(1, "s", bucket=gc.STREAMS_BUCKET) is None
+
+    def test_custom_ttl(self, monkeypatch):
+        gc._cache_set(1, "clef", "valeur")
+        monkeypatch.setattr(gc, "CACHE_TTL", 0)
+        assert gc._cache_get(1, "clef", ttl=3600) == "valeur"
+
+    def test_atomic_write_leaves_no_tmp(self):
+        gc._cache_set(1, "clef", {"a": 1})
+        folder = gc._cache_path(1, "clef").parent
+        assert not list(folder.glob("*.tmp"))
+
+    def test_failed_write_keeps_previous_value(self, monkeypatch):
+        """Une écriture qui échoue en plein dump ne corrompt pas l'ancien fichier."""
+        gc._cache_set(1, "clef", {"v": 1})
+
+        def broken_dump(obj, f, **kw):
+            f.write('{"timestamp": 1, "da')
+            raise OSError("disque plein")
+
+        with monkeypatch.context() as m:
+            m.setattr(gc.json, "dump", broken_dump)
+            gc._cache_set(1, "clef", {"v": 2})
+        assert gc._cache_get(1, "clef") == {"v": 1}
+        assert not list(gc._cache_path(1, "clef").parent.glob("*.tmp"))
+
+    def test_invalidate_sweeps_expired_streams(self, monkeypatch):
+        client = GarminClient(api=FakeApi(), athlete_id=1)
+        gc._cache_set(1, "vieux", {"time": [0]}, bucket=gc.STREAMS_BUCKET)
+        folder = gc._cache_path(1, "vieux", bucket=gc.STREAMS_BUCKET).parent
+        (folder / "orphelin.123.tmp").write_text("x")
+        monkeypatch.setattr(gc, "STREAMS_TTL", -1)
+        client.invalidate_cache()
+        assert list(folder.iterdir()) == []
+
+
+class DetailsApi(FakeApi):
+    def __init__(self, details=None, error=None):
+        super().__init__()
+        self.details, self.error, self.detail_calls = details, error, 0
+
+    def get_activity_details(self, activity_id, maxchart=2000, maxpoly=4000):
+        self.detail_calls += 1
+        if self.error:
+            raise self.error
+        return self.details
+
+
+class TestGetStreams:
+    def test_cached_in_streams_bucket(self, garmin_raw_details, monkeypatch):
+        monkeypatch.setattr(gc, "API_COOLDOWN_S", 0)
+        api = DetailsApi(garmin_raw_details)
+        client = GarminClient(api=api, athlete_id=1)
+        first = client.get_streams(7)
+        client.invalidate_cache()  # « Actualiser » ne doit pas re-télécharger
+        assert client.get_streams(7) == first
+        assert api.detail_calls == 1
+
+    def test_empty_streams_not_cached(self, monkeypatch):
+        monkeypatch.setattr(gc, "API_COOLDOWN_S", 0)
+        api = DetailsApi({"metricDescriptors": [], "activityDetailMetrics": []})
+        client = GarminClient(api=api, athlete_id=1)
+        assert client.get_streams(7) == {}
+        client.get_streams(7)
+        assert api.detail_calls == 2
+
+    def test_strict_raises_on_api_error(self):
+        client = GarminClient(api=DetailsApi(error=RuntimeError("429")), athlete_id=1)
+        with pytest.raises(RuntimeError):
+            client.get_streams(7, strict=True)
+
+    def test_unparsable_details_do_not_raise(self, monkeypatch):
+        monkeypatch.setattr(gc, "API_COOLDOWN_S", 0)
+        client = GarminClient(api=DetailsApi({"metricDescriptors": "oups",
+                                              "activityDetailMetrics": [1]}), athlete_id=1)
+        assert client.get_streams(7, strict=True) == {}
+
+    def test_lenient_returns_empty_on_api_error(self, monkeypatch):
+        monkeypatch.setattr(gc.time, "sleep", lambda s: None)
+        client = GarminClient(api=DetailsApi(error=RuntimeError("boom")), athlete_id=1)
+        assert client.get_streams(7) == {}
+
 
 # ---------------------------------------------------------------------------
 # GarminClient.get_activities

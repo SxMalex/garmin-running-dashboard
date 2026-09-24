@@ -15,6 +15,7 @@ import time
 import shutil
 import hashlib
 import logging
+import threading
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Callable, Optional
@@ -156,20 +157,32 @@ def athlete_id_of(api: Garmin) -> int:
 # Utilitaires de cache disque (cloisonné par athlete_id)
 # ---------------------------------------------------------------------------
 
-def _cache_path(athlete_id: int, key: str) -> Path:
+# Les streams d'une activité passée ne changent (quasiment) plus : ils ont leur
+# propre dossier, un TTL long, et survivent au bouton « Actualiser » — sinon la
+# tendance de dérive re-téléchargerait N activités à chaque rafraîchissement.
+STREAMS_BUCKET = "streams"
+STREAMS_TTL = int(os.getenv("STREAMS_CACHE_TTL", str(30 * 86400)))
+
+
+def _cache_path(athlete_id: int, key: str, bucket: Optional[str] = None) -> Path:
     """Cache file path under a per-athlete subdirectory."""
     safe_key = hashlib.md5(key.encode()).hexdigest()
-    return CACHE_DIR / str(athlete_id) / f"{safe_key}.json"
+    base = CACHE_DIR / str(athlete_id)
+    if bucket:
+        base = base / bucket
+    return base / f"{safe_key}.json"
 
 
-def _cache_get(athlete_id: int, key: str) -> Optional[object]:
-    path = _cache_path(athlete_id, key)
+def _cache_get(
+    athlete_id: int, key: str, ttl: Optional[int] = None, bucket: Optional[str] = None
+) -> Optional[object]:
+    path = _cache_path(athlete_id, key, bucket)
     if not path.exists():
         return None
     try:
         with open(path, "r", encoding="utf-8") as f:
             entry = json.load(f)
-        if time.time() - entry["timestamp"] < CACHE_TTL:
+        if time.time() - entry["timestamp"] < (CACHE_TTL if ttl is None else ttl):
             return entry["data"]
         path.unlink(missing_ok=True)
     except (json.JSONDecodeError, KeyError, OSError) as e:
@@ -177,13 +190,23 @@ def _cache_get(athlete_id: int, key: str) -> Optional[object]:
     return None
 
 
-def _cache_set(athlete_id: int, key: str, data: object) -> None:
-    path = _cache_path(athlete_id, key)
+def _cache_set(
+    athlete_id: int, key: str, data: object, bucket: Optional[str] = None
+) -> None:
+    path = _cache_path(athlete_id, key, bucket)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"timestamp": time.time(), "data": data}, f, default=str)
-    except OSError as e:
+        # Écriture atomique : un lecteur concurrent (autre session, serveur
+        # MCP) ne doit jamais lire un fichier à moitié écrit. Les sessions
+        # Streamlit sont des threads d'un même process : pid ET thread.
+        tmp = path.with_suffix(f".{os.getpid()}-{threading.get_ident()}.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"timestamp": time.time(), "data": data}, f, default=str)
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+    except (OSError, TypeError, ValueError) as e:
         logger.warning("Impossible d'écrire le cache : %s", e)
 
 
@@ -579,14 +602,18 @@ class GarminClient:
         time.sleep(API_COOLDOWN_S)
         return result
 
-    def get_streams(self, activity_id: int) -> dict[str, list]:
+    def get_streams(self, activity_id: int, strict: bool = False) -> dict[str, list]:
         """
         Streams haute résolution d'une activité, format Strava :
         time, distance, latlng, heartrate, altitude, velocity_smooth,
         cadence, grade_smooth.
+
+        `strict=True` relève l'erreur API au lieu de renvoyer `{}` : une boucle
+        sur plusieurs activités doit pouvoir s'arrêter au premier refus (429)
+        plutôt que de marteler Garmin.
         """
-        cache_key = f"streams_v1_{activity_id}"
-        cached = _cache_get(self.athlete_id, cache_key)
+        cache_key = f"streams_v2_{activity_id}"
+        cached = _cache_get(self.athlete_id, cache_key, ttl=STREAMS_TTL, bucket=STREAMS_BUCKET)
         if cached is not None:
             return cached
 
@@ -594,14 +621,25 @@ class GarminClient:
             raw = self.api.get_activity_details(
                 str(activity_id), maxchart=2000, maxpoly=4000
             )
-            result = build_streams(raw)
-            _cache_set(self.athlete_id, cache_key, result)
-            time.sleep(API_COOLDOWN_S)
-            return result
         except Exception as e:
+            if strict:
+                raise
             logger.warning("Streams indisponibles pour l'activité %s : %s", activity_id, e)
             time.sleep(1.0)
             return {}
+        try:
+            result = build_streams(raw)
+        except Exception as e:
+            # Réponse inattendue : ce n'est pas un refus de Garmin, pas la
+            # peine d'arrêter une boucle ni de planter la page.
+            logger.warning("Streams illisibles pour l'activité %s : %s", activity_id, e)
+            return {}
+        # Un stream vide peut être transitoire (activité en cours de synchro) :
+        # on ne le fige pas pour 30 jours.
+        if result:
+            _cache_set(self.athlete_id, cache_key, result, bucket=STREAMS_BUCKET)
+        time.sleep(API_COOLDOWN_S)
+        return result
 
     def get_splits_aggregate(self, activity_ids: list[int]) -> pd.DataFrame:
         """
@@ -1046,12 +1084,35 @@ class GarminClient:
     # Cache
     # ------------------------------------------------------------------
 
-    def invalidate_cache(self) -> None:
-        """Supprime le cache disque de cet athlète uniquement."""
+    def invalidate_cache(self, include_streams: bool = False) -> None:
+        """
+        Supprime le cache disque de cet athlète uniquement. Les streams
+        (immuables, coûteux à re-télécharger) sont conservés sauf demande
+        explicite.
+        """
         athlete_dir = CACHE_DIR / str(self.athlete_id)
-        if athlete_dir.exists():
-            shutil.rmtree(athlete_dir, ignore_errors=True)
+        if not athlete_dir.exists():
+            return
+        for child in athlete_dir.iterdir():
+            if child.name == STREAMS_BUCKET and not include_streams:
+                _sweep_streams(child)
+                continue
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
         logger.info("Cache invalidé pour l'athlète %s.", self.athlete_id)
+
+
+def _sweep_streams(folder: Path) -> None:
+    """Purge des streams expirés et des fichiers temporaires orphelins."""
+    now = time.time()
+    for f in folder.iterdir():
+        try:
+            if f.suffix == ".tmp" or now - f.stat().st_mtime > STREAMS_TTL:
+                f.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------

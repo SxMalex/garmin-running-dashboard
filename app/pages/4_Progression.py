@@ -9,6 +9,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from physio_ui import render_aerobic_progress
 from progression_logic import (
     RACE_TARGETS,
     fmt_race_pace,
@@ -228,5 +229,10 @@ else:
                           delta=pr["date_str"] or None, delta_color="off")
                 if pr["activity_name"]:
                     st.caption(pr["activity_name"])
+
+# En fin de page : peut demander jusqu'à DECOUPLING_TREND_MAX_RUNS appels API
+# au premier chargement, sans retarder les records et prédictions.
+st.divider()
+render_aerobic_progress(df, _athlete_id)
 
 render_garmin_attribution()
