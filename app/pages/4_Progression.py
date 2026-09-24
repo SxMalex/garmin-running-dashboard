@@ -9,7 +9,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from physio_ui import render_aerobic_progress
+from physio_ui import render_aerobic_progress, render_physio_settings
+from ui_mode import explain
 from progression_logic import (
     RACE_TARGETS,
     fmt_race_pace,
@@ -34,6 +35,7 @@ st.set_page_config(
 )
 
 require_login()
+render_physio_settings()
 
 _athlete_id = get_athlete_id()
 
@@ -204,6 +206,7 @@ if not vo2.empty:
         f"Estimation Garmin portée par chaque sortie ({len(vo2)} points sur les "
         "activités chargées)."
     )
+    explain("vo2max")
 else:
     st.info("Pas de VO2max sur les activités chargées.")
 

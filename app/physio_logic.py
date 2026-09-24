@@ -457,7 +457,8 @@ def efficiency_change(trend: pd.DataFrame, days: int = 90) -> float | None:
     return round((float(last["ef_smooth"]) - ref) / ref * 100, 1)
 
 
-def decoupling_history(items: list[tuple[dict, dict]], **params) -> pd.DataFrame:
+def decoupling_history(items: list[tuple[dict, dict]], lock_params: dict | None = None,
+                       **params) -> pd.DataFrame:
     """
     Dérive cardiaque de plusieurs sorties : `items` = [(ligne d'activité, streams)].
     Ne garde que les mesures valides ; la FC calée sur la cadence est exclue
@@ -471,7 +472,7 @@ def decoupling_history(items: list[tuple[dict, dict]], **params) -> pd.DataFrame
     for activity, streams in items:
         if not streams:
             continue
-        lock = hr_cadence_lock(streams)
+        lock = hr_cadence_lock(streams, **(lock_params or {}))
         res = aerobic_decoupling(streams, exclude_mask=lock["mask"], **params)
         if not res["valid"]:
             continue

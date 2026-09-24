@@ -117,3 +117,29 @@ def downgrade_session(session_key: str, steps: int = 1) -> str:
     for _ in range(max(0, steps)):
         key = _SESSION_DOWNGRADE.get(key, key)
     return key
+
+
+def _first_dict(raw) -> dict:
+    """Garmin renvoie selon les endpoints un dict ou une liste d'un dict."""
+    if isinstance(raw, list):
+        raw = raw[0] if raw else {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def parse_recovery(hrv_raw, sleep_raw, daily_raw=None) -> dict:
+    """
+    Récupération du jour à partir des réponses brutes Garmin (HRV, sommeil,
+    stats quotidiennes). Point unique de lecture de ces payloads : Accueil,
+    Forme, Prochaine sortie et serveur MCP y lisent les mêmes champs.
+    """
+    hrv_summary = _first_dict(hrv_raw).get("hrvSummary") or {}
+    sleep_dto = _first_dict(sleep_raw).get("dailySleepDTO") or {}
+    return {
+        "hrv_summary": hrv_summary,
+        "hrv_status": hrv_summary.get("status"),
+        "hrv_last": hrv_summary.get("lastNightAvg"),
+        "sleep_dto": sleep_dto,
+        "sleep_sec": sleep_dto.get("sleepTimeSeconds"),
+        "sleep_score": ((sleep_dto.get("sleepScores") or {}).get("overall") or {}).get("value"),
+        "daily": _first_dict(daily_raw),
+    }

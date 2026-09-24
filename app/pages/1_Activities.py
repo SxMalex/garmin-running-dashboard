@@ -12,7 +12,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 
 from formatting import decimate, seconds_to_pace_str
-from physio_ui import render_signal_quality
+from physio_ui import render_physio_settings, render_signal_quality
 from ui_helpers import (
     cached_load_activities,
     get_garmin_client,
@@ -32,6 +32,7 @@ st.set_page_config(
 )
 
 require_login()
+render_physio_settings()
 
 _athlete_id = get_athlete_id()
 

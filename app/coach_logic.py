@@ -418,3 +418,18 @@ def hard_session_alert(context: dict | None, downgrade: int) -> str | None:
         "À toi de juger : la décaler d'un jour, ou la faire en réduisant les "
         "répétitions. Le plan s'adapte de lui-même si tu la sautes."
     )
+
+
+def load_coach_context(client, day: date) -> dict | None:
+    """
+    Contexte du plan Garmin Run Coach actif pour `day`, ou None. `client` est
+    un GarminClient (ou tout objet exposant get_training_plans /
+    get_adaptive_plan) : c'est l'unique chemin de lecture du plan, partagé par
+    les pages (via ui_helpers.cached_coach_context) et le serveur MCP.
+    """
+    plans = client.get_training_plans()
+    plan = active_plan(plans)
+    if plan is None:
+        return None
+    detail = client.get_adaptive_plan(plan["plan_id"])
+    return coach_plan_context(plans, detail, day)

@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from datetime import date, datetime, timedelta, timezone
 from formatting import seconds_to_pace_str
-from forme_logic import downgrade_session
+from forme_logic import downgrade_session, forme_downgrade
 
 _JOURS_FR = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
 _MOIS_FR = ["jan.", "fév.", "mars", "avr.", "mai", "juin",
@@ -315,6 +315,46 @@ def compute_pmc_series(activities_df: pd.DataFrame, threshold_sec: float) -> pd.
     return pd.DataFrame(records)
 
 
+# Zones ACWR (Gabbett, Br J Sports Med 2016) — indicateur discuté
+# (Impellizzeri et al. 2020) : signal d'alerte, pas prédiction de blessure.
+ACWR_ZONES = [(0.8, "sous_charge"), (1.3, "optimal"), (1.5, "vigilance"), (float("inf"), "risque")]
+MONOTONY_HIGH = 2.0  # Foster 1998
+
+
+def load_risk(pmc: pd.DataFrame) -> dict:
+    """
+    Indicateurs avancés de gestion de charge, sur la série `compute_pmc_series`
+    (déjà réindexée jour par jour, jours sans séance à 0 — sinon une fenêtre
+    de 7 lignes compterait 7 activités et non 7 jours).
+
+    - `acwr` : TSS moyen des 7 derniers jours ÷ TSS moyen des 28 derniers ;
+    - `monotony` (Foster) : moyenne ÷ écart-type du TSS quotidien sur 7 jours
+      (None si l'écart-type est nul : 7 jours identiques, typiquement 7 × 0) ;
+    - `strain` : charge de la semaine × monotonie.
+    Retourne {} si moins de 28 jours d'historique.
+    """
+    if pmc is None or len(pmc) < 28:
+        return {}
+    tss = pmc["tss"].astype(float)
+    acute = float(tss.iloc[-7:].mean())
+    chronic = float(tss.iloc[-28:].mean())
+    acwr = acute / chronic if chronic > 0 else None
+    sd = float(tss.iloc[-7:].std(ddof=0))
+    monotony = acute / sd if sd > 0 else None
+    zone = None
+    if acwr is not None:
+        zone = next(name for limit, name in ACWR_ZONES if acwr < limit)
+    return {
+        "acute": round(acute, 1),
+        "chronic": round(chronic, 1),
+        "acwr": round(acwr, 2) if acwr is not None else None,
+        "acwr_zone": zone,
+        "monotony": round(monotony, 2) if monotony is not None else None,
+        "monotony_high": monotony is not None and monotony > MONOTONY_HIGH,
+        "strain": round(float(tss.iloc[-7:].sum()) * monotony) if monotony is not None else None,
+    }
+
+
 def reference_threshold_sec(activities_df: pd.DataFrame) -> int:
     """
     Allure seuil de référence (sec/km) déduite des sorties longues : percentile
@@ -492,3 +532,24 @@ def build_gpx(route: dict, session_label: str, target_pace_str: str) -> str:
         lines.append(f'      <trkpt lat="{lat:.6f}" lon="{lon:.6f}">{ele_tag}</trkpt>')
     lines += ["    </trkseg>", "  </trk>", "</gpx>"]
     return "\n".join(lines)
+
+
+def todays_session(activities_df: pd.DataFrame, hrv_status, sleep_score,
+                   coach_context: dict | None) -> dict:
+    """
+    Séance du jour telle que l'annonce toute l'app : plan Garmin Run Coach en
+    priorité, logique interne en repli, modulée par la récupération (HRV,
+    sommeil). Retourne {"rec", "downgrade", "alert"}. Accueil, Prochaine
+    sortie et serveur MCP passent tous par ici — une page qui recomposerait
+    ces appels risquerait d'annoncer une autre séance que la montre.
+    """
+    from coach_logic import hard_session_alert, merge_coach_into_recommendation
+
+    downgrade = forme_downgrade(hrv_status, sleep_score)
+    running = activities_df[activities_df["activityType"] == RUNNING_TYPE] \
+        if activities_df is not None and not activities_df.empty else pd.DataFrame()
+    rec = merge_coach_into_recommendation(
+        recommend_session(running, downgrade=downgrade, load_df=activities_df), coach_context
+    )
+    return {"rec": rec, "downgrade": downgrade,
+            "alert": hard_session_alert(coach_context, downgrade)}

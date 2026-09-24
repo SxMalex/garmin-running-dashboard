@@ -8,9 +8,11 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import chart_theme  # active le template Plotly gar_dark
-from coach_logic import active_plan, coach_plan_context
+from coach_logic import load_coach_context
 from formatting import map_zoom
+from ui_mode import render_mode_toggle
 from garmin_client import (
+    ACTIVITY_HISTORY_LIMIT,
     GarminClient,
     athlete_id_of,
     resume_session,
@@ -19,16 +21,8 @@ from garmin_client import (
 
 ACCENT_COLOR = chart_theme.PACE  # la couleur suit l'entité (allure/tracé)
 
-# Profondeur d'historique commune à toutes les pages. Une seule valeur partagée,
-# pour deux raisons :
-# - les métriques de charge (CTL/ATL/TSB et l'allure seuil de référence dont elles
-#   dépendent) sont fonction de l'historique chargé : deux limites différentes
-#   affichaient deux TSB différents d'une page à l'autre ;
-# - le cache disque est indexé par `activities_{limit}` — une valeur unique veut
-#   dire un seul fetch partagé par toutes les pages au lieu d'un par limite.
-# Volontairement au-delà de tout historique réaliste : la pagination Garmin
-# s'arrête d'elle-même quand il n'y a plus d'activités (cf. get_activities).
-ACTIVITY_HISTORY_LIMIT = 1500
+# Profondeur d'historique commune (définie dans garmin_client, sans Streamlit,
+# pour que le serveur MCP charge exactement le même historique que les pages).
 
 
 def get_session_api():
@@ -68,6 +62,9 @@ def require_login() -> None:
     formulaire de connexion) et on arrête le rendu de la page courante.
     """
     if get_session_api() is not None:
+        # Bascule Light/Pro rendue sur CHAQUE page (toutes passent par ici) :
+        # un widget absent d'une page perdrait son état.
+        render_mode_toggle()
         return
     st.title("🔒 Connexion requise")
     st.warning(
@@ -138,13 +135,7 @@ def cached_load_activities(
 def _cached_coach_context_impl(athlete_id: int, cdate: str, nonce: int):
     """Le `nonce` est dans la signature pour servir de clé de cache per-session."""
     del nonce  # uniquement pour la cache key
-    client = get_garmin_client()
-    plans = client.get_training_plans()
-    plan = active_plan(plans)
-    if plan is None:
-        return None
-    detail = client.get_adaptive_plan(plan["plan_id"])
-    return coach_plan_context(plans, detail, date.fromisoformat(cdate))
+    return load_coach_context(get_garmin_client(), date.fromisoformat(cdate))
 
 
 def cached_coach_context(athlete_id: int, cdate: str | None = None):

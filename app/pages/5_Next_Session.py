@@ -13,19 +13,16 @@ import streamlit as st
 from datetime import date, datetime, timedelta
 
 from coach_logic import (
-    hard_session_alert,
-    merge_coach_into_recommendation,
     target_label,
 )
 from formatting import map_zoom, seconds_to_pace_str, weekday_fr
-from forme_logic import forme_downgrade
+from forme_logic import parse_recovery
 from next_session_logic import SESSION_TYPES as _SESSION_TYPES  # noqa: F401
 from next_session_logic import (
     SESSION_TYPES,
-    compute_tsb as _compute_tsb,
-    recommend_session as _recommend_session,
     parse_ors_route as _parse_ors_route,
     build_gpx as _build_gpx,
+    todays_session,
 )
 from ui_helpers import (
     cached_coach_context,
@@ -189,17 +186,11 @@ ors_key = os.getenv("ORS_API_KEY", "")
 @st.cache_data(ttl=3600, show_spinner=False)
 def _load_recovery(athlete_id: int, cdate: str) -> tuple:
     client = get_garmin_client()
-    hrv_raw = client.get_hrv(cdate)
-    hrv = hrv_raw[0] if isinstance(hrv_raw, list) and hrv_raw else (hrv_raw or {})
-    hrv_status = ((hrv.get("hrvSummary") or {}) if isinstance(hrv, dict) else {}).get("status")
-    sleep_raw = client.get_sleep(cdate) or {}
-    sleep_dto = (sleep_raw.get("dailySleepDTO") or {}) if isinstance(sleep_raw, dict) else {}
-    sleep_score = ((sleep_dto.get("sleepScores") or {}).get("overall") or {}).get("value")
-    return hrv_status, sleep_score
+    recovery = parse_recovery(client.get_hrv(cdate), client.get_sleep(cdate))
+    return recovery["hrv_status"], recovery["sleep_score"]
 
 
 _hrv_status, _sleep_score = _load_recovery(_athlete_id, date.today().isoformat())
-_downgrade = forme_downgrade(_hrv_status, _sleep_score)
 
 # Plan Garmin Run Coach — quand il y en a un d'actif, c'est lui qui décide de la
 # séance ; la logique interne ne sert plus que de repli. Le chargement passe par
@@ -210,8 +201,8 @@ _coach = cached_coach_context(_athlete_id, _today.isoformat())
 # Recommandation calculée avant la sidebar pour alimenter les défauts
 # `load_df=df` : la fraîcheur qui choisit la séance intègre le sport croisé,
 # comme le TSB affiché sur l'Accueil et la page Forme.
-rec = _recommend_session(running_df, downgrade=_downgrade, load_df=df)
-rec = merge_coach_into_recommendation(rec, _coach)
+_today_session = todays_session(df, _hrv_status, _sleep_score, _coach)
+rec, _downgrade = _today_session["rec"], _today_session["downgrade"]
 s = SESSION_TYPES[rec["session_key"]]
 rec["session"] = s
 _coach_task = rec.get("coach_task")
@@ -319,7 +310,7 @@ else:
             "viennent — recommandation calculée depuis ta charge d'entraînement."
         )
 
-_coach_alert = hard_session_alert(_coach, _downgrade)
+_coach_alert = _today_session["alert"]
 if _coach_alert:
     _causes = []
     if _hrv_status and _hrv_status.upper() != "BALANCED":

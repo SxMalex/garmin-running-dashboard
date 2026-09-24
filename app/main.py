@@ -17,13 +17,12 @@ from garmin_client import (
     login_with_credentials,
 )
 from coach_logic import (
-    hard_session_alert,
-    merge_coach_into_recommendation,
     target_label,
 )
 from formatting import weekday_fr
-from forme_logic import compute_forme_verdict, forme_downgrade
-from next_session_logic import SESSION_TYPES, compute_tsb, recommend_session
+from forme_logic import compute_forme_verdict, parse_recovery
+from next_session_logic import SESSION_TYPES, compute_tsb, todays_session
+from ui_mode import explain, render_mode_toggle
 from ui_helpers import (
     cached_coach_context,
     cached_load_activities,
@@ -145,16 +144,8 @@ def load_full_name(athlete_id: int) -> str:
 def load_today(athlete_id: int, cdate: str) -> dict:
     """Sommeil, HRV et stats quotidiennes du jour — pour le bandeau du matin."""
     client = get_garmin_client()
-    hrv_raw = client.get_hrv(cdate)
-    hrv = hrv_raw[0] if isinstance(hrv_raw, list) and hrv_raw else (hrv_raw or {})
-    sleep_raw = client.get_sleep(cdate) or {}
-    daily_raw = client.get_daily_stats(cdate)
-    daily = daily_raw[0] if isinstance(daily_raw, list) and daily_raw else (daily_raw or {})
-    return {
-        "hrv_summary": (hrv.get("hrvSummary") or {}) if isinstance(hrv, dict) else {},
-        "sleep_dto": (sleep_raw.get("dailySleepDTO") or {}) if isinstance(sleep_raw, dict) else {},
-        "daily": daily if isinstance(daily, dict) else {},
-    }
+    return parse_recovery(client.get_hrv(cdate), client.get_sleep(cdate),
+                          client.get_daily_stats(cdate))
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -165,6 +156,8 @@ def load_streams(athlete_id: int, activity_id: int) -> dict:
 # ---------------------------------------------------------------------------
 # Barre latérale
 # ---------------------------------------------------------------------------
+render_mode_toggle()
+
 with st.sidebar:
     st.markdown("## ⚙️ Paramètres")
 
@@ -241,10 +234,10 @@ sleep_dto = today["sleep_dto"]
 hrv_summary = today["hrv_summary"]
 daily = today["daily"]
 
-sleep_sec = sleep_dto.get("sleepTimeSeconds")
-sleep_score = ((sleep_dto.get("sleepScores") or {}).get("overall") or {}).get("value")
-hrv_status = hrv_summary.get("status")
-hrv_last = hrv_summary.get("lastNightAvg")
+sleep_sec = today["sleep_sec"]
+sleep_score = today["sleep_score"]
+hrv_status = today["hrv_status"]
+hrv_last = today["hrv_last"]
 
 # Toutes les activités, pas seulement la course : le wing, le vélo ou la
 # muscu fatiguent aussi (cf. compute_pmc_series).
@@ -274,6 +267,7 @@ t5.metric("🎯 Forme", f"{verdict['icon']} {verdict['label']}",
           delta=f"TSB {tsb:+.0f}" if tsb is not None else None, delta_color="off")
 
 st.page_link("pages/3_Forme.py", label="Voir le détail de la forme", icon="⚡")
+explain("tsb")
 
 st.divider()
 
@@ -312,11 +306,9 @@ st.divider()
 if len(running_df) >= 3:
     # Même chaîne que la page Prochaine sortie : plan Garmin d'abord, logique
     # interne en repli, modulée par la récupération du jour.
-    _downgrade = forme_downgrade(hrv_status, sleep_score)
     _coach = cached_coach_context(_athlete_id)
-    rec = merge_coach_into_recommendation(
-        recommend_session(running_df, downgrade=_downgrade, load_df=df), _coach
-    )
+    _today_session = todays_session(df, hrv_status, sleep_score, _coach)
+    rec, _downgrade = _today_session["rec"], _today_session["downgrade"]
     s = SESSION_TYPES[rec["session_key"]]
     _task = rec.get("coach_task")
 
@@ -340,7 +332,7 @@ if len(running_df) >= 3:
             _plan_bits.append(f"J−{_coach['days_to_event']}")
         st.caption(" · ".join(_plan_bits))
 
-        _alert = hard_session_alert(_coach, _downgrade)
+        _alert = _today_session["alert"]
         if _alert:
             st.warning(_alert, icon="🛟")
     else:

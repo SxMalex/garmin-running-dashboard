@@ -437,3 +437,41 @@ class TestNutritionFocus:
         """Chaque type de séance du dashboard doit avoir son axe nutritionnel."""
         from next_session_logic import SESSION_TYPES
         assert set(SESSION_TYPES) <= set(NUTRITION_FOCUS)
+
+
+# ---------------------------------------------------------------------------
+# load_coach_context / todays_session — chemin unique pages + MCP
+# ---------------------------------------------------------------------------
+
+class _PlansClient:
+    def __init__(self, plans, detail=None):
+        self.plans, self.detail, self.detail_calls = plans, detail or {}, 0
+
+    def get_training_plans(self):
+        return self.plans
+
+    def get_adaptive_plan(self, plan_id):
+        self.detail_calls += 1
+        return self.detail
+
+
+def test_load_coach_context_none_without_active_plan():
+    from datetime import date
+    from coach_logic import load_coach_context
+    client = _PlansClient({"trainingPlanList": []})
+    assert load_coach_context(client, date(2026, 9, 24)) is None
+    assert client.detail_calls == 0
+
+
+def test_todays_session_matches_legacy_composition(sample_running_df):
+    """Même résultat que l'ancien enchaînement des pages (non-régression)."""
+    from coach_logic import hard_session_alert, merge_coach_into_recommendation
+    from forme_logic import forme_downgrade
+    from next_session_logic import recommend_session, todays_session
+    for hrv, sleep in [("BALANCED", 80), ("LOW", 50), (None, None)]:
+        got = todays_session(sample_running_df, hrv, sleep, None)
+        n = forme_downgrade(hrv, sleep)
+        legacy = merge_coach_into_recommendation(
+            recommend_session(sample_running_df, downgrade=n, load_df=sample_running_df), None)
+        assert got["rec"] == legacy and got["downgrade"] == n
+        assert got["alert"] == hard_session_alert(None, n)

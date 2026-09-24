@@ -121,3 +121,25 @@ class TestRecommendSessionDowngrade:
         from next_session_logic import recommend_session
         rec = recommend_session(make_running_df(n=10, days_apart=3))
         assert rec["downgraded_from"] is None
+
+
+# ---------------------------------------------------------------------------
+# parse_recovery — lecture unique des payloads HRV / sommeil / stats
+# ---------------------------------------------------------------------------
+
+def test_parse_recovery_dicts_and_lists():
+    from forme_logic import parse_recovery
+    r = parse_recovery(
+        [{"hrvSummary": {"status": "BALANCED", "lastNightAvg": 52}}],
+        {"dailySleepDTO": {"sleepTimeSeconds": 27000, "sleepScores": {"overall": {"value": 81}}}},
+        [{"restingHeartRate": 48}],
+    )
+    assert (r["hrv_status"], r["hrv_last"], r["sleep_sec"], r["sleep_score"]) == ("BALANCED", 52, 27000, 81)
+    assert r["daily"]["restingHeartRate"] == 48
+
+
+def test_parse_recovery_empty_or_garbage():
+    from forme_logic import parse_recovery
+    for raw in (None, {}, [], "x", [None]):
+        r = parse_recovery(raw, raw, raw)
+        assert r["hrv_status"] is None and r["sleep_score"] is None and r["daily"] == {}

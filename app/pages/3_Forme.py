@@ -10,8 +10,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from forme_logic import compute_forme_verdict
-from next_session_logic import compute_tsb
+from forme_logic import compute_forme_verdict, parse_recovery
+from next_session_logic import compute_pmc_series, compute_tsb, load_risk, reference_threshold_sec
+from ui_mode import explain, help_text, is_pro
 from stats_tabs import tab_charge
 from ui_helpers import (
     cached_load_activities,
@@ -59,13 +60,6 @@ def load_body_battery(athlete_id: int, start: str, end: str):
 # ---------------------------------------------------------------------------
 # Parsing défensif des réponses Garmin
 # ---------------------------------------------------------------------------
-def _as_dict(data) -> dict:
-    """Certains endpoints renvoient une liste de dicts — prend le premier."""
-    if isinstance(data, list):
-        return data[0] if data and isinstance(data[0], dict) else {}
-    return data if isinstance(data, dict) else {}
-
-
 def _parse_bb_points(day: dict) -> list[tuple]:
     """
     Extrait les points (timestamp, niveau) d'une journée Body Battery.
@@ -128,18 +122,16 @@ if error:
 # Historique complet : la charge des autres sports compte dans le TSB.
 ctl, atl, tsb = compute_tsb(df) if not df.empty else (0.0, 0.0, None)
 
-hrv = _as_dict(load_hrv(_athlete_id, cdate))
-hrv_summary = hrv.get("hrvSummary") or {}
-hrv_status = hrv_summary.get("status")
-hrv_last = hrv_summary.get("lastNightAvg")
+recovery = parse_recovery(load_hrv(_athlete_id, cdate), load_sleep(_athlete_id, cdate),
+                          load_daily_stats(_athlete_id, cdate))
+hrv_summary = recovery["hrv_summary"]
+hrv_status = recovery["hrv_status"]
+hrv_last = recovery["hrv_last"]
 hrv_baseline = hrv_summary.get("baseline") or {}
-
-sleep_raw = load_sleep(_athlete_id, cdate) or {}
-sleep_dto = (sleep_raw.get("dailySleepDTO") or {}) if isinstance(sleep_raw, dict) else {}
-sleep_sec = sleep_dto.get("sleepTimeSeconds")
-sleep_score = ((sleep_dto.get("sleepScores") or {}).get("overall") or {}).get("value")
-
-daily = _as_dict(load_daily_stats(_athlete_id, cdate))
+sleep_dto = recovery["sleep_dto"]
+sleep_sec = recovery["sleep_sec"]
+sleep_score = recovery["sleep_score"]
+daily = recovery["daily"]
 
 # ---------------------------------------------------------------------------
 # Verdict du jour
@@ -203,6 +195,29 @@ c5.metric("❤️ FC repos", f"{int(rhr)} bpm" if rhr else "—")
 
 stress = daily.get("averageStressLevel")
 c6.metric("🧠 Stress moyen", f"{int(stress)}" if stress and stress >= 0 else "—")
+
+e1, e2 = st.columns(2)
+with e1:
+    explain("tsb")
+with e2:
+    explain("hrv")
+
+if is_pro() and not df.empty:
+    risk = load_risk(compute_pmc_series(df, reference_threshold_sec(df)))
+    if risk:
+        _zone_label = {"sous_charge": "Sous-charge", "optimal": "Zone optimale",
+                       "vigilance": "Vigilance", "risque": "Hausse brutale"}
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("ACWR 7/28 j", f"{risk['acwr']:.2f}" if risk["acwr"] is not None else "—",
+                  delta=_zone_label.get(risk["acwr_zone"]), delta_color="off",
+                  help=help_text("acwr") + " Zones Gabbett 2016 ; indicateur discuté (Impellizzeri 2020).")
+        r2.metric("Monotonie 7 j", f"{risk['monotony']:.2f}" if risk["monotony"] is not None else "—",
+                  delta="élevée" if risk["monotony_high"] else None, delta_color="inverse",
+                  help=help_text("monotony"))
+        r3.metric("Strain 7 j", f"{risk['strain']:.0f}" if risk["strain"] is not None else "—",
+                  help="Charge de la semaine × monotonie (Foster).")
+        r4.metric("TSS aigu / chronique", f"{risk['acute']:.0f} / {risk['chronic']:.0f}",
+                  help="Moyennes quotidiennes sur 7 et 28 jours, jours de repos inclus.")
 
 st.divider()
 

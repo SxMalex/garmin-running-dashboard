@@ -24,6 +24,16 @@ from physio_logic import (
     hr_cadence_lock,
 )
 from ui_helpers import get_garmin_client
+from ui_mode import decoupling_params, explain, help_text, is_pro, lock_params, render_pro_settings
+
+PHYSIO_SETTINGS = ["lock_tol_bpm", "lock_min_duration_s", "lock_min_jump_bpm",
+                   "decoupling_warmup_min", "decoupling_min_moving_min",
+                   "decoupling_max_speed_cv"]
+
+
+def render_physio_settings() -> None:
+    """Curseurs Pro des seuils (FC calée, dérive) — mêmes valeurs sur toutes les pages."""
+    render_pro_settings(PHYSIO_SETTINGS)
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +59,8 @@ def render_signal_quality(streams: dict) -> dict:
     Bloc « Qualité du signal & endurance » d'une course. Retourne le résultat
     de dérive (pour réutilisation éventuelle par la page).
     """
-    lock = hr_cadence_lock(streams)
-    res = aerobic_decoupling(streams, exclude_mask=lock["mask"])
+    lock = hr_cadence_lock(streams, **lock_params())
+    res = aerobic_decoupling(streams, exclude_mask=lock["mask"], **decoupling_params())
 
     st.subheader("🫀 Qualité du signal & endurance")
     col_sig, col_dec = st.columns(2)
@@ -92,6 +102,18 @@ def render_signal_quality(streams: dict) -> dict:
             )
         else:
             st.info(f"**Dérive cardiaque non mesurable** — {res['reason']}")
+        if is_pro():
+            raw = {"Dérive (%)": pct, "EF 1re / 2de moitié": (res["ef_first"], res["ef_second"]),
+                   "Écart de vitesse entre moitiés": res["half_speed_diff"],
+                   "CV vitesse": res["speed_cv"], "D+ lissé (m/km)": res["climb_m_per_km"],
+                   "Effort (min)": res["moving_min"], "FC calée (s)": round(lock["locked_s"])}
+            st.caption(" · ".join(f"{k} : {v}" for k, v in raw.items() if v is not None))
+
+    e1, e2 = st.columns(2)
+    with e1:
+        explain("cadence_lock")
+    with e2:
+        explain("decoupling")
     return res
 
 
@@ -139,9 +161,7 @@ def render_aerobic_progress(activities_df, athlete_id: int) -> None:
             "Efficacité actuelle",
             f"{trend['ef_smooth'].iloc[-1]:.2f}",
             delta=f"{change:+.1f} % sur 90 j" if change is not None else None,
-            help="Mètres parcourus par minute pour chaque battement de cœur "
-                 "(médiane glissante 6 semaines). Plus c'est haut, plus tu vas "
-                 "vite pour le même effort cardiaque.",
+            help=help_text("ef") + " Médiane glissante sur 6 semaines.",
         )
         with col_chart:
             fig = go.Figure()
@@ -168,7 +188,7 @@ def render_aerobic_progress(activities_df, athlete_id: int) -> None:
     ids = tuple(int(c["activityId"]) for c in candidates)
     streams_by_id, failed = _load_candidate_streams(athlete_id, ids)
     items = [(c, streams_by_id.get(int(c["activityId"]))) for c in candidates]
-    hist = decoupling_history(items)
+    hist = decoupling_history(items, lock_params=lock_params(), **decoupling_params())
 
     st.markdown("**Dérive cardiaque des sorties longues**")
     if hist.empty:
@@ -203,3 +223,4 @@ def render_aerobic_progress(activities_df, athlete_id: int) -> None:
         note += (f" {failed} : {measured}/{len(candidates)} analysées, la suite sera "
                  "tentée au prochain chargement.")
     st.caption(note)
+    explain("ef")

@@ -818,3 +818,47 @@ class TestPmcAvecSportCroise:
         """Contrat historique : sans `load_df`, le comportement est identique."""
         runs = make_running_df(n=20, days_apart=3, with_location=False)
         assert _recommend_session(runs)["tsb"] == _recommend_session(runs, load_df=runs)["tsb"]
+
+
+# ---------------------------------------------------------------------------
+# load_risk (ACWR, monotonie)
+# ---------------------------------------------------------------------------
+
+def _pmc(daily_values):
+    import pandas as _pd
+    days = _pd.date_range("2026-01-01", periods=len(daily_values), freq="D")
+    return _pd.DataFrame({"date": days, "tss": daily_values})
+
+
+def test_load_risk_steady_is_optimal():
+    from next_session_logic import load_risk
+    r = load_risk(_pmc([50, 0] * 14))
+    assert r["acwr"] == pytest.approx(150 / 7 / 25, abs=0.01)   # 3 séances sur les 7 derniers jours
+    assert r["acwr_zone"] == "optimal"
+    assert r["monotony"] is not None and not r["monotony_high"]
+
+
+def test_load_risk_spike_flagged():
+    from next_session_logic import load_risk
+    r = load_risk(_pmc([30] * 21 + [120] * 7))
+    assert r["acwr"] > 1.5 and r["acwr_zone"] == "risque"
+
+
+def test_load_risk_counts_days_not_activities():
+    """Revue : 7 lignes = 7 jours ; une semaine sans séance fait baisser l'aigu."""
+    from next_session_logic import load_risk
+    r = load_risk(_pmc([60] * 21 + [0] * 7))
+    assert r["acute"] == 0 and r["acwr_zone"] == "sous_charge"
+    assert r["monotony"] is None and r["strain"] is None   # écart-type nul
+
+
+def test_load_risk_short_history():
+    from next_session_logic import load_risk
+    assert load_risk(_pmc([50] * 10)) == {}
+    assert load_risk(None) == {}
+
+
+def test_load_risk_on_real_pmc_series(sample_running_df):
+    from next_session_logic import compute_pmc_series, load_risk
+    r = load_risk(compute_pmc_series(sample_running_df, 330))
+    assert set(r) >= {"acwr", "monotony", "strain"} or r == {}

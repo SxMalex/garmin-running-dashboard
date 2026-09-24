@@ -50,6 +50,17 @@ def _default_cache_dir() -> Path:
 CACHE_DIR = _default_cache_dir()
 CACHE_TTL = int(os.getenv("CACHE_TTL", "3600"))
 
+# Profondeur d'historique commune à toutes les pages. Une seule valeur partagée,
+# pour deux raisons :
+# - les métriques de charge (CTL/ATL/TSB et l'allure seuil de référence dont elles
+#   dépendent) sont fonction de l'historique chargé : deux limites différentes
+#   affichaient deux TSB différents d'une page à l'autre ;
+# - le cache disque est indexé par `activities_{limit}` — une valeur unique veut
+#   dire un seul fetch partagé par toutes les pages au lieu d'un par limite.
+# Volontairement au-delà de tout historique réaliste : la pagination Garmin
+# s'arrête d'elle-même quand il n'y a plus d'activités (cf. get_activities).
+ACTIVITY_HISTORY_LIMIT = 1500
+
 # Délai appliqué après chaque appel API réel (cache miss) : Garmin n'a pas de
 # rate limit documenté mais bannit temporairement les clients trop agressifs.
 API_COOLDOWN_S = 0.4
