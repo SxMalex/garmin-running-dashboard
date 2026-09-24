@@ -2,12 +2,14 @@
 
 ## Stack
 
-- **Streamlit 1.42+** — multipage app (`app/main.py` + `app/pages/`)
+- **Streamlit 1.52+** — multipage app (`app/main.py` + `app/pages/`) ; 1.52 pour
+  `st.metric(delta_arrow=)`, les polices de `config.toml` (`theme.fontFaces`)
 - **Python 3.12**, Pandas, Plotly, NumPy
 - **Docker Compose** — service `app` (Streamlit), service `caddy` (HTTPS) en prod
-- **Garmin Connect** via la lib non officielle `garminconnect` (garth) —
-  **mono-utilisateur**, tokens persistés dans le tokenstore (~1 an de validité)
-- **OpenRouteService API** — génération de parcours GPX (page 4)
+- **Garmin Connect** via la lib non officielle `garminconnect` (0.3.6, client
+  interne, plus de garth) — **mono-utilisateur**, tokens persistés dans le
+  tokenstore (`garmin_tokens.json`, ~1 an de validité)
+- **OpenRouteService API** — génération de parcours GPX (page 5)
 
 ## Origine
 
@@ -20,13 +22,15 @@ d'équivalent Garmin), multi-user OAuth.
 Pages (réorganisation juillet 2026) : `main.py` (Accueil = cockpit du jour,
 allégé), `1_Activities` (seul endroit avec le détail complet d'une activité),
 `2_Stats` (5 onglets — la charge a déménagé), `3_Forme` (fusion ex-Santé +
-ex-onglet Charge + verdict croisé TSB×HRV×sommeil via `forme_logic.py`),
-`4_Progression` (records, prédictions + historique, VO2max via
-`progression_logic.py`), `5_Next_Session` (reco **modulée** par la récupération :
+ex-onglet Charge + verdict croisé TSB×HRV×sommeil via `forme_logic.py`, ACWR et
+monotonie en mode Pro), `4_Progression` (records, prédictions + historique,
+VO2max, efficacité aérobie et dérive via `physio_logic.py`), `5_Next_Session`
+(reco **modulée** par la récupération :
 `recommend_session(df, downgrade=n)` en **repli** — la source primaire est le
 plan Garmin Run Coach via `coach_logic.py`), `6_Heatmap`, `7_AI_Coach` (contexte
 enrichi forme/HRV/sommeil/records), `8_Comparatif` (années superposées sur un axe
-jour-de-l'année via `comparatif_logic.py`). Le thème graphique central est
+jour-de-l'année via `comparatif_logic.py`), `9_Objectif` (course datée → plan
+course + renfo via `race_plan_logic.py`, envoi au calendrier Garmin). Le thème graphique central est
 `chart_theme.py` (palette validée par le validateur dataviz — ne pas réordonner
 les slots catégoriels ni réutiliser les couleurs status comme séries).
 
@@ -34,12 +38,16 @@ les slots catégoriels ni réutiliser les couleurs status comme séries).
 
 ```bash
 docker compose up            # dev local — Streamlit sur 127.0.0.1:8501
-.venv/bin/python -m pytest tests/ -v   # tests (351), hors Docker
-.venv/bin/python test_connection.py    # test CLI de connexion Garmin
+.venv/bin/python -m pytest tests/ -q      # logique pure (~730), hors Docker
+.venv/bin/python -m pytest tests_ui/ -q   # pages en headless (AppTest + FakeGarmin)
+.venv/bin/python test_connection.py       # amorce le tokenstore du serveur MCP
 ```
 
-Le venv local `.venv/` contient toutes les dépendances de `app/requirements.txt`
-+ pytest. Le dossier `garmin_mcp/` est un serveur MCP indépendant du dashboard.
+Le venv `.venv/` n'est pas versionné : le recréer avec
+`uv venv .venv --python 3.12 && uv pip install --python .venv/bin/python -r app/requirements.txt -r requirements.txt pytest pytest-cov`.
+Les deux suites se lancent **séparément** (`tests/conftest.py` remplace
+streamlit par un mock). `garmin_mcp/` est le serveur MCP : il réutilise la
+logique de `app/` (voir « Serveur MCP »).
 
 **Publication du port** : `docker-compose.yml` publie sur `127.0.0.1:8501:8501`,
 jamais `8501:8501`. L'app n'a aucune authentification : un bind `0.0.0.0` expose
@@ -61,8 +69,8 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
 
 ## Spécificités API Garmin (ne pas casser)
 
-- **Auth** : `garminconnect` 0.3.3 — le client garth est `api.client` (PAS
-  `api.garth`). En mode `return_on_mfa=True`, `login()` retourne AVANT de charger
+- **Auth** : `garminconnect` 0.3.6 — le client HTTP est `api.client` (PAS
+  `api.garth`, garth n'est plus une dépendance). En mode `return_on_mfa=True`, `login()` retourne AVANT de charger
   le profil et NE dumpe PAS les tokens → `login_with_credentials` /
   `complete_mfa` dans `garmin_client.py` gèrent le dump + rechargent une session
   propre via `resume_session()`. Ne pas "simplifier" ce flux.
@@ -78,13 +86,15 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
 - **`workoutType`** : chaîne eventType Garmin (`race`, `training`, `uncategorized`…),
   traduite par `formatting.event_type_label`. Ce n'est plus un entier Strava.
 - **Zones FC** : endpoint interne `/biometric-service/heartRateZones` via
-  `api.client.connectapi` (voir `get_hr_zones_definition`) — format retourné :
+  `api.connectapi` (voir `get_hr_zones_definition`) — format retourné :
   `[{"min", "max"}, …]`, `max=-1` pour la dernière zone.
 - **Rate limit** : cooldown `API_COOLDOWN_S` (0.4 s) après chaque appel réel ;
   les hits de cache sont instantanés. Garmin peut renvoyer 429 → message dédié
   dans `safe_load_activities`.
-- **Training Readiness** : renvoie `[]` si la montre ne le supporte pas — la page
-  Santé affiche « — », ne pas traiter ça comme une erreur.
+- **Training Readiness** : renvoie `[]` si la montre ne le supporte pas — ne pas
+  traiter ça comme une erreur (le serveur MCP renvoie `{"supported": false}`).
+- **Erreurs HTTP** : lire le code via `garmin_client._http_status` (attribut ou
+  « API Error NNN »), jamais en cherchant « 404 » dans le texte.
 - **Plan adaptatif** : le plan actif est celui dont `trainingStatus.statusKey`
   vaut `Scheduled` (Garmin garde l'historique des plans `Completed`).
   `get_adaptive_training_plan_by_id` renvoie `taskList` (~1 semaine à venir, avec
@@ -160,15 +170,56 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   avgHR, maxHR, avgCadence, calories, elevationGain, avgSpeed_ms, startLat,
   startLon, workoutType, trainingLoad, vo2max`.
 
+## Analyses, plan, écriture Garmin (ne pas casser)
+
+- **Physio** (`physio_logic.py`) : FC calée sur la cadence = plateau ≥ 120 s ET
+  marche brutale ≥ 12 bpm (sinon un finish accéléré ou une répétition au seuil
+  serait signalé). Dérive Pa:HR invalide si < 40 min, CV vitesse > 0,15, sortie
+  progressive (+5 %), effort relâché (vitesse ET FC en baisse), dénivelé inégal ;
+  ralentir à FC constante EST la dérive. Altitude lissée avant le D+. Calibré
+  sur données réelles : ne pas assouplir sans refaire la mesure.
+- **Streams** : bucket `streams/` du cache, TTL `STREAMS_CACHE_TTL` (30 j),
+  conservé par « Actualiser » ; les boucles multi-activités sont bornées
+  (`DECOUPLING_TREND_MAX_RUNS`) et s'arrêtent au premier refus Garmin.
+- **Plan** (`race_plan_logic.py`) : déterministe ; semaines calendaires ; allures
+  de prescription = course récente > prédiction Garmin × 1,03 > entraînements —
+  JAMAIS `reference_threshold_sec` (réservé au TSS) ; volume annoncé = volume
+  prescrit (±10 %) ; renfo jamais la veille d'une séance clé ni le jour de la
+  sortie longue, arrêt J-9 (règles sourcées dans `SOURCES`).
+- **Plan figé** : une fois validé, c'est `goal_store.validated.plan` qui
+  s'affiche et s'envoie, pas un recalcul du jour.
+- **Écriture Garmin** (page Objectif uniquement, `GARMIN_WRITE_ENABLED`) : bloquée
+  si un plan Run Coach est actif OU si son état est inconnu (lecture fraîche,
+  `get_training_plans(strict=True)`). Chaque séance porte une étiquette
+  `[GD-<plan>-<jour>-<run|str>]` et une empreinte de contenu ; journal sous
+  verrou (`goal_store.locked`, réentrant), réconciliation par étiquette avec
+  planification vérifiée, et `remove_workout(required_tag=)` avant toute
+  suppression. Dédup par créneau (jour + course/renfo), pas par type.
+- **Modes Light/Pro** (`ui_mode.py`) : état hors clés de widget ; les réglages
+  Pro ne portent que sur les seuils physio, jamais sur CTL/ATL (un seul TSB).
+- **Séance du jour** : `next_session_logic.todays_session` + `forme_logic.parse_recovery`
+  + `coach_logic.load_coach_context` — chemin unique Accueil / Prochaine sortie / MCP.
+
+## Serveur MCP (`garmin_mcp/`)
+
+- `insights.py` réutilise `app/` : mêmes chiffres que les pages par construction.
+- Lecture seule par **liste blanche** (`get_*`, `count_*`, `download_*`, GET
+  `connectapi`/`connectwebproxy` sans en-têtes ni corps). Ne pas revenir à une liste noire.
+- Tokenstore **distinct** du dashboard (`GARMIN_TOKENSTORE_MCP`, défaut
+  `~/.garminconnect`) : deux processus sur un même refresh token se l'invalident.
+- `mcp<2` : la v2 a renommé `FastMCP`.
+
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests/ -v
+.venv/bin/python -m pytest tests/ -q
+.venv/bin/python -m pytest tests_ui/ -q
 ```
 
-`pythonpath = app` (cf. `pytest.ini`). Les tests ne touchent JAMAIS l'API Garmin :
+`pythonpath = app garmin_mcp` (cf. `pytest.ini`). Les tests ne touchent JAMAIS l'API Garmin :
 `test_garmin_client.py` stubbe l'objet api (`FakeApi`) et isole le cache disque
-dans `tmp_path`. Les formes des fixtures Garmin ont été validées contre l'API
+dans `tmp_path` ; `tests_ui/` rend les vraies pages contre `tests_ui/fake_garmin.py`
+(cache et `DATA_DIR` jetables, purgés entre tests). Les formes des fixtures Garmin ont été validées contre l'API
 réelle (juillet 2026) — les garder synchrones si l'API change.
 
 ## Règles de commit
@@ -187,14 +238,21 @@ réelle (juillet 2026) — les garder synchrones si l'API change.
 ## Variables d'environnement (`.env`)
 
 ```
-GARMIN_EMAIL=
-GARMIN_PASSWORD=
+GARMIN_EMAIL=           # pré-remplit le formulaire
+GARMIN_PASSWORD=        # JAMAIS lu par le dashboard (test_connection.py / MCP seulement)
 # GARMIN_TOKENSTORE=/app/.garmin
 CACHE_TTL=3600
 ORS_API_KEY=            # optionnel — page Prochaine sortie
+# GARMIN_WRITE_ENABLED=true   # déjà posé par docker-compose.yml (port en loopback)
+# DATA_DIR / STREAMS_CACHE_TTL / GARMIN_TOKENSTORE_MCP : voir README
 
 # Production uniquement (docker-compose.prod.yml)
 PUBLIC_DOMAIN=
 ACME_EMAIL=
 STREAMLIT_BROWSER_SERVER_ADDRESS=
+BASIC_AUTH_USER=        # obligatoire : Caddy impose une authentification
+BASIC_AUTH_HASH=''      # caddy hash-password ; quotes simples (le hash contient des $)
 ```
+
+**Sécurité** : le mot de passe Garmin ne doit jamais atteindre un widget
+(`value=`) ni servir de repli serveur ; `tests_ui/test_security_ui.py` le garde.
