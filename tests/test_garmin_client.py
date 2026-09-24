@@ -330,8 +330,12 @@ class TestGetActivities:
             "distance_km", "duration_min", "avgPace", "avgPace_sec",
             "avgHR", "maxHR", "avgCadence", "calories", "elevationGain",
             "avgSpeed_ms", "startLat", "startLon", "workoutType",
+            "trainingLoad", "vo2max",
         }
-        assert expected.issubset(df.columns)
+        # Contrat complet (19 colonnes, cf. CLAUDE.md) : trainingLoad porte le
+        # PMC du sport croisé, son absence passerait inaperçue sans ce test.
+        assert set(df.columns) == expected
+        assert df["trainingLoad"].iloc[0] == garmin_activity.get("activityTrainingLoad")
         assert pd.api.types.is_datetime64_any_dtype(df["startTimeLocal"])
 
     def test_second_call_hits_cache(self, garmin_activity):
