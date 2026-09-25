@@ -38,6 +38,9 @@ def render_physio_settings() -> None:
 logger = logging.getLogger(__name__)
 
 LEVEL_COLORS = {"solide": ct.GOOD, "a_consolider": ct.WARNING, "marquee": ct.SERIOUS}
+# Libellés (texte) : variantes foncées ≥ 4,5:1 ; LEVEL_COLORS reste pour filets et points.
+LEVEL_TEXT = {"solide": ct.STATUS_TEXT["good"], "a_consolider": ct.STATUS_TEXT["warning"],
+              "marquee": ct.STATUS_TEXT["serious"]}
 
 
 def _km_at(streams: dict, t_s: float) -> float | None:
@@ -91,7 +94,7 @@ def render_signal_quality(streams: dict) -> dict:
                 f"<div style='border-left:4px solid {color};padding:4px 12px'>"
                 f"<div style='color:{ct.INK_MUTED};font-size:.85rem'>Dérive cardiaque</div>"
                 f"<div style='font-size:1.8rem;font-weight:700'>{pct:+.1f} %</div>"
-                f"<div style='color:{color};font-weight:600'>"
+                f"<div style='color:{LEVEL_TEXT[level]};font-weight:600'>"
                 f"{DECOUPLING_LEVELS[level]['label']}</div></div>",
                 unsafe_allow_html=True,
             )

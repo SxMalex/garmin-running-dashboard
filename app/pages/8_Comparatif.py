@@ -40,7 +40,6 @@ from ui_helpers import (
     get_athlete_id,
     get_garmin_client,
     render_garmin_attribution,
-    render_refresh_button,
     require_login,
 )
 
@@ -275,7 +274,7 @@ def _render_snapshot(
 # ---------------------------------------------------------------------------
 # Données de base
 # ---------------------------------------------------------------------------
-st.title("📆 Comparatif annuel")
+st.title("Année contre année")
 st.caption(
     "Ton année en cours superposée aux précédentes, alignées sur le jour de "
     "l'année — charge, volume, physiologie et récupération à la même date."
@@ -331,8 +330,6 @@ with st.sidebar:
         help="Moyenne glissante appliquée au VO2max, à la FC de repos, au "
              "sommeil et à la HRV — ces mesures sont bruitées au jour le jour.",
     )
-    st.divider()
-    render_refresh_button("🔄 Actualiser")
 
 if not selected_years:
     st.warning("Sélectionne au moins une année dans la barre latérale.")

@@ -3,12 +3,10 @@
 import numpy as np
 import plotly.graph_objects as go
 
-WORKOUT_COLORS = {
-    "Normal":        "#3987e5",
-    "Race":          "#e66767",
-    "Sortie longue": "#199e70",
-    "Entraînement":  "#c98500",
-}
+import chart_theme as ct
+
+# Une seule définition : chart_theme (sous-ensemble validé de CAT).
+WORKOUT_COLORS = ct.WORKOUT_COLORS
 
 
 def add_trend_line(

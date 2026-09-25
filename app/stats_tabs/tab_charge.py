@@ -1,9 +1,11 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import date, datetime
 
 import chart_theme
+import chart_theme as ct
+from ui_helpers import cache_nonce
 from next_session_logic import (
     THRESHOLD_SLIDER_MAX,
     THRESHOLD_SLIDER_MIN,
@@ -35,7 +37,11 @@ _TSS_CROSS_COLOR = chart_theme.rgba(chart_theme.MAGENTA, 0.30)
         )
     },
 )
-def _cached_pmc_series(activities_df: pd.DataFrame, threshold_sec: int) -> pd.DataFrame:
+def _cached_pmc_series(activities_df: pd.DataFrame, threshold_sec: int,
+                       today_iso: str, nonce: int) -> pd.DataFrame:
+    # `today_iso` : la série court jusqu'à aujourd'hui (elle doit s'allonger
+    # après minuit) ; `nonce` : invalidée par Actualiser comme le reste.
+    del today_iso, nonce
     return compute_pmc_series(activities_df, threshold_sec)
 
 
@@ -79,7 +85,8 @@ def render(activities_df: pd.DataFrame, cutoff: datetime) -> None:
             "tes courses — le curseur fait donc bouger les deux parts ensemble."
         )
 
-    pmc = _cached_pmc_series(activities_df, threshold_pace_sec)
+    pmc = _cached_pmc_series(activities_df, threshold_pace_sec,
+                             date.today().isoformat(), cache_nonce())
     if pmc.empty:
         st.info("Pas de données d'activité disponibles.")
         return
@@ -160,22 +167,22 @@ def render(activities_df: pd.DataFrame, cutoff: datetime) -> None:
     fig.add_trace(go.Scatter(
         x=pmc_view["date"], y=pmc_view["ctl"],
         mode="lines", name="CTL — Forme",
-        line=dict(color="#3987e5", width=2.5),
+        line=dict(color=ct.BLUE, width=2.5),
         hovertemplate="<b>%{x|%d/%m/%Y}</b><br>CTL : %{y:.1f}<extra></extra>",
     ))
     fig.add_trace(go.Scatter(
         x=pmc_view["date"], y=pmc_view["atl"],
         mode="lines", name="ATL — Fatigue",
-        line=dict(color="#d95926", width=2),
+        line=dict(color=ct.ORANGE, width=2),
         hovertemplate="<b>%{x|%d/%m/%Y}</b><br>ATL : %{y:.1f}<extra></extra>",
     ))
     fig.add_trace(go.Scatter(
         x=pmc_view["date"], y=pmc_view["tsb"],
         mode="lines", name="TSB — Fraîcheur",
-        line=dict(color="#199e70", width=2, dash="dot"),
+        line=dict(color=ct.AQUA, width=2, dash="dot"),
         hovertemplate="<b>%{x|%d/%m/%Y}</b><br>TSB : %{y:.1f}<extra></extra>",
     ))
-    fig.add_hline(y=0, line_color="#3a3f4a", line_dash="dot")
+    fig.add_hline(y=0, line_color=ct.BASELINE, line_dash="dot")
 
     tss_max = pmc_view["tss"].max() if not pmc_view.empty else 100
     fig.update_layout(
@@ -183,11 +190,9 @@ def render(activities_df: pd.DataFrame, cutoff: datetime) -> None:
         barmode="stack",
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#c6c8ce"),
-        xaxis=dict(gridcolor="#232833"),
-        yaxis=dict(
-            gridcolor="#232833", title="CTL / ATL / TSB",
-            zeroline=True, zerolinecolor="#3a3f4a",
+        xaxis=dict(),
+        yaxis=dict( title="CTL / ATL / TSB",
+            zeroline=True, zerolinecolor=ct.BASELINE,
         ),
         yaxis2=dict(
             title="TSS journalier", overlaying="y", side="right",

@@ -10,19 +10,21 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from forme_logic import compute_forme_verdict, parse_recovery
+from forme_logic import TSB_FATIGUE, TSB_FRESH, compute_forme_verdict, hrv_label, parse_recovery
 from next_session_logic import compute_pmc_series, compute_tsb, load_risk, reference_threshold_sec
 from glossary import term
 from ui_mode import explain, help_text, is_pro
 from stats_tabs import tab_charge
 from ui_helpers import (
+    cache_nonce,
     cached_load_activities,
     get_athlete_id,
     get_garmin_client,
     render_garmin_attribution,
-    render_refresh_button,
     require_login,
 )
+
+import chart_theme as ct
 
 st.set_page_config(
     page_title="Forme & Récup — Running Dashboard",
@@ -39,22 +41,22 @@ _athlete_id = get_athlete_id()
 # Chargement (caché par date)
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_hrv(athlete_id: int, cdate: str):
+def load_hrv(athlete_id: int, cdate: str, nonce: int):
     return get_garmin_client().get_hrv(cdate)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_sleep(athlete_id: int, cdate: str):
+def load_sleep(athlete_id: int, cdate: str, nonce: int):
     return get_garmin_client().get_sleep(cdate)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_daily_stats(athlete_id: int, cdate: str):
+def load_daily_stats(athlete_id: int, cdate: str, nonce: int):
     return get_garmin_client().get_daily_stats(cdate)
 
 
 @st.cache_data(ttl=3600, show_spinner="Chargement Body Battery…")
-def load_body_battery(athlete_id: int, start: str, end: str):
+def load_body_battery(athlete_id: int, start: str, end: str, nonce: int):
     return get_garmin_client().get_body_battery(start, end)
 
 
@@ -103,11 +105,10 @@ with st.sidebar:
         options=["3 derniers mois", "6 derniers mois", "12 derniers mois"],
         index=0,
     )
-    render_refresh_button("🔄 Actualiser")
 
 cdate = selected_date.isoformat()
 
-st.title("⚡ Forme & Récupération")
+st.title("Forme & récup")
 st.caption(
     "Charge d'entraînement (CTL/ATL/TSB) croisée avec ta récupération "
     "(HRV, sommeil, Body Battery, FC repos)."
@@ -123,8 +124,8 @@ if error:
 # Historique complet : la charge des autres sports compte dans le TSB.
 ctl, atl, tsb = compute_tsb(df) if not df.empty else (0.0, 0.0, None)
 
-recovery = parse_recovery(load_hrv(_athlete_id, cdate), load_sleep(_athlete_id, cdate),
-                          load_daily_stats(_athlete_id, cdate))
+recovery = parse_recovery(load_hrv(_athlete_id, cdate, cache_nonce()), load_sleep(_athlete_id, cdate, cache_nonce()),
+                          load_daily_stats(_athlete_id, cdate, cache_nonce()))
 hrv_summary = recovery["hrv_summary"]
 hrv_status = recovery["hrv_status"]
 hrv_last = recovery["hrv_last"]
@@ -152,9 +153,9 @@ if verdict["reasons"]:
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 
 if tsb is not None and not df.empty:
-    if tsb > 10:
+    if tsb > TSB_FRESH:
         tsb_delta, tsb_dc = "Bien reposé", "normal"
-    elif tsb > -20:
+    elif tsb >= TSB_FATIGUE:
         tsb_delta, tsb_dc = "Charge normale", "off"
     else:
         tsb_delta, tsb_dc = "Récupération nécessaire", "inverse"
@@ -170,7 +171,7 @@ _baseline_str = (
 c2.metric(
     "💓 HRV nuit",
     f"{int(hrv_last)} ms" if hrv_last else "—",
-    delta=(hrv_status or "").capitalize() or None,
+    delta=(hrv_label(hrv_status) or "").capitalize() or None,
     delta_color="off", delta_arrow="off",
     help=_baseline_str or "Variabilité de la fréquence cardiaque pendant le sommeil",
 )
@@ -254,10 +255,10 @@ col_sleep, col_bb = st.columns([2, 3])
 with col_sleep:
     st.subheader("😴 Structure du sommeil")
     phases = [
-        ("Profond", sleep_dto.get("deepSleepSeconds"), "#3987e5"),
-        ("Léger", sleep_dto.get("lightSleepSeconds"), "#6da7ec"),
-        ("Paradoxal (REM)", sleep_dto.get("remSleepSeconds"), "#9085e9"),
-        ("Éveillé", sleep_dto.get("awakeSleepSeconds"), "#e66767"),
+        ("Profond", sleep_dto.get("deepSleepSeconds"), ct.SLEEP_DEEP),
+        ("Léger", sleep_dto.get("lightSleepSeconds"), ct.SLEEP_LIGHT),
+        ("Paradoxal (REM)", sleep_dto.get("remSleepSeconds"), ct.SLEEP_REM),
+        ("Éveillé", sleep_dto.get("awakeSleepSeconds"), ct.SLEEP_AWAKE),
     ]
     phases = [(label, sec, color) for label, sec, color in phases if sec]
     if phases:
@@ -283,7 +284,7 @@ with col_sleep:
 with col_bb:
     st.subheader("🔋 Body Battery")
     bb_start = (selected_date - timedelta(days=bb_days - 1)).isoformat()
-    bb_data = load_body_battery(_athlete_id, bb_start, cdate) or []
+    bb_data = load_body_battery(_athlete_id, bb_start, cdate, cache_nonce()) or []
 
     all_points = []
     for day in bb_data:
@@ -296,9 +297,9 @@ with col_bb:
         fig_bb.add_trace(go.Scatter(
             x=bb_df["ts"], y=bb_df["level"],
             mode="lines",
-            line=dict(color="#0ca30c", width=1.5),
+            line=dict(color=ct.GREEN, width=1.5),
             fill="tozeroy",
-            fillcolor="rgba(12,163,12,0.10)",
+            fillcolor=ct.rgba(ct.GREEN, 0.10),
             hovertemplate="%{x|%d/%m %H:%M} · %{y:.0f}<extra></extra>",
         ))
         fig_bb.update_layout(
@@ -326,7 +327,7 @@ sleep_rows = []
 with st.spinner("Chargement de l'historique de sommeil…"):
     for i in range(6, -1, -1):
         d = selected_date - timedelta(days=i)
-        raw = load_sleep(_athlete_id, d.isoformat()) or {}
+        raw = load_sleep(_athlete_id, d.isoformat(), cache_nonce()) or {}
         dto = (raw.get("dailySleepDTO") or {}) if isinstance(raw, dict) else {}
         sleep_rows.append({
             "date": d,
@@ -341,16 +342,16 @@ sleep_week = pd.DataFrame(sleep_rows)
 if sleep_week["total_h"].sum() > 0:
     fig_week = go.Figure()
     for key, label, color in [
-        ("deep_h", "Profond", "#3987e5"),
-        ("light_h", "Léger", "#6da7ec"),
-        ("rem_h", "REM", "#9085e9"),
+        ("deep_h", "Profond", ct.SLEEP_DEEP),
+        ("light_h", "Léger", ct.SLEEP_LIGHT),
+        ("rem_h", "REM", ct.SLEEP_REM),
     ]:
         fig_week.add_trace(go.Bar(
             x=sleep_week["date"], y=sleep_week[key],
             name=label, marker_color=color,
             hovertemplate="%{x|%a %d/%m} · %{y:.1f} h<extra>" + label + "</extra>",
         ))
-    fig_week.add_hline(y=8, line_dash="dot", line_color="#3a3f4a")
+    fig_week.add_hline(y=8, line_dash="dot", line_color=ct.BASELINE)
     fig_week.update_layout(
         barmode="stack",
         height=300,

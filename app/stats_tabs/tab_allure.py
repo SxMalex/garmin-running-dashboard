@@ -6,6 +6,8 @@ from formatting import seconds_to_pace_str
 from stats_tabs._shared import WORKOUT_COLORS, add_trend_line
 from ui_helpers import get_athlete_id, get_garmin_client
 
+import chart_theme as ct
+
 
 @st.cache_data(ttl=3600, show_spinner="Chargement des splits km par km...")
 def _load_splits_data(athlete_id: int, activity_ids: tuple[int, ...]) -> pd.DataFrame:
@@ -31,9 +33,9 @@ def render(running_filtered: pd.DataFrame) -> None:
         name="Allure",
         marker=dict(
             color=pace_data["distance_km"],
-            colorscale=[[0.0, "#9ec5f4"], [0.5, "#3987e5"], [1.0, "#104281"]],
+            colorscale=[[0.0, ct.ZONE_RAMP[0]], [0.5, ct.ZONE_RAMP[2]], [1.0, "#104281"]],
             size=8,
-            colorbar=dict(title="Distance (km)", tickfont=dict(color="#c6c8ce")),
+            colorbar=dict(title="Distance (km)", tickfont=dict()),
             showscale=True,
         ),
         hovertemplate=(
@@ -56,10 +58,8 @@ def render(running_filtered: pd.DataFrame) -> None:
         height=400,
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#c6c8ce"),
-        xaxis=dict(gridcolor="#232833", title="Date"),
+        xaxis=dict(title="Date"),
         yaxis=dict(
-            gridcolor="#232833",
             title="Allure (min/km)",
             range=[y_max + padding, y_min - padding],
             tickformat=".1f",
@@ -106,10 +106,8 @@ def render(running_filtered: pd.DataFrame) -> None:
         height=300,
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#c6c8ce"),
-        xaxis=dict(gridcolor="#232833"),
+        xaxis=dict(),
         yaxis=dict(
-            gridcolor="#232833",
             title="Allure (min/km)",
             tickformat=".1f",
         ),
@@ -130,7 +128,7 @@ def render(running_filtered: pd.DataFrame) -> None:
             fig_box.add_trace(go.Box(
                 y=subset,
                 name=wtype,
-                marker_color=WORKOUT_COLORS.get(wtype, "#3987e5"),
+                marker_color=WORKOUT_COLORS.get(wtype, ct.BLUE),
                 boxmean=True,
                 hovertemplate=f"<b>{wtype}</b><br>%{{y:.2f}} min/km<extra></extra>",
             ))
@@ -141,9 +139,7 @@ def render(running_filtered: pd.DataFrame) -> None:
             height=300,
             plot_bgcolor="rgba(0,0,0,0)",
             paper_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#c6c8ce"),
             yaxis=dict(
-                gridcolor="#232833",
                 title="Allure (min/km)",
                 range=[max(y_slow, y_fast), min(y_slow, y_fast)],
                 tickformat=".1f",
@@ -205,10 +201,8 @@ def render(running_filtered: pd.DataFrame) -> None:
                     height=350,
                     plot_bgcolor="rgba(0,0,0,0)",
                     paper_bgcolor="rgba(0,0,0,0)",
-                    font=dict(color="#c6c8ce"),
-                    xaxis=dict(gridcolor="#232833", title="Kilomètre", dtick=1),
+                    xaxis=dict(title="Kilomètre", dtick=1),
                     yaxis=dict(
-                        gridcolor="#232833",
                         title="Allure (min/km)",
                         range=[q95 + pad, q05 - pad],
                         tickformat=".1f",

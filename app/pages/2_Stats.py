@@ -11,9 +11,9 @@ from formatting import event_type_label
 from stats_tabs import tab_volume, tab_allure, tab_fc, tab_cadence, tab_regularite
 from ui_mode import explain
 from ui_helpers import (
+    cache_nonce,
     cached_load_activities,
     get_garmin_client,
-    render_refresh_button,
     render_garmin_attribution,
     get_athlete_id,
     require_login,
@@ -40,14 +40,14 @@ def load_data(athlete_id: int) -> tuple[pd.DataFrame, str | None]:
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def load_hr_zones(athlete_id: int) -> list:
+def load_hr_zones(athlete_id: int, nonce: int) -> list:
     return get_garmin_client().get_hr_zones_definition()
 
 
 # ---------------------------------------------------------------------------
 # Chargement
 # ---------------------------------------------------------------------------
-st.title("📊 Statistiques d'entraînement")
+st.title("Statistiques")
 
 df, error = load_data(_athlete_id)
 if error:
@@ -82,9 +82,8 @@ with st.sidebar:
     }
     cutoff = datetime.now() - timedelta(days=period_days[period])
 
-    render_refresh_button("🔄 Actualiser")
 
-    hr_zones_list = load_hr_zones(_athlete_id)
+    hr_zones_list = load_hr_zones(_athlete_id, cache_nonce())
 
 running_filtered = running_df[running_df["startTimeLocal"] >= cutoff].copy()
 if running_filtered.empty:

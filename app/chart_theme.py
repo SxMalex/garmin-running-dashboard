@@ -1,6 +1,10 @@
 """
-Thème graphique central — palette validée (méthode dataviz, six checks
-exécutés au validateur contre la surface sombre #0e1117, juillet 2026).
+Thème graphique central — système « Piste claire » (septembre 2026).
+
+Palette dérivée de celle validée en juillet 2026 (méthode dataviz, surface
+sombre) : mêmes teintes, même ordre, luminosité baissée juste assez pour
+tenir 3:1 contre le fond papier #F5F4EF (marques graphiques, WCAG 1.4.11) —
+garde-fou : `tests_ui/test_theme_ui.py`.
 
 Règles :
 - l'ordre catégoriel CAT est le mécanisme de sécurité daltonisme : ne jamais
@@ -13,22 +17,24 @@ Règles :
   ZONE_HEAT (convention cardio bleu→rouge) uniquement en teinte redondante
   (bandes de fond, barres dont la valeur est déjà portée par l'axe).
 
-Importer ce module suffit à activer le template Plotly `gar_dark`.
+Importer ce module suffit à activer le template Plotly `gar`.
 """
 
 import plotly.graph_objects as go
 import plotly.io as pio
 
 # ---------------------------------------------------------------------------
-# Chrome / encre (surface Streamlit sombre #0e1117)
+# Chrome / encre (fond papier, cartes blanches)
 # ---------------------------------------------------------------------------
-SURFACE = "#0e1117"
-SURFACE_2 = "#161a23"        # cartes, tooltips
-INK = "#e6e8ee"              # texte principal
-INK_SECONDARY = "#c6c8ce"    # texte des graphes
-INK_MUTED = "#8b8f98"        # axes, labels discrets
-GRID = "#232833"             # hairline de grille
-BASELINE = "#3a3f4a"         # axe / séparateurs
+SURFACE = "#F5F4EF"          # fond de page (papier)
+SURFACE_2 = "#FFFFFF"        # cartes, tooltips
+INK = "#15171C"              # texte principal, boutons principaux
+INK_SECONDARY = "#3D4048"    # texte des graphes
+INK_MUTED = "#62666F"        # axes, labels discrets (5,6:1 sur papier)
+GRID = "#ECE9E1"             # hairline de grille
+BASELINE = "#D6D2C7"         # axe / séparateurs
+LINE = "#E4E1D8"             # bordure des cartes
+ACCENT = "#D2F53C"           # accent « volt » : APLAT seulement, jamais du texte sur clair
 
 # ---------------------------------------------------------------------------
 # Catégoriel — ordre validé (ne pas réordonner sans re-passer le validateur)
@@ -37,11 +43,11 @@ CAT = [
     "#3987e5",  # 1 bleu
     "#008300",  # 2 vert
     "#d55181",  # 3 magenta
-    "#c98500",  # 4 jaune
-    "#199e70",  # 5 aqua
+    "#ba7b00",  # 4 jaune (assombri pour le fond clair)
+    "#189a6d",  # 5 aqua
     "#d95926",  # 6 orange
-    "#9085e9",  # 7 violet
-    "#e66767",  # 8 rouge
+    "#867ae7",  # 7 violet
+    "#e45a5a",  # 8 rouge
 ]
 BLUE, GREEN, MAGENTA, YELLOW, AQUA, ORANGE, VIOLET, RED = CAT
 
@@ -57,10 +63,16 @@ CTL, ATL, TSB = BLUE, ORANGE, AQUA   # charge d'entraînement (3 séries)
 # ---------------------------------------------------------------------------
 # Statut — réservé aux états/deltas, jamais une série
 # ---------------------------------------------------------------------------
-GOOD = "#0ca30c"
-WARNING = "#fab219"
-SERIOUS = "#ec835a"
+GOOD = "#0c9e0c"
+WARNING = "#b67d04"
+SERIOUS = "#e65b25"
 CRITICAL = "#d03b3b"
+
+# Texte et pastilles d'état sur fond clair (4,5:1 minimum sur leur fond pâle)
+STATUS_TEXT = {"good": "#13622E", "warning": "#8A4B00", "serious": "#A93A0B",
+               "critical": "#A42424", "info": "#1F4FA3"}
+STATUS_BG = {"good": "#E3F4E7", "warning": "#FFF4E5", "serious": "#FCE8DF",
+             "critical": "#FBE3E3", "info": "#E6EEFB"}
 
 # ---------------------------------------------------------------------------
 # Séquentiel (bleu, une teinte) — colorscales continues
@@ -69,18 +81,21 @@ SEQ_COLORSCALE = [
     [0.0, "#9ec5f4"], [0.25, "#6da7ec"], [0.5, "#3987e5"],
     [0.75, "#256abf"], [1.0, "#104281"],
 ]
-# Calendrier/heatmap sur fond sombre : le zéro recule vers la surface
-SEQ_DARK_SCALE = ["#151b26", "#104281", "#1c5cab", "#3987e5", "#6da7ec", "#9ec5f4"]
+# Calendrier/heatmap : le zéro recule vers le fond papier
+SEQ_SURFACE_SCALE = ["#EEF1F5", "#C9DBF5", "#9ec5f4", "#6da7ec", "#3987e5", "#104281"]
 
 # ---------------------------------------------------------------------------
 # Zones FC
 # ---------------------------------------------------------------------------
 # Marques catégorielles (camembert) : rampe ordinale bleue validée (--ordinal)
-ZONE_RAMP = ["#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95"]
+ZONE_RAMP = ["#3987e5", "#2a70cc", "#1f5aae", "#184f95", "#0f3566"]   # ≥ 3:1 sur papier
 # Teinte redondante seulement (bandes de fond, barres à valeur sur axe) :
 # convention cardio bleu→rouge — ne passe pas le plancher vision-normale,
 # donc jamais seule porteuse de l'identité.
-ZONE_HEAT = ["#3987e5", "#199e70", "#c98500", "#d95926", "#e66767"]
+ZONE_HEAT = [BLUE, AQUA, YELLOW, ORANGE, RED]   # mêmes teintes que CAT, lisibles sur papier
+
+# Phases de sommeil : du plus profond (foncé) au plus léger, éveil à part.
+SLEEP_DEEP, SLEEP_LIGHT, SLEEP_REM, SLEEP_AWAKE = "#184f95", BLUE, VIOLET, RED
 
 # Types de sortie (eventType Garmin) — sous-ensemble de CAT, ordre d'affichage
 # alphabétique validé
@@ -110,11 +125,11 @@ _axis = dict(
     title=dict(font=dict(color=INK_MUTED, size=11)),
 )
 
-pio.templates["gar_dark"] = go.layout.Template(
+pio.templates["gar"] = go.layout.Template(
     layout=dict(
         colorway=CAT,
         font=dict(
-            family='system-ui, -apple-system, "Segoe UI", sans-serif',
+            family='Barlow, system-ui, -apple-system, "Segoe UI", sans-serif',
             color=INK_SECONDARY,
             size=12,
         ),
@@ -136,4 +151,4 @@ pio.templates["gar_dark"] = go.layout.Template(
         margin=dict(l=0, r=0, t=30, b=0),
     )
 )
-pio.templates.default = "gar_dark"
+pio.templates.default = "gar"

@@ -143,3 +143,24 @@ def test_parse_recovery_empty_or_garbage():
     for raw in (None, {}, [], "x", [None]):
         r = parse_recovery(raw, raw, raw)
         assert r["hrv_status"] is None and r["sleep_score"] is None and r["daily"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Statut HRV « NONE » (données réelles, septembre 2026)
+# ---------------------------------------------------------------------------
+def test_hrv_none_status_is_no_status():
+    """Garmin renvoie "NONE" sans baseline : ce n'est pas « HRV dans ta baseline »."""
+    from forme_logic import parse_recovery
+    rec = parse_recovery({"hrvSummary": {"status": "NONE", "lastNightAvg": 50}}, {})
+    assert rec["hrv_status"] is None and rec["hrv_last"] == 50
+    v = compute_forme_verdict(tsb=-5.0, hrv_status=rec["hrv_status"], sleep_score=None)
+    assert not any("HRV" in r for r in v["reasons"])
+    assert parse_recovery({"hrvSummary": {"status": "BALANCED"}}, {})["hrv_status"] == "BALANCED"
+
+
+def test_hrv_labels_are_french():
+    from forme_logic import hrv_label
+    assert hrv_label("BALANCED") == "équilibrée" and hrv_label("unbalanced") == "déséquilibrée"
+    assert hrv_label(None) is None and hrv_label("") is None
+    v = compute_forme_verdict(tsb=0.0, hrv_status="LOW", sleep_score=None)
+    assert "HRV basse" in v["reasons"][1]

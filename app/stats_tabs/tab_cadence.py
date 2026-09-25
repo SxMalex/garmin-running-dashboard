@@ -5,6 +5,8 @@ import plotly.graph_objects as go
 
 from stats_tabs._shared import add_trend_line
 
+import chart_theme as ct
+
 _CADENCE_LOW  = 170
 _CADENCE_HIGH = 180
 
@@ -26,7 +28,7 @@ def render(running_filtered: pd.DataFrame) -> None:
         line_width=0,
         annotation_text="Zone optimale",
         annotation_position="top right",
-        annotation_font=dict(color="#0ca30c", size=11),
+        annotation_font=dict(color=ct.GOOD, size=11),
     )
     fig_cad.add_trace(go.Scatter(
         x=cad_data["startTimeLocal"],
@@ -36,8 +38,8 @@ def render(running_filtered: pd.DataFrame) -> None:
         line=dict(color="rgba(25,158,112,0.5)", width=1),
         marker=dict(
             color=cad_data["avgCadence"].apply(
-                lambda c: "#0ca30c" if _CADENCE_LOW <= c <= _CADENCE_HIGH
-                else ("#ec835a" if c < _CADENCE_LOW else "#d03b3b")
+                lambda c: ct.GOOD if _CADENCE_LOW <= c <= _CADENCE_HIGH
+                else (ct.SERIOUS if c < _CADENCE_LOW else ct.CRITICAL)
             ),
             size=7,
         ),
@@ -50,9 +52,8 @@ def render(running_filtered: pd.DataFrame) -> None:
         height=380,
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#c6c8ce"),
-        xaxis=dict(gridcolor="#232833"),
-        yaxis=dict(gridcolor="#232833", title="Cadence (spm)"),
+        xaxis=dict(),
+        yaxis=dict(title="Cadence (spm)"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         margin=dict(l=0, r=0, t=30, b=0),
     )
@@ -91,15 +92,14 @@ def render(running_filtered: pd.DataFrame) -> None:
             line_color="rgba(12,163,12,0.7)",
             line_dash="dash",
             annotation_text=label,
-            annotation_font=dict(color="#0ca30c"),
+            annotation_font=dict(color=ct.GOOD),
         )
     fig_cad_hist.update_layout(
         height=280,
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#c6c8ce"),
-        xaxis=dict(gridcolor="#232833", title="Cadence (spm)"),
-        yaxis=dict(gridcolor="#232833", title="Nombre de sorties"),
+        xaxis=dict(title="Cadence (spm)"),
+        yaxis=dict(title="Nombre de sorties"),
         margin=dict(l=0, r=0, t=10, b=0),
         showlegend=False,
     )

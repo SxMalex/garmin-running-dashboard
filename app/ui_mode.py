@@ -21,7 +21,7 @@ from glossary import term
 
 MODE_KEY = "ui_mode_value"
 PARAMS_KEY = "pro_params_value"
-MODES = {"light": "🌱 Light", "pro": "🔬 Pro"}
+MODES = {"light": "Light", "pro": "Pro"}
 
 # clé → (libellé, défaut, min, max, pas, aide)
 PRO_PARAMS = {
@@ -57,11 +57,12 @@ def _copy(widget_key: str, store_key: str, sub: str | None = None) -> None:
 
 
 def render_mode_toggle() -> None:
-    """Bascule Light/Pro en haut de la barre latérale (appelée sur chaque page)."""
+    """Bascule Light/Pro dans l'en-tête (le routeur la rend une fois par run)."""
     st.session_state["ui_mode_widget"] = ui_mode()
-    st.sidebar.radio(
-        "Mode d'affichage", list(MODES), format_func=MODES.get, horizontal=True,
+    st.segmented_control(
+        "Mode d'affichage", list(MODES), format_func=MODES.get, required=True,
         key="ui_mode_widget", on_change=_copy, args=("ui_mode_widget", MODE_KEY),
+        label_visibility="collapsed",
         help="Light explique chaque indicateur ; Pro affiche les chiffres bruts, les "
              "indicateurs avancés et les réglages des seuils.",
     )

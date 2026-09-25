@@ -11,7 +11,12 @@ from ui_mode import MODE_KEY, PARAMS_KEY
 def test_every_page_in_both_modes(logged_in, name, mode):
     at = logged_in(name, **{MODE_KEY: mode}).run()
     assert not at.exception, [e.value for e in at.exception]
-    assert any(r.label == "Mode d'affichage" for r in at.sidebar.radio)
+    assert _mode_widget(at) is not None
+
+
+def _mode_widget(at):
+    """La bascule Light/Pro vit dans l'en-tête (contrôle segmenté)."""
+    return next((w for w in at.button_group if w.label == "Mode d'affichage"), None)
 
 
 def _explains(at):
@@ -36,7 +41,7 @@ def test_pro_shows_load_risk(logged_in):
 def test_toggle_switches_mode(logged_in):
     at = logged_in("3_Forme.py").run()
     assert _explains(at)                               # Light par défaut
-    next(r for r in at.sidebar.radio if r.label == "Mode d'affichage").set_value("pro").run()
+    _mode_widget(at).set_value("pro").run()
     assert at.session_state[MODE_KEY] == "pro"
     assert not _explains(at)
 

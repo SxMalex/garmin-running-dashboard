@@ -62,12 +62,26 @@ def fake_api():
 
 @pytest.fixture
 def logged_in(fake_api):
-    """Fabrique un AppTest connecté (session_state pré-rempli)."""
+    """
+    Fabrique un AppTest connecté (session_state pré-rempli). Toujours via le
+    routeur `main.py` (en-tête, thème, `st.page_link` n'existent qu'à travers
+    `st.navigation`) ; « main.py » = la page par défaut (Accueil).
+    """
     def _make(name: str, **state) -> AppTest:
-        at = AppTest.from_file(page_path(name), default_timeout=60)
+        at = AppTest.from_file(page_path("main.py"), default_timeout=60)
         at.session_state["garmin_api"] = fake_api
         at.session_state["garmin_athlete_id"] = 42
         for key, value in state.items():
             at.session_state[key] = value
+        if name not in ("main.py", "0_Accueil.py"):   # Accueil = page par défaut
+            # AppTest ne connaît les pages de `st.navigation` qu'après un
+            # premier run du routeur (qui rend l'Accueil).
+            at.run()
+            at.switch_page(f"pages/{name}")
+            # Repartir à froid : sinon les appels et caches de l'Accueil
+            # masqueraient une page qui ne charge plus rien elle-même.
+            fake_api.calls.clear()
+            st.cache_data.clear()
+            shutil.rmtree(garmin_client.CACHE_DIR, ignore_errors=True)
         return at
     return _make

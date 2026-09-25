@@ -7,11 +7,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-import chart_theme  # active le template Plotly gar_dark
+import chart_theme as ct  # active le template Plotly gar
 from coach_logic import load_coach_context
 from formatting import map_zoom
-from ui_mode import render_mode_toggle
-from ui_theme import inject_theme
 from garmin_client import (
     ACTIVITY_HISTORY_LIMIT,
     GarminClient,
@@ -20,7 +18,10 @@ from garmin_client import (
     safe_load_activities,
 )
 
-ACCENT_COLOR = chart_theme.PACE  # la couleur suit l'entité (allure/tracé)
+OSM_ATTRIBUTION = ("Fond de carte © [OpenStreetMap](https://www.openstreetmap.org/copyright) "
+                   "contributors")
+
+ACCENT_COLOR = ct.PACE  # la couleur suit l'entité (allure/tracé)
 
 # Profondeur d'historique commune (définie dans garmin_client, sans Streamlit,
 # pour que le serveur MCP charge exactement le même historique que les pages).
@@ -58,22 +59,15 @@ def get_athlete_id() -> int:
 
 def require_login() -> None:
     """
-    Garde à appeler en haut des sous-pages : si aucune session Garmin n'est
-    disponible, on affiche un message + un lien vers l'accueil (où vit le
-    formulaire de connexion) et on arrête le rendu de la page courante.
+    Garde à appeler en haut des pages. Le routeur (`main.py`) n'enregistre les
+    pages qu'une fois connecté : ce chemin ne sert que si la session tombe
+    entre deux runs. Le formulaire de connexion vit dans le routeur.
     """
     if get_session_api() is not None:
-        # Bascule Light/Pro rendue sur CHAQUE page (toutes passent par ici) :
-        # un widget absent d'une page perdrait son état.
-        render_mode_toggle()
-        inject_theme()
         return
-    st.title("🔒 Connexion requise")
-    st.warning(
-        "Tu dois d'abord connecter ton compte Garmin pour accéder à cette page.",
-        icon="🔑",
-    )
-    st.page_link("main.py", label="Aller à la page de connexion", icon="🏠")
+    st.title("Connexion requise")
+    st.warning("Ta session Garmin a expiré : recharge la page pour te reconnecter.",
+               icon=":material/key:")
     st.stop()
 
 
@@ -93,7 +87,7 @@ def render_garmin_attribution() -> None:
     st.markdown(
         """
         <div style="text-align: center; margin: 24px 0 8px 0;">
-            <span style="color: #888; font-size: 0.8rem;">
+            <span style="color: #62666F; font-size: 0.8rem;">
                 Données Garmin Connect — projet personnel non affilié à Garmin
             </span>
         </div>
@@ -106,7 +100,7 @@ def cache_nonce() -> int:
     """
     Compteur d'invalidation per-session. À passer en argument à toute fonction
     `@st.cache_data` qui doit pouvoir être invalidée explicitement par
-    `render_refresh_button`.
+    `refresh_data`.
     """
     return st.session_state.get("_cache_nonce", 0)
 
@@ -152,22 +146,15 @@ def cached_coach_context(athlete_id: int, cdate: str | None = None):
     return _cached_coach_context_impl(athlete_id, day, cache_nonce())
 
 
-def render_refresh_button(label: str = "🔄 Actualiser les données", *, stretch: bool = True) -> None:
+def refresh_data() -> None:
     """
-    Bouton de rafraîchissement standard : invalide le cache disque + bump du
-    nonce per-session pour invalider les caches Streamlit `@st.cache_data`.
+    Actualiser (bouton de l'en-tête) : invalide le cache disque + bump du nonce
+    per-session pour invalider les caches Streamlit `@st.cache_data`.
+    Ne pas utiliser `st.cache_data.clear()` (global à tous les utilisateurs).
     """
-    if st.button(label, width="stretch" if stretch else "content"):
-        get_garmin_client().invalidate_cache()
-        st.session_state["_cache_nonce"] = cache_nonce() + 1
-        st.rerun()
-
-
-def hex_to_rgba(hex_color: str, alpha: float) -> str:
-    """Convertit un hex `#rrggbb` en chaîne CSS `rgba(r,g,b,a)`."""
-    h = hex_color.lstrip("#")
-    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-    return f"rgba({r},{g},{b},{alpha})"
+    get_garmin_client().invalidate_cache()
+    st.session_state["_cache_nonce"] = cache_nonce() + 1
+    st.rerun()
 
 
 def render_elevation_profile(
@@ -180,8 +167,7 @@ def render_elevation_profile(
 ) -> None:
     """
     Profil altimétrique générique : reçoit deux séries alignées et trace
-    un Plotly Scatter avec fill. Utilisé par main.py (depuis streams Garmin)
-    et 4_Next_Session.py (depuis route ORS).
+    un Plotly Scatter avec fill.
     """
     if not elevations or not distances_km:
         st.caption("Profil altimétrique non disponible.")
@@ -191,16 +177,15 @@ def render_elevation_profile(
         x=list(distances_km), y=list(elevations),
         mode="lines",
         fill="tozeroy",
-        fillcolor=hex_to_rgba(color, fill_alpha),
+        fillcolor=ct.rgba(color, fill_alpha),
         line=dict(color=color, width=2),
         hovertemplate="<b>%{x:.2f} km</b><br>Altitude : %{y:.0f} m<extra></extra>",
     ))
     fig.update_layout(
         height=height,
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#c6c8ce"),
-        xaxis=dict(title="Distance (km)", gridcolor="#232833"),
-        yaxis=dict(title="Altitude (m)", gridcolor="#232833"),
+        xaxis=dict(title="Distance (km)"),
+        yaxis=dict(title="Altitude (m)"),
         margin=dict(l=0, r=0, t=10, b=0), showlegend=False,
     )
     st.plotly_chart(fig)
@@ -230,7 +215,7 @@ def render_activity_map(streams: dict, height: int = 420) -> None:
     fig.add_trace(go.Scattermap(
         lat=[lats[0], lats[-1]], lon=[lons[0], lons[-1]],
         mode="markers",
-        marker=dict(size=14, color=["#0ca30c", "#d03b3b"]),
+        marker=dict(size=14, color=[ct.GOOD, ct.CRITICAL]),
         text=["Départ", "Arrivée"],
         hoverinfo="text",
     ))
@@ -245,3 +230,5 @@ def render_activity_map(streams: dict, height: int = 420) -> None:
         showlegend=False,
     )
     st.plotly_chart(fig)
+    # Politique des tuiles OSM : attribution visible (celle de Plotly est repliée).
+    st.caption(OSM_ATTRIBUTION)
