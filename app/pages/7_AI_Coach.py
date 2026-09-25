@@ -9,7 +9,9 @@ from datetime import date, timedelta
 import streamlit as st
 import pandas as pd
 
+import goal_store
 from coach_logic import nutrition_focus, target_label
+from forme_logic import hrv_label, parse_recovery
 from formatting import seconds_to_pace_str, weekday_fr
 from next_session_logic import compute_tsb
 from progression_logic import RACE_TARGETS, fmt_race_time, parse_personal_records
@@ -17,7 +19,6 @@ from ui_helpers import (
     cached_coach_context,
     cached_load_activities,
     get_garmin_client,
-    render_refresh_button,
     render_garmin_attribution,
     get_athlete_id,
     require_login,
@@ -36,15 +37,14 @@ _athlete_id = get_athlete_id()
 st.markdown("""
 <style>
     .summary-block {
-        background: #1e1e2e;
-        border: 1px solid #3a3a5c;
-        border-radius: 8px;
+        background: #F5F4EF;
+        border: 1px solid #E4E1D8;
+        border-radius: 12px;
         padding: 12px 16px;
         font-family: monospace;
         font-size: 0.85rem;
         line-height: 1.6;
-        white-space: pre-wrap;
-        color: #a0aec0;
+        color: #3D4048;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -172,15 +172,16 @@ def _format_forme_summary(client, activities_df: pd.DataFrame) -> str:
             f"ATL {atl} (fatigue 7 j), TSB {tsb:+} (fraîcheur)"
         )
 
-    hrv_raw = client.get_hrv(today.isoformat())
-    hrv = hrv_raw[0] if isinstance(hrv_raw, list) and hrv_raw else (hrv_raw or {})
-    hrv_summary = (hrv.get("hrvSummary") or {}) if isinstance(hrv, dict) else {}
-    if hrv_summary.get("lastNightAvg"):
+    # Même lecture que les pages (parse_recovery) : « NONE » = pas de statut.
+    recovery = parse_recovery(client.get_hrv(today.isoformat()), None)
+    hrv_summary = recovery["hrv_summary"]
+    if recovery["hrv_last"]:
         baseline = hrv_summary.get("baseline") or {}
+        status = hrv_label(recovery["hrv_status"]) or "pas encore de référence"
         lines.append(
-            f"- HRV cette nuit : {hrv_summary['lastNightAvg']} ms "
+            f"- HRV cette nuit : {recovery['hrv_last']} ms "
             f"(baseline {baseline.get('balancedLow', '?')}–{baseline.get('balancedUpper', '?')} ms, "
-            f"statut {hrv_summary.get('status', '?')})"
+            f"statut {status})"
         )
 
     sleep_hours, sleep_scores = [], []
@@ -228,11 +229,16 @@ def _format_forme_summary(client, activities_df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-def _format_nutrition_context(client, coach, days: int = 4) -> str:
+# Séance du plan Objectif → axe nutritionnel (clés de coach_logic.NUTRITION_FOCUS).
+_GOAL_NUTRITION_KEY = {"tempo": "tempo", "interval": "tempo", "race_pace": "tempo",
+                       "race": "tempo", "long": "sortie_longue"}
+
+
+def _format_nutrition_context(client, coach, goal_sessions=None, days: int = 4) -> str:
     """
-    Contexte alimentaire : séances des prochains jours (course, renfo et repos du
-    plan Garmin) et dépense énergétique récente. Sans plan actif, on se rabat sur
-    la seule dépense — le LLM saura quoi en faire.
+    Contexte alimentaire : séances des prochains jours et dépense énergétique
+    récente. Même priorité que la séance du jour (todays_session) : plan Garmin
+    Run Coach, sinon plan Objectif validé du dashboard, sinon la seule dépense.
     """
     today = date.today()
     lines = ["=== Séances des prochains jours ==="]
@@ -257,6 +263,26 @@ def _format_nutrition_context(client, coach, days: int = 4) -> str:
                 f"Contexte : plan « {coach['plan']['name']} », phase "
                 f"{coach['phase']['label']}, objectif dans {coach['days_to_event']} jours."
             )
+    elif goal_sessions:
+        horizon = (today + timedelta(days=days)).isoformat()
+        upcoming = [s for s in goal_sessions if today.isoformat() <= s["date"] < horizon]
+        for s in upcoming:
+            day = date.fromisoformat(s["date"])
+            when = "aujourd'hui" if day == today else weekday_fr(day)
+            if s["kind"] == "strength":
+                what = f"{s['title']} — renforcement, {s.get('duration_min', 0):.0f} min"
+            else:
+                target = f" ({s['target']})" if s.get("target") else ""
+                what = f"{s['title']} — course, {s.get('distance_km', 0):g} km{target}"
+            lines.append(f"- {when} {day.strftime('%d/%m')} : {what}")
+        if not upcoming:
+            lines.append("- Repos : aucune séance du plan ces prochains jours.")
+        next_run = next((s for s in goal_sessions if s["date"] >= today.isoformat()
+                         and s["kind"] != "strength"), None)
+        focus_task = ({"session_key": _GOAL_NUTRITION_KEY.get(next_run["kind"], "endurance")}
+                      if next_run else None)
+        lines.append(f"\nÀ retenir pour la prochaine course : {nutrition_focus(focus_task)}.")
+        lines.append("Contexte : plan Objectif validé dans le dashboard (course + renforcement).")
     else:
         lines.append("- Aucun plan d'entraînement actif.")
 
@@ -294,7 +320,7 @@ def _build_prompt(context: str, question: str, system_prompt: str = _SYSTEM_PROM
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
-st.title("🤖 Coach IA — Prompts prêts à l'emploi")
+st.title("Coach IA")
 st.caption(
     "Copiez le prompt généré et collez-le dans **Claude**, **ChatGPT**, **Gemini** "
     "ou n'importe quel autre LLM. Le contexte inclut tes sorties, ta charge "
@@ -318,8 +344,6 @@ with st.sidebar:
              "disponible, ce qu'il reste dans le frigo…",
         height=90,
     )
-    st.divider()
-    render_refresh_button("🔄 Actualiser données")
 
 if error:
     st.error(f"**Erreur Garmin :** {error}")
@@ -354,7 +378,8 @@ _is_nutrition = prompt_kind.endswith("Idées de repas")
 if _is_nutrition:
     with st.spinner("Préparation du contexte alimentaire…"):
         _coach = cached_coach_context(_athlete_id)
-        context = _format_nutrition_context(get_garmin_client(), _coach)
+        context = _format_nutrition_context(get_garmin_client(), _coach,
+                                        goal_store.validated_sessions(_athlete_id))
     if _diet_notes.strip():
         context += f"\n\n=== Mes contraintes ===\n{_diet_notes.strip()}"
     system_prompt, request = _NUTRITION_SYSTEM_PROMPT, _NUTRITION_REQUEST
@@ -366,12 +391,11 @@ else:
     system_prompt, request = _SYSTEM_PROMPT, _ANALYSIS_REQUEST
 
 with st.expander("📋 Données incluses dans le prompt", expanded=False):
-    # Échappement HTML : les noms d'activités Garmin sont contrôlés par
-    # l'utilisateur et pourraient contenir des balises (XSS si rendu brut).
-    st.markdown(
-        f'<div class="summary-block">{html.escape(context)}</div>',
-        unsafe_allow_html=True,
-    )
+    # Les noms d'activités Garmin sont saisis par l'utilisateur : échappés ET
+    # rendus ligne par ligne avec <br>. Une ligne vide dans le bloc HTML le
+    # refermerait et la suite serait lue comme du Markdown (image distante…).
+    _lines = "<br>".join(html.escape(line) or "&nbsp;" for line in context.splitlines())
+    st.markdown(f'<div class="summary-block">{_lines}</div>', unsafe_allow_html=True)
 
 st.divider()
 

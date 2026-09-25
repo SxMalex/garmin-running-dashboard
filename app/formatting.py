@@ -5,7 +5,21 @@ Aucune dépendance à Streamlit ni au client Garmin — ce module est importable
 depuis n'importe quelle couche (UI, client, logique métier) sans cycle.
 """
 
+import re
+
 import numpy as np
+
+_MD_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+\-.!|<>~$])")
+
+
+def md_escape(text) -> str:
+    """
+    Texte externe (nom d'activité, de séance, de chaussure saisi dans Garmin)
+    → Markdown inerte, sur une ligne. Sans ça, une activité nommée
+    `![](https://tiers/p.png)` ferait charger une image distante (fuite d'IP) et
+    `**x**` réécrirait la mise en forme de la page.
+    """
+    return _MD_SPECIAL.sub(r"\\\1", " ".join(str(text).split()))
 
 
 # ---------------------------------------------------------------------------
@@ -16,9 +30,10 @@ def seconds_to_pace_str(pace_sec: float) -> str:
     """Convertit un pace en secondes/km en chaîne min:sec/km."""
     if not pace_sec or pace_sec <= 0 or np.isnan(pace_sec):
         return "—"
-    minutes = int(pace_sec // 60)
-    seconds = int(pace_sec % 60)
-    return f"{minutes}:{seconds:02d}/km"
+    # Arrondi (pas troncature) : même règle que les allures du plan
+    # (race_plan_logic), sinon un même objectif s'affiche 4:58 ici et 4:59 là.
+    total = int(round(pace_sec))
+    return f"{total // 60}:{total % 60:02d}/km"
 
 
 def speed_to_pace(speed_ms: float) -> str:

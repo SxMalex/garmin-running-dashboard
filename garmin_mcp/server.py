@@ -54,6 +54,14 @@ _AUTH_METHODS = {"login", "logout", "resume_login"}
 _READ_PREFIXES = ("get_", "count_", "download_")
 _READ_METHODS = frozenset({"connectapi", "connectwebproxy"})
 
+# `connectapi`/`connectwebproxy` acceptent **kwargs relayés tels quels jusqu'à
+# `requests.Session.request` (cf. garminconnect.client._run_request) : sans
+# liste blanche, `proxies`/`verify=False`/`cookies`/`auth`/`files`… partiraient
+# avec le Bearer du tokenstore vers un tiers. Seul `path` (déjà positionnel) et
+# `params` (query string, seul kwarg utilisé par app/garmin_client.py) sont
+# nécessaires en lecture seule.
+_CONNECTAPI_ALLOWED_KWARGS = frozenset({"path", "params"})
+
 
 def _is_allowed(method: str) -> bool:
     """Vrai si la méthode ne fait que lire (liste blanche)."""
@@ -319,9 +327,13 @@ def garmin_call(method: str, params: dict[str, Any] | None = None) -> Any:
             f"Refusé : « {method} » n'est pas une méthode de lecture (serveur en "
             "lecture seule : get_*, count_*, download_*, connectapi en GET)."
         )
-    if method in _READ_METHODS and params and {"headers", "data", "json"} & set(params):
-        raise ValueError("Refusé : en-têtes et corps de requête ne sont pas autorisés "
-                         "(serveur en lecture seule).")
+    if method in _READ_METHODS:
+        extra = set(params or {}) - _CONNECTAPI_ALLOWED_KWARGS
+        if extra:
+            raise ValueError(
+                f"Refusé : arguments non autorisés pour « {method} » : {sorted(extra)} "
+                "(liste blanche : path, params — serveur en lecture seule)."
+            )
     c = _get_client()
     fn = getattr(c, method, None)
     if fn is None or not callable(fn):

@@ -282,13 +282,16 @@ def test_home_and_mcp_announce_the_validated_plan_session(logged_in, fake_api, g
 
     _validated(logged_in)
     plan = goal_store.load(42)["validated"]["plan"]
+    # FakeGarmin enregistre une course aujourd'hui : la séance du jour est donc
+    # sautée (todays_session) et l'Accueil annonce la suivante.
     first_run = next(s for s in plan_sessions(plan)
-                     if s["kind"] not in ("strength",) and s["date"] >= date.today().isoformat())
+                     if s["kind"] not in ("strength",) and s["date"] > date.today().isoformat())
 
     home = logged_in("main.py").run()
     assert not home.exception, [e.value for e in home.exception]
-    html = " ".join(m.value for m in home.markdown)
-    assert first_run["title"] in html and "ton plan Objectif" in html
+    card = next(m.value for m in home.markdown if "gd-session-title" in m.value
+                and "Séance du jour" in m.value)
+    assert first_run["title"] in card and "plan Objectif" in card
 
     brief = insights.daily_briefing(GarminClient(fake_api, athlete_id=42))
     assert brief["session"]["source"] == "plan_objectif"
@@ -310,9 +313,22 @@ def test_next_session_page_shows_plan_session(logged_in, goal):
     from race_plan_logic import plan_sessions
     _validated(logged_in)
     plan = goal_store.load(42)["validated"]["plan"]
-    first = next(s for s in plan_sessions(plan)
-                 if s["kind"] != "strength" and s["date"] >= date.today().isoformat())
+    first = next(s for s in plan_sessions(plan)   # > : course déjà faite aujourd'hui
+                 if s["kind"] != "strength" and s["date"] > date.today().isoformat())
     at = logged_in("5_Next_Session.py").run()
     assert not at.exception, [e.value for e in at.exception]
     assert any(first["title"] in m.value for m in at.markdown)
     assert "Allure d'ensemble" in {m.label for m in at.metric}
+
+
+def test_meal_prompt_uses_the_validated_plan(logged_in, goal):
+    """Audit : le prompt « Idées de repas » disait « Aucun plan actif » alors que
+    l'Accueil annonçait une séance du plan Objectif validé."""
+    _validated(logged_in)
+    at = logged_in("7_AI_Coach.py").run()
+    radio = next(r for r in at.radio if any("repas" in str(o) for o in r.options))
+    radio.set_value(next(o for o in radio.options if "repas" in str(o))).run()
+    assert not at.exception, [e.value for e in at.exception]
+    prompt = at.code[0].value
+    assert "Aucun plan d'entraînement actif" not in prompt
+    assert "plan Objectif validé" in prompt and "À retenir pour la prochaine course" in prompt

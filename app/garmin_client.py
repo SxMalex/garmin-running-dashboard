@@ -142,7 +142,7 @@ def complete_mfa(pending, mfa_code: str) -> Garmin:
 
 
 def clear_tokens() -> None:
-    """Déconnexion : supprime le tokenstore garth."""
+    """Déconnexion : supprime le tokenstore (client interne, plus de garth)."""
     path = Path(default_tokenstore()).expanduser()
     if path.exists():
         shutil.rmtree(path, ignore_errors=True)
@@ -560,13 +560,16 @@ class GarminClient:
         while len(activities) < limit:
             want = min(batch_size, limit - len(activities))
             batch = self.api.get_activities(start=start, limit=want)
+            # Cooldown après CHAQUE appel réel (pas seulement à la fin de la
+            # pagination) : un historique long fait plusieurs appels à la
+            # suite sans lui, contournant la protection anti-bannissement.
+            time.sleep(API_COOLDOWN_S)
             if not batch:
                 break
             activities.extend(batch)
             if len(batch) < want:
                 break
             start += len(batch)
-        time.sleep(API_COOLDOWN_S)
 
         rows = [activity_row(act) for act in activities[:limit]]
         _cache_set(self.athlete_id, cache_key, rows)
@@ -990,12 +993,6 @@ class GarminClient:
     def get_sleep(self, cdate: str):
         return self._daily("get_sleep_data", cdate, "sleep")
 
-    def get_training_readiness(self, cdate: str):
-        return self._daily("get_training_readiness", cdate, "readiness")
-
-    def get_training_status(self, cdate: str):
-        return self._daily("get_training_status", cdate, "training_status")
-
     def get_daily_stats(self, cdate: str):
         return self._daily("get_stats", cdate, "daily_stats")
 
@@ -1134,8 +1131,15 @@ class GarminClient:
 
         `required_tag` : la séance n'est supprimée que si son nom le contient
         (étiquette du dashboard) — garde-fou contre un journal corrompu qui
-        pointerait vers une séance de l'utilisateur. Retourne False si refusé.
+        pointerait vers une séance de l'utilisateur. Le `schedule_id` du
+        journal est vérifié de la même façon (lecture du schedule) avant tout
+        `unschedule` : un identifiant de planification corrompu ne doit jamais
+        faire retirer une séance qui n'est pas la nôtre, même si `workout_id`
+        est valide. Si le workout est déjà 404, seule cette lecture du
+        schedule permet encore de vérifier l'étiquette. Retourne False si
+        refusé (rien n'est alors envoyé à Garmin).
         """
+        current = None
         if required_tag:
             try:
                 current = self.api.get_workout_by_id(workout_id) or {}
@@ -1146,6 +1150,39 @@ class GarminClient:
             if current is not None and required_tag not in (current.get("workoutName") or ""):
                 logger.warning("Séance %s non retirée : étiquette %s absente", workout_id, required_tag)
                 return False
+
+        if schedule_id:
+            try:
+                scheduled = self.api.get_scheduled_workout_by_id(schedule_id) or {}
+            except Exception as e:
+                if _http_status(e) != 404:
+                    raise
+                scheduled = None  # déjà déplanifiée : rien à vérifier ni à retirer
+            if scheduled is None:
+                schedule_id = None
+            else:
+                nested = scheduled.get("workout") if isinstance(scheduled.get("workout"), dict) else {}
+                sched_workout_id = scheduled.get("workoutId") or nested.get("workoutId")
+                sched_name = scheduled.get("workoutName") or nested.get("workoutName") or ""
+                # Signal fort : le schedule pointe explicitement vers un AUTRE
+                # workout (journal corrompu). Un schedule sans workoutId
+                # embarqué ne prouve rien (forme non garantie côté Garmin) :
+                # on ne refuse pas sur une absence d'info.
+                if sched_workout_id is not None and int(sched_workout_id) != int(workout_id):
+                    logger.warning(
+                        "Schedule %s non retiré : appartient au workout %s, pas %s "
+                        "(journal corrompu ?)", schedule_id, sched_workout_id, workout_id,
+                    )
+                    return False
+                # Le workout a déjà disparu (404) : c'est la seule preuve
+                # d'étiquette qu'il nous reste, on l'exige explicitement.
+                if required_tag and current is None and required_tag not in sched_name:
+                    logger.warning(
+                        "Schedule %s non retiré : étiquette %s introuvable (workout %s "
+                        "déjà supprimé)", schedule_id, required_tag, workout_id,
+                    )
+                    return False
+
         for call, arg in ((self.api.unschedule_workout, schedule_id),
                           (self.api.delete_workout, workout_id)):
             if not arg:

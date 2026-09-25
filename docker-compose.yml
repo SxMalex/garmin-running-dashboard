@@ -20,6 +20,9 @@ services:
       # ici parce que le port n'écoute que sur 127.0.0.1. Désactivé par défaut
       # ailleurs (prod) : une instance exposée ne doit pas pouvoir écrire.
       GARMIN_WRITE_ENABLED: "true"
+      # Le dashboard ne lit jamais le mot de passe (comme en prod) : il n'a rien
+      # à faire dans l'environnement du conteneur (docker inspect, /proc/1/environ).
+      GARMIN_PASSWORD: ""
       # « Aujourd'hui » (titre, séance du jour) dans le fuseau de l'athlète, pas en UTC.
       TZ: ${TZ:-Europe/Paris}
     volumes:

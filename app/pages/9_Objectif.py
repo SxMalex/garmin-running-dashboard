@@ -16,6 +16,7 @@ import chart_theme as ct
 import goal_store
 from physio_logic import decoupling_candidates, decoupling_history
 from physio_ui import _load_candidate_streams
+from formatting import md_escape, seconds_to_pace_str
 from progression_logic import fmt_race_time
 from race_plan_logic import (
     DISTANCES,
@@ -29,15 +30,15 @@ from race_plan_logic import (
     predictions_by_km,
 )
 from ui_helpers import (
+    cache_nonce,
     cached_load_activities,
     get_athlete_id,
     get_garmin_client,
     render_garmin_attribution,
-    render_refresh_button,
     require_login,
 )
 from ui_mode import decoupling_params, explain, lock_params
-from ui_theme import bib
+from ui_theme import html_block, session_card
 from workout_export import (
     TAG_PREFIX,
     coach_state,
@@ -70,7 +71,7 @@ PHASE_COLORS = dict(zip(["MAINTENANCE", "BASE", "BUILD", "PEAK", "TAPER"], ct.CA
 # Données
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_predictions(athlete_id: int) -> dict:
+def load_predictions(athlete_id: int, nonce: int) -> dict:
     return get_garmin_client().get_race_predictions() or {}
 
 
@@ -103,10 +104,7 @@ def recent_long_run_drift(df: pd.DataFrame) -> float | None:
 # ---------------------------------------------------------------------------
 # En-tête
 # ---------------------------------------------------------------------------
-with st.sidebar:
-    render_refresh_button("🔄 Actualiser")
-
-st.title("🎯 Objectif de course")
+st.title("Objectif de course")
 st.caption("Choisis ta course : le plan combine course et renforcement, et chaque séance "
            "dit pourquoi elle est là.")
 
@@ -204,7 +202,7 @@ if date.fromisoformat(goal["race_date"]) <= TODAY:
 # Plan
 # ---------------------------------------------------------------------------
 race_date = date.fromisoformat(goal["race_date"])
-baseline = athlete_baseline(df, TODAY, predictions_by_km(load_predictions(_athlete_id)))
+baseline = athlete_baseline(df, TODAY, predictions_by_km(load_predictions(_athlete_id, cache_nonce())))
 context = {"long_run_decoupling_pct": recent_long_run_drift(df)}
 plan = build_race_plan(
     race_date, goal["distance"], baseline, TODAY,
@@ -236,7 +234,7 @@ summary = plan["summary"]
 
 st.markdown(f"#### {goal['distance']} le {race_date.strftime('%d/%m/%Y')} — "
             f"dans {(race_date - TODAY).days} jours")
-k1, k2, k3, k4 = st.container(key="lanes-goal").columns(4)
+k1, k2, k3, k4 = st.container(key="card-goal-kpi").columns(4)
 k1.metric("📆 Semaines", summary["n_weeks"])
 k2.metric("📈 Volume de pointe", f"{summary['peak_km']:.0f} km/sem",
           delta=f"départ {summary['start_km']:.0f} km", delta_color="off", delta_arrow="off")
@@ -248,24 +246,25 @@ _SOURCE_TEXT = {
 }
 k3.metric("⏱️ Temps estimé", fmt_race_time(summary["predicted_time_s"]),
           help=_SOURCE_TEXT.get(summary.get("pace_source"), ""))
-k4.metric("🎯 Allure course", f"{int(summary['race_pace_sec'] // 60)}:{int(summary['race_pace_sec'] % 60):02d}/km",
+k4.metric("🎯 Allure course", seconds_to_pace_str(summary['race_pace_sec']),
           delta=("objectif " + fmt_race_time(summary["target_time_s"])) if summary.get("target_time_s") else None,
           delta_color="off", delta_arrow="off")
 for w in plan["warnings"]:
     st.info(w)
 
-# Prochaine séance du plan, sur le dossard (même pièce forte que l'Accueil)
+# Prochaine séance du plan : même carte que la séance du jour de l'Accueil
 _next = next((x for x in sessions if date.fromisoformat(x["date"]) >= TODAY), None)
 if _next:
     _day = date.fromisoformat(_next["date"])
     _is_run = _next["kind"] not in ("strength",)
-    bib(band_text=f"Prochaine séance · {PHASE_LABELS.get(_next['phase'], '')}",
-        band_color=PHASE_COLORS.get(_next["phase"]),
-        number=f"{_next['distance_km']:g}" if _is_run else str(_next["duration_min"]),
-        unit="km" if _is_run else "min", title=_next["title"], target=_next.get("target", ""),
-        when=("Aujourd'hui" if _day == TODAY else f"{WEEKDAYS[_day.weekday()]} {_day.strftime('%d/%m')}"),
-        why=_next.get("why", ""), aria_label="Prochaine séance du plan")
-    st.write("")
+    with st.container(key="card-goal-next"):
+        html_block(session_card(
+            kicker=f"Prochaine séance · {PHASE_LABELS.get(_next['phase'], '')}",
+            number=f"{_next['distance_km']:g}" if _is_run else str(_next["duration_min"]),
+            unit="km" if _is_run else "min", title=_next["title"], target=_next.get("target", ""),
+            when=("Aujourd'hui" if _day == TODAY else f"{WEEKDAYS[_day.weekday()]} {_day.strftime('%d/%m')}"),
+            why=_next.get("why", ""), tag="Renfo" if not _is_run else "",
+            aria_label="Prochaine séance du plan"))
 
 # Volume hebdomadaire par phase
 fig = go.Figure()
@@ -497,7 +496,7 @@ if WRITE_ENABLED and st.button("🔎 Rechercher les séances du dashboard dans G
 orphans = st.session_state.get("objectif_orphans") or {}
 if orphans:
     st.warning(f"{len(orphans)} séance(s) du dashboard à venir dans Garmin, hors journal : "
-               + ", ".join(f"{o['date']} {o['name']}" for o in orphans.values()))
+               + ", ".join(f"{o['date']} {md_escape(o['name'])}" for o in orphans.values()))
     if st.button("🗑️ Retirer ces séances retrouvées"):
         for key, o in orphans.items():
             goal_store.record_push(_athlete_id, key, o)   # journalisées pour le retrait

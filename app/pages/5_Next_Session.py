@@ -4,21 +4,21 @@ basés sur les dernières activités et la charge d'entraînement.
 """
 
 import copy
+import json
 import os
 import requests
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from datetime import date, datetime, timedelta
+from datetime import date
 
 import goal_store
 from coach_logic import (
     target_label,
 )
-from formatting import map_zoom, seconds_to_pace_str, weekday_fr
-from forme_logic import parse_recovery
-from next_session_logic import SESSION_TYPES as _SESSION_TYPES  # noqa: F401
+from formatting import map_zoom, md_escape, seconds_to_pace_str, weekday_fr
+from forme_logic import TSB_FATIGUE, TSB_FRESH, hrv_label, parse_recovery
 from next_session_logic import (
     SESSION_TYPES,
     parse_ors_route as _parse_ors_route,
@@ -27,15 +27,17 @@ from next_session_logic import (
 )
 from ui_mode import explain
 from ui_helpers import (
+    cache_nonce,
     cached_coach_context,
     cached_load_activities,
     get_garmin_client,
     render_elevation_profile,
-    render_refresh_button,
     render_garmin_attribution,
     get_athlete_id,
     require_login,
 )
+
+import chart_theme as ct
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -122,7 +124,7 @@ def _render_route_map(route: dict, session_color: str) -> None:
         lat=[lats[0], lats[-1]],
         lon=[lons[0], lons[-1]],
         mode="markers",
-        marker=dict(size=16, color=["#0ca30c", "#d03b3b"]),
+        marker=dict(size=16, color=[ct.GOOD, ct.CRITICAL]),
         text=["Départ / Arrivée", "Arrivée"],
         hoverinfo="text",
         name="Points clés",
@@ -159,11 +161,11 @@ def _render_elevation_profile(route: dict, session_color: str) -> None:
 # UI principale
 # ---------------------------------------------------------------------------
 
-st.title("🗺️ Prochaine sortie")
+st.title("Prochaine sortie")
 st.caption(
-    "La séance de ton plan Garmin Run Coach, et un parcours inédit généré sur "
-    "OpenStreetMap pour la courir. Sans plan actif, la séance est déduite de ta "
-    "charge d'entraînement."
+    "La séance de ton plan Garmin Run Coach, sinon celle de ton plan Objectif validé, "
+    "sinon une séance déduite de ta charge d'entraînement — et un parcours inédit "
+    "généré sur OpenStreetMap pour la courir."
 )
 
 # Chargement
@@ -186,13 +188,13 @@ ors_key = os.getenv("ORS_API_KEY", "")
 
 # Récupération du jour (HRV, sommeil) — module la recommandation
 @st.cache_data(ttl=3600, show_spinner=False)
-def _load_recovery(athlete_id: int, cdate: str) -> tuple:
+def _load_recovery(athlete_id: int, cdate: str, nonce: int) -> tuple:
     client = get_garmin_client()
     recovery = parse_recovery(client.get_hrv(cdate), client.get_sleep(cdate))
     return recovery["hrv_status"], recovery["sleep_score"]
 
 
-_hrv_status, _sleep_score = _load_recovery(_athlete_id, date.today().isoformat())
+_hrv_status, _sleep_score = _load_recovery(_athlete_id, date.today().isoformat(), cache_nonce())
 
 # Plan Garmin Run Coach — quand il y en a un d'actif, c'est lui qui décide de la
 # séance ; la logique interne ne sert plus que de repli. Le chargement passe par
@@ -272,7 +274,6 @@ with st.sidebar:
         sidebar_start_lat = None
         sidebar_start_lon = None
 
-    render_refresh_button()
 
 # Paramètres finaux (valeurs sidebar ou recommandation par défaut)
 target_dist_km = custom_dist
@@ -283,7 +284,7 @@ duration_min = round(target_dist_km * rec["target_pace_sec"] / 60)
 if _coach:
     _plan = _coach["plan"]
     _phase = _coach["phase"]
-    _bits = [f"**{_plan['name']}**"]
+    _bits = [f"**{md_escape(_plan['name'])}**"]
     if _phase:
         _bits.append(f"phase **{_phase['label']}**")
     if _coach["days_to_event"] is not None and _coach["event_date"]:
@@ -295,14 +296,14 @@ if _coach:
 
 # ── Section 1 : Type de séance ─────────────────────────────────────────────
 if _coach_task:
-    st.markdown(f"## {s['icon']} {_coach_task['name']}")
+    st.markdown(f"## {s['icon']} {md_escape(_coach_task['name'])}")
     _when = (
         "aujourd'hui" if _coach_task["date"] == _today
         else f"{weekday_fr(_coach_task['date'])} {_coach_task['date'].strftime('%d/%m')}"
     )
     st.markdown(
         f"*Séance programmée par le coach Garmin pour **{_when}** — "
-        f"{target_label(_coach_task)}, {_coach_task['duration_min']} min.*"
+        f"{md_escape(target_label(_coach_task))}, {_coach_task['duration_min']} min.*"
     )
 elif rec.get("goal_session"):
     _goal = rec["goal_session"]
@@ -322,7 +323,7 @@ _coach_alert = _today_session["alert"]
 if _coach_alert:
     _causes = []
     if _hrv_status and _hrv_status.upper() != "BALANCED":
-        _causes.append(f"HRV {_hrv_status.lower()}")
+        _causes.append(f"HRV {hrv_label(_hrv_status)}")
     if _sleep_score is not None and _sleep_score < 60:
         _causes.append(f"sommeil dégradé (score {_sleep_score})")
     st.warning(
@@ -331,10 +332,10 @@ if _coach_alert:
     )
 
 if rec.get("downgraded_from"):
-    _from = _SESSION_TYPES[rec["downgraded_from"]]["label"]
+    _from = SESSION_TYPES[rec["downgraded_from"]]["label"]
     _causes = []
     if _hrv_status and _hrv_status.upper() != "BALANCED":
-        _causes.append(f"HRV {_hrv_status.lower()}")
+        _causes.append(f"HRV {hrv_label(_hrv_status)}")
     if _sleep_score is not None and _sleep_score < 60:
         _causes.append(f"sommeil dégradé (score {_sleep_score})")
     st.info(
@@ -351,9 +352,9 @@ col1.metric("CTL — Forme", f"{rec['ctl']:.1f}", help="Fitness chronique sur 42
 col2.metric("ATL — Fatigue", f"{rec['atl']:.1f}", help="Fatigue aiguë sur 7 jours")
 
 tsb = rec["tsb"]
-if tsb > 10:
+if tsb > TSB_FRESH:
     tsb_delta, tsb_dc = "Bien reposé", "normal"
-elif tsb > -20:
+elif tsb >= TSB_FATIGUE:
     tsb_delta, tsb_dc = "Charge normale", "off"
 else:
     tsb_delta, tsb_dc = "Récupération nécessaire", "inverse"
@@ -485,6 +486,35 @@ if sidebar_start_lat is None:
 
 start_lat, start_lon = sidebar_start_lat, sidebar_start_lon
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_ors_route(profile: str, body_json: str, ors_key: str, target_dist_km: float) -> dict | None:
+    """
+    Appel ORS mis en cache par (profil, point de départ, options, distance) : un
+    rerun de la page (n'importe quel widget) ne renvoie ni le point de départ —
+    souvent le domicile — ni ne consomme le quota gratuit. Une erreur n'est pas
+    mise en cache (st.cache_data) : elle sera réessayée.
+    """
+    url = f"{ORS_API_BASE}/directions/{profile}/geojson"
+    headers = {
+        "Authorization": ors_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json, application/geo+json",
+    }
+    body = json.loads(body_json)
+    resp = requests.post(url, json=body, headers=headers, timeout=30)
+    resp.raise_for_status()
+    route = _parse_ors_route(resp.json())
+    # Retry avec distance corrigée si l'écart dépasse 15 %
+    if route and abs(route["distance_km"] - target_dist_km) / target_dist_km > 0.15:
+        retry_body = copy.deepcopy(body)
+        retry_body["options"]["round_trip"]["length"] = int(
+            body["options"]["round_trip"]["length"] * target_dist_km / route["distance_km"])
+        resp2 = requests.post(url, json=retry_body, headers=headers, timeout=30)
+        resp2.raise_for_status()
+        route = _parse_ors_route(resp2.json()) or route
+    return route
+
+
 # Seed pour la variation du parcours
 if "route_seed" not in st.session_state:
     st.session_state["route_seed"] = 1
@@ -502,12 +532,6 @@ distance_m = int(target_dist_km * 1000)
 profile = "foot-hiking" if (prefer_trails or rec["session_key"] == "sortie_longue") else "foot-walking"
 
 with st.spinner("Génération du parcours en cours..."):
-    url = f"{ORS_API_BASE}/directions/{profile}/geojson"
-    headers = {
-        "Authorization": ors_key,
-        "Content-Type": "application/json",
-        "Accept": "application/json, application/geo+json",
-    }
     body = {
         "coordinates": [[start_lon, start_lat]],
         "options": _ors_options(
@@ -520,20 +544,7 @@ with st.spinner("Génération du parcours en cours..."):
         "instructions": False,
     }
     try:
-        resp = requests.post(url, json=body, headers=headers, timeout=30)
-        resp.raise_for_status()
-        route = _parse_ors_route(resp.json())
-
-        # Retry avec distance corrigée si l'écart dépasse 15 %
-        if route and abs(route["distance_km"] - target_dist_km) / target_dist_km > 0.15:
-            factor = target_dist_km / route["distance_km"]
-            retry_body = copy.deepcopy(body)
-            retry_body["options"]["round_trip"]["length"] = int(distance_m * factor)
-            resp2 = requests.post(url, json=retry_body, headers=headers, timeout=30)
-            resp2.raise_for_status()
-            corrected = _parse_ors_route(resp2.json())
-            if corrected:
-                route = corrected
+        route = _fetch_ors_route(profile, json.dumps(body, sort_keys=True), ors_key, target_dist_km)
     except requests.HTTPError as e:
         st.error(f"Erreur ORS ({e.response.status_code}) : {e.response.text[:400]}")
         route = None
@@ -569,6 +580,9 @@ if route:
 
     # Carte
     _render_route_map(route, s["color"])
+    st.caption("Itinéraire © [openrouteservice.org](https://openrouteservice.org) by HeiGIT · "
+               "données cartographiques © [OpenStreetMap](https://www.openstreetmap.org/copyright) "
+               "contributors")
 
     # Profil altimétrique
     if route["elevations"]:

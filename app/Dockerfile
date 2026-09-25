@@ -15,10 +15,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copier le code de l'application
 COPY . .
 
-# Créer les répertoires de cache et de tokens, et un utilisateur non-root
+# Créer les répertoires de cache et de tokens, et un utilisateur non-root.
+# chown limité à ces trois répertoires : le code applicatif (COPY . .) reste
+# appartenant à root et non modifiable par l'utilisateur d'exécution.
 RUN mkdir -p /app/.cache /app/.garmin /app/.data && \
     useradd -m appuser && \
-    chown -R appuser /app
+    chown -R appuser /app/.cache /app/.garmin /app/.data
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

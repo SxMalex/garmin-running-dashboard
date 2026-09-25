@@ -170,3 +170,23 @@ def test_import_does_not_touch_data_dir(monkeypatch):
 def test_garmin_call_refuses_request_bodies():
     with pytest.raises(ValueError, match="lecture seule"):
         server.garmin_call("connectapi", {"path": "/x", "headers": {"X-HTTP-Method-Override": "DELETE"}})
+
+
+@pytest.mark.parametrize("key, value", [
+    ("proxies", {"https": "http://evil.example.com"}),
+    ("verify", False),
+    ("files", {"f": "x"}),
+    ("cookies", {"a": "b"}),
+])
+def test_garmin_call_refuses_dangerous_kwargs(key, value):
+    """proxies/verify=False/files/cookies partiraient avec le Bearer (liste blanche)."""
+    with pytest.raises(ValueError, match="lecture seule"):
+        server.garmin_call("connectapi", {"path": "/x", key: value})
+
+
+def test_garmin_call_connectapi_allows_path_and_params(monkeypatch):
+    """Seuls path/params sont nécessaires (seul usage réel : GarminClient._connect_range)."""
+    fake = FakeGarmin(n_runs=0)
+    monkeypatch.setattr(server, "_get_client", lambda: fake)
+    server.garmin_call("connectapi", {"path": "/x", "params": {"a": 1}})
+    assert "connectapi:/x" in fake.calls

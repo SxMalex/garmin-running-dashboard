@@ -25,6 +25,12 @@ services:
       GARMIN_PASSWORD: ""
       # « Aujourd'hui » dans le fuseau de l'athlète (le conteneur est en UTC).
       TZ: ${TZ:-Europe/Paris}
+      # Anti DNS-rebinding : seul le domaine public passe la poignée de main
+      # WebSocket (Streamlit ≥ 1.61, cf. app/.streamlit/config.toml).
+      STREAMLIT_SERVER_ALLOWED_HOSTS: ${PUBLIC_DOMAIN}
+      # Pas de trace ni de stacktrace dans le navigateur en prod (seulement les
+      # logs serveur) : le dashboard est exposé publiquement derrière Caddy.
+      STREAMLIT_CLIENT_SHOW_ERROR_DETAILS: none
     volumes:
       - app_cache:/app/.cache
       - garmin_tokens:/app/.garmin

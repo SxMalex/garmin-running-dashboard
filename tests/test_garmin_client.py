@@ -46,9 +46,9 @@ def _isolated_cache(tmp_path, monkeypatch):
 @pytest.fixture
 def garmin_activity():
     return {
-        "activityId": 23646533940,
-        "activityName": "Vitrolles - Base",
-        "startTimeLocal": "2026-07-18 21:20:46",
+        "activityId": 10000000001,
+        "activityName": "Sortie test",
+        "startTimeLocal": "2026-01-15 08:00:00",
         "activityType": {"typeKey": "running"},
         "eventType": {"typeKey": "uncategorized"},
         "distance": 6254.65,
@@ -60,8 +60,8 @@ def garmin_activity():
         "maxHR": 153.0,
         "averageRunningCadenceInStepsPerMinute": 159.625,
         "calories": 450.0,
-        "startLatitude": 43.42528,
-        "startLongitude": 5.28087,
+        "startLatitude": 43.6000,
+        "startLongitude": 1.4400,
         "activityTrainingLoad": 44.47,
         "vO2MaxValue": 48.0,
     }
@@ -125,13 +125,13 @@ class FakeApi:
 class TestActivityRow:
     def test_columns_and_values(self, garmin_activity):
         row = activity_row(garmin_activity)
-        assert row["activityId"] == 23646533940
+        assert row["activityId"] == 10000000001
         assert row["activityType"] == "running"
         assert row["distance_km"] == 6.25
         assert row["duration_min"] == 46.0  # movingDuration prioritaire
         assert row["avgHR"] == 142.0
         assert row["calories"] == 450
-        assert row["startLat"] == pytest.approx(43.42528)
+        assert row["startLat"] == pytest.approx(43.6000)
         assert row["workoutType"] == "uncategorized"
         assert row["vo2max"] == 48.0
 
@@ -443,6 +443,20 @@ class TestGetActivities:
         client = GarminClient(api=FakeApi([]), athlete_id=1)
         assert client.get_activities(limit=10).empty
 
+    def test_cooldown_applied_between_each_real_page(self, garmin_activity, monkeypatch):
+        """Un historique > batch_size (100) fait plusieurs appels réels : le
+        cooldown doit s'appliquer après chacun, pas une seule fois à la fin
+        (sinon la pagination contourne la protection anti-bannissement)."""
+        sleeps = []
+        monkeypatch.setattr(gc.time, "sleep", lambda s: sleeps.append(s))
+        acts = [dict(garmin_activity, activityId=i) for i in range(250)]
+        api = FakeApi(acts)
+        client = GarminClient(api=api, athlete_id=1)
+        client.get_activities(limit=250)
+        # 250 activités / batch_size 100 -> 3 pages réelles (100, 100, 50).
+        assert api.calls == 3
+        assert len(sleeps) == api.calls
+
 
 # ---------------------------------------------------------------------------
 # safe_load_activities — traduction des erreurs
@@ -628,10 +642,14 @@ class TestRangeMethods:
 # ---------------------------------------------------------------------------
 
 class WriteApi(FakeApi):
-    def __init__(self, schedule_error=None, delete_error=None, library=None):
+    def __init__(self, schedule_error=None, delete_error=None, library=None, schedules=None):
         super().__init__()
         self.schedule_error, self.delete_error = schedule_error, delete_error
         self.library = dict(library or {})
+        # {schedule_id: {"workoutId": ..., "workoutName": ...}} — forme de
+        # get_scheduled_workout_by_id, utilisée pour vérifier l'appartenance
+        # du schedule avant un unschedule (cf. remove_workout).
+        self.schedules = dict(schedules or {})
         self.deleted, self.unscheduled = [], []
 
     def upload_workout(self, payload):
@@ -642,10 +660,13 @@ class WriteApi(FakeApi):
     def schedule_workout(self, workout_id, date_str):
         if self.schedule_error:
             raise self.schedule_error
-        return {"workoutScheduleId": 900 + workout_id}
+        sid = 900 + workout_id
+        self.schedules[sid] = {"workoutId": workout_id}
+        return {"workoutScheduleId": sid}
 
     def unschedule_workout(self, schedule_id):
         self.unscheduled.append(schedule_id)
+        self.schedules.pop(schedule_id, None)
 
     def delete_workout(self, workout_id):
         if self.delete_error:
@@ -657,6 +678,11 @@ class WriteApi(FakeApi):
         if workout_id not in self.library:
             raise RuntimeError("API Error 404 - Not Found")
         return self.library[workout_id]
+
+    def get_scheduled_workout_by_id(self, schedule_id):
+        if schedule_id not in self.schedules:
+            raise RuntimeError("API Error 404 - Not Found")
+        return self.schedules[schedule_id]
 
     def get_workouts(self, start=0, limit=100):
         items = [{"workoutId": k, **v} for k, v in sorted(self.library.items())]
@@ -682,8 +708,10 @@ class TestPushWorkout:
 
     def test_remove_tolerates_real_404_only(self):
         api = WriteApi(library={5: {"workoutName": "a [GD-p-]"}},
+                       schedules={9: {"workoutId": 5}},
                        delete_error=RuntimeError("API Error 404 - gone"))
         assert GarminClient(api=api, athlete_id=1).remove_workout(5, 9) is True
+        assert api.unscheduled == [9]
         api.delete_error = RuntimeError("API Error 500 - /workout/9404 failed")
         with pytest.raises(RuntimeError):
             GarminClient(api=api, athlete_id=1).remove_workout(5, 9)
@@ -697,6 +725,37 @@ class TestPushWorkout:
     def test_remove_already_deleted_is_ok(self):
         api = WriteApi()
         assert GarminClient(api=api, athlete_id=1).remove_workout(5, None, required_tag="[GD-") is True
+
+    def test_remove_refuses_schedule_owned_by_another_workout(self):
+        """Journal corrompu : schedule_id pointe vers un AUTRE workout —
+        refus, ni unschedule ni delete ne sont appelés."""
+        api = WriteApi(library={5: {"workoutName": "a [GD-p-]"}},
+                       schedules={9: {"workoutId": 999, "workoutName": "Séance du club"}})
+        client = GarminClient(api=api, athlete_id=1)
+        assert client.remove_workout(5, 9, required_tag="[GD-p-") is False
+        assert api.unscheduled == [] and api.deleted == []
+
+    def test_remove_refuses_mismatched_schedule_even_without_tag(self):
+        """La vérification d'appartenance du schedule s'applique même sans
+        `required_tag` (garde-fou général contre un journal corrompu)."""
+        api = WriteApi(library={5: {"workoutName": "a"}}, schedules={9: {"workoutId": 999}})
+        client = GarminClient(api=api, athlete_id=1)
+        assert client.remove_workout(5, 9) is False
+        assert api.unscheduled == [] and api.deleted == []
+
+    def test_remove_404_workout_checks_tag_via_schedule(self):
+        """Workout déjà supprimé (404) : seule la lecture du schedule permet
+        encore de vérifier l'étiquette avant de déplanifier."""
+        api = WriteApi(schedules={9: {"workoutId": 5, "workoutName": "Séance du club"}})
+        client = GarminClient(api=api, athlete_id=1)
+        assert client.remove_workout(5, 9, required_tag="[GD-p-") is False
+        assert api.unscheduled == [] and api.deleted == []
+
+    def test_remove_404_workout_allows_when_schedule_carries_tag(self):
+        api = WriteApi(schedules={9: {"workoutId": 5, "workoutName": "x [GD-p-]"}})
+        client = GarminClient(api=api, athlete_id=1)
+        assert client.remove_workout(5, 9, required_tag="[GD-p-") is True
+        assert api.unscheduled == [9]
 
     def test_list_workouts_paginates(self):
         api = WriteApi(library={i: {"workoutName": f"w{i}"} for i in range(230)})

@@ -29,7 +29,7 @@ from coach_logic import (
 TODAY = date(2026, 8, 13)
 
 
-def _plan(status="Scheduled", plan_id=46843176, start="2026-05-11T00:00:00.0", name="Programme Marseille-Cassis"):
+def _plan(status="Scheduled", plan_id=90000001, start="2026-05-11T00:00:00.0", name="Programme test"):
     return {
         "trainingPlanId": plan_id,
         "name": name,
@@ -46,7 +46,7 @@ def _plan(status="Scheduled", plan_id=46843176, start="2026-05-11T00:00:00.0", n
 def _task(cdate, name, sport="running", effect="AEROBIC_BASE", description="",
           duration=2520, rest=False, status="NOT_COMPLETE", week=14):
     return {
-        "trainingPlanId": 46843176,
+        "trainingPlanId": 90000001,
         "weekId": week,
         "calendarDate": cdate,
         "taskWorkout": {
@@ -110,8 +110,8 @@ def plan_detail():
 class TestActivePlan:
     def test_ignore_les_plans_termines(self, plans_raw):
         plan = active_plan(plans_raw)
-        assert plan["plan_id"] == 46843176
-        assert plan["name"] == "Programme Marseille-Cassis"
+        assert plan["plan_id"] == 90000001
+        assert plan["name"] == "Programme test"
         assert plan["start_date"] == date(2026, 5, 11)
 
     def test_prend_le_plus_recent_si_plusieurs_actifs(self):
@@ -130,7 +130,7 @@ class TestActivePlan:
         assert active_plan(raw) is None
 
     def test_accepte_une_liste_brute(self):
-        assert active_plan([_plan()])["plan_id"] == 46843176
+        assert active_plan([_plan()])["plan_id"] == 90000001
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +305,7 @@ class TestWeekSchedule:
 class TestCoachPlanContext:
     def test_contexte(self, plans_raw, plan_detail):
         ctx = coach_plan_context(plans_raw, plan_detail, TODAY)
-        assert ctx["plan"]["plan_id"] == 46843176
+        assert ctx["plan"]["plan_id"] == 90000001
         assert ctx["phase"]["phase"] == "BUILD"
         assert ctx["event_date"] == date(2026, 10, 25)
         assert ctx["days_to_event"] == 73

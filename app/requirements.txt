@@ -1,10 +1,10 @@
 # ≥ 1.52 : width="stretch" (1.44+), polices de config.toml (theme.fontFaces),
-# st.metric(delta_arrow=...) (1.52)
-streamlit>=1.52.0,<2.0.0
+# st.metric(delta_arrow=...) (1.52). ≥ 1.61 : server.allowedHosts (absent en
+# 1.52-1.60, vérifié sur les sources publiées) — anti DNS-rebinding.
+streamlit>=1.61.0,<2.0.0
 pandas==2.2.3
 plotly==5.24.1
-requests==2.32.3
-python-dotenv==1.0.1
+requests>=2.32.4  # CVE-2024-47081 (fuite d'identifiants .netrc sur redirection)
 numpy==2.1.3
 pyarrow==18.1.0
 scipy==1.14.1
@@ -13,4 +13,4 @@ Pillow==11.0.0
 matplotlib==3.9.3
 folium==0.18.0
 streamlit-folium==0.23.1
-garminconnect>=0.3.6  # client interne (plus de garth), exceptions typées
+garminconnect==0.3.6  # client interne (plus de garth), exceptions typées
