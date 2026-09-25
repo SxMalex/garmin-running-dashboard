@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import base64
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from io import BytesIO
 from typing import Iterable, Optional, Sequence
 
@@ -75,45 +75,63 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return R * 2 * math.asin(math.sqrt(a))
 
 
-def detect_home(starts: Sequence[tuple[float, float]]) -> tuple[float, float, int]:
+# Rayon de voisinage pour `detect_home` (300 m : un pâté de maisons).
+HOME_CLUSTER_RADIUS_KM = 0.3
+# Au-delà, on échantillonne les CANDIDATS testés (mais chacun compte ses
+# voisins sur la totalité des départs) pour garder l'algorithme O(n²) rapide.
+HOME_DETECT_MAX_CANDIDATES = 3000
+
+
+def _haversine_km_np(lat1: float, lon1: float, lat2: np.ndarray, lon2: np.ndarray) -> np.ndarray:
+    """Version vectorisée de `haversine_km`, pour comparer un point à un tableau."""
+    R = 6371.0
+    dlat = np.radians(lat2 - lat1)
+    dlon = np.radians(lon2 - lon1)
+    a = (
+        np.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1)) * np.cos(np.radians(lat2)) * np.sin(dlon / 2) ** 2
+    )
+    return R * 2 * np.arcsin(np.sqrt(a))
+
+
+def detect_home(
+    starts: Sequence[tuple[float, float]], radius_km: float = HOME_CLUSTER_RADIUS_KM
+) -> tuple[float, float, int]:
     """
     Détecte la "maison" comme le point de départ le plus fréquent.
 
-    Bin les points sur une grille ~1 km, prend la cellule la plus dense,
-    retourne la moyenne des coordonnées réelles dans cette cellule.
+    Compte, pour chaque départ, ses voisins dans un rayon de `radius_km`
+    (300 m par défaut) plutôt que de biner sur une grille fixe (`round(lat,
+    2)`) : un cluster à cheval sur une frontière de grille se retrouvait coupé
+    en deux, perdant face à un cluster plus petit mais entier. Retourne le
+    barycentre des voisins du départ qui en a le plus.
+
+    O(n²) sur le nombre de départs, acceptable jusqu'à quelques milliers ;
+    au-delà de `HOME_DETECT_MAX_CANDIDATES`, on échantillonne les candidats.
 
     Lève ValueError si la liste est vide.
     """
     if not starts:
         raise ValueError("Aucun point de départ — impossible de détecter la maison.")
 
-    cell_lats: dict[tuple[float, float], list[float]] = {}
-    cell_lons: dict[tuple[float, float], list[float]] = {}
-    for lat, lon in starts:
-        cell = (round(lat, 2), round(lon, 2))
-        cell_lats.setdefault(cell, []).append(lat)
-        cell_lons.setdefault(cell, []).append(lon)
+    pts = np.asarray(starts, dtype=float)
+    lats, lons = pts[:, 0], pts[:, 1]
 
-    best_cell = max(cell_lats, key=lambda c: len(cell_lats[c]))
-    home_lat = sum(cell_lats[best_cell]) / len(cell_lats[best_cell])
-    home_lon = sum(cell_lons[best_cell]) / len(cell_lons[best_cell])
-    return home_lat, home_lon, len(cell_lats[best_cell])
+    candidate_idx = np.arange(len(pts))
+    if len(pts) > HOME_DETECT_MAX_CANDIDATES:
+        rng = np.random.default_rng(0)
+        candidate_idx = rng.choice(len(pts), size=HOME_DETECT_MAX_CANDIDATES, replace=False)
 
+    best_idx, best_count = int(candidate_idx[0]), -1
+    for i in candidate_idx:
+        count = int(np.sum(_haversine_km_np(lats[i], lons[i], lats, lons) <= radius_km))
+        if count > best_count:
+            best_count, best_idx = count, int(i)
 
-def bbox_around(
-    lat: float, lon: float, half_km: float
-) -> tuple[float, float, float, float]:
-    """
-    Bbox géographique de ~(2*half_km × 2*half_km) km autour de (lat, lon).
-    Compense la convergence des méridiens : 1° lon ≈ 111 km × cos(lat).
-    Le max(cos, 0.01) évite la division par ~0 aux pôles.
-
-    Retourne (sw_lat, sw_lon, ne_lat, ne_lon).
-    """
-    lat_offset = half_km / 111.0
-    cos_lat = max(math.cos(math.radians(lat)), 0.01)
-    lon_offset = half_km / (111.0 * cos_lat)
-    return (lat - lat_offset, lon - lon_offset, lat + lat_offset, lon + lon_offset)
+    neighbors = _haversine_km_np(lats[best_idx], lons[best_idx], lats, lons) <= radius_km
+    home_lat = float(lats[neighbors].mean())
+    home_lon = float(lons[neighbors].mean())
+    return home_lat, home_lon, int(neighbors.sum())
 
 
 def track_gps_spread_m(points: Iterable[GpsPoint]) -> float:
@@ -257,10 +275,12 @@ def rasterize(
         xs_utm, ys_utm = to_utm.transform(lons, lats)
         xs_wm, ys_wm = to_wm.transform(lons, lats)
 
+        keep_idx = None
         if clip_m is not None:
             mask = ((xs_utm - home_x_utm) ** 2 + (ys_utm - home_y_utm) ** 2) <= clip_m**2
             if not mask.any():
                 continue
+            keep_idx = np.flatnonzero(mask)
             xs_utm = xs_utm[mask]
             ys_utm = ys_utm[mask]
             xs_wm = xs_wm[mask]
@@ -286,12 +306,23 @@ def rasterize(
         if n < 2:
             continue
 
-        # Valeurs par segment (NaN si absent côté capteur).
-        seg_speeds = _pairwise_mean(speeds[:-1], speeds[1:])
-        seg_hrs = _pairwise_mean(hrs[:-1], hrs[1:])
+        # Un segment ne relie deux points compactés que s'ils étaient déjà
+        # consécutifs dans le track d'origine. Le clip par rayon retire des
+        # points au milieu du parcours (sortie puis retour dans le rayon) :
+        # sans ce garde-fou, la ligne peinte reliait directement les deux
+        # extrémités du "trou", traçant une corde là où personne n'a couru
+        # (repro_heat_chord).
+        contig = np.diff(keep_idx) == 1 if keep_idx is not None else np.ones(n - 1, dtype=bool)
+        valid_seg = np.flatnonzero(contig)
+        if valid_seg.size == 0:
+            continue
 
-        d_alt = alts[1:] - alts[:-1]  # NaN si l'une des altitudes manque
-        d_dist = np.sqrt((xs_utm[1:] - xs_utm[:-1]) ** 2 + (ys_utm[1:] - ys_utm[:-1]) ** 2)
+        # Valeurs par segment (NaN si absent côté capteur).
+        seg_speeds = _pairwise_mean(speeds[:-1], speeds[1:])[valid_seg]
+        seg_hrs = _pairwise_mean(hrs[:-1], hrs[1:])[valid_seg]
+
+        d_alt = (alts[1:] - alts[:-1])[valid_seg]  # NaN si l'une des altitudes manque
+        d_dist = np.sqrt((xs_utm[1:] - xs_utm[:-1]) ** 2 + (ys_utm[1:] - ys_utm[:-1]) ** 2)[valid_seg]
         valid_alt = ~np.isnan(d_alt) & (d_dist >= 0.5)
         with np.errstate(divide="ignore", invalid="ignore"):
             seg_grads = np.where(valid_alt, np.abs(d_alt) / d_dist, np.nan)
@@ -300,19 +331,21 @@ def rasterize(
         # Peinture vectorisée Bresenham-style : pour chaque segment on étale
         # n_steps+1 points sur la ligne, on concatène tous les segments en un
         # gros tableau, puis on accumule via `np.add.at` (gère les doublons).
-        dx = px[1:] - px[:-1]
-        dy = py[1:] - py[:-1]
+        px0 = px[:-1][valid_seg]
+        py0 = py[:-1][valid_seg]
+        dx = (px[1:] - px[:-1])[valid_seg]
+        dy = (py[1:] - py[:-1])[valid_seg]
         n_steps = np.maximum(np.maximum(np.abs(dx), np.abs(dy)).astype(np.int64) + 1, 1)
         pts_per_seg = n_steps + 1
         total = int(pts_per_seg.sum())
 
-        seg_idx = np.repeat(np.arange(n - 1), pts_per_seg)
+        seg_idx = np.repeat(np.arange(valid_seg.size), pts_per_seg)
         seg_offsets = np.concatenate(([0], np.cumsum(pts_per_seg)[:-1]))
         step_in_seg = np.arange(total) - seg_offsets[seg_idx]
         t = step_in_seg / n_steps[seg_idx]
 
-        xi = np.round(px[:-1][seg_idx] + t * dx[seg_idx]).astype(np.int64)
-        yi = np.round(py[:-1][seg_idx] + t * dy[seg_idx]).astype(np.int64)
+        xi = np.round(px0[seg_idx] + t * dx[seg_idx]).astype(np.int64)
+        yi = np.round(py0[seg_idx] + t * dy[seg_idx]).astype(np.int64)
         m = (xi >= 0) & (xi < grid_w) & (yi >= 0) & (yi < grid_h)
 
         sv = seg_speeds[seg_idx]

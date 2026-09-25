@@ -14,6 +14,7 @@ from race_plan_logic import (
     MAX_BUILD_WEEKS,
     MAX_PEAK_OVER_START,
     MAX_WEEKLY_GROWTH,
+    PLAUSIBLE_RACE_PACE,
     STRENGTH_STOP_DAYS_BEFORE_RACE,
     athlete_baseline,
     build_race_plan,
@@ -84,6 +85,22 @@ class TestBaseline:
         race = athlete_baseline(raced, TODAY, predictions={10.0: 45 * 60})
         assert race["pace_source"] == "race"
         assert race["pace_10k_sec"] == pytest.approx(280.0)
+
+    def test_training_pace_ignores_isolated_outlier(self):
+        """Fuzz repro_outlier_p10 : un vélo enregistré en 'running' (12 km en
+        30 min) projette une allure 10 km hors bornes plausibles et ne doit
+        pas, à lui seul, fixer l'allure de toute la préparation."""
+        df = history()
+        baseline = athlete_baseline(df, TODAY)
+        outlier = pd.DataFrame([{
+            "activityId": 9999, "activityType": "running",
+            "startTimeLocal": datetime.combine(TODAY, datetime.min.time()) - timedelta(days=3),
+            "distance_km": 12.0, "avgPace_sec": 150.0, "duration_min": 30.0,
+        }])
+        with_outlier = athlete_baseline(pd.concat([df, outlier], ignore_index=True), TODAY)
+        assert with_outlier["pace_source"] == "training"
+        assert with_outlier["pace_10k_sec"] == pytest.approx(baseline["pace_10k_sec"])
+        assert with_outlier["pace_10k_sec"] >= PLAUSIBLE_RACE_PACE[0]
 
     def test_future_and_old_activities_ignored(self):
         df = history(weeks=12)
@@ -280,6 +297,10 @@ def test_strength_spaced_two_days():
 @pytest.mark.parametrize("text,expected", [
     ("1:45:00", 6300), ("45:30", 2730), ("1h45", 6300), ("", None), (None, None),
     ("abc", None), ("0:00", None), ("1:2:3:4", None),
+    # Fuzz f_parse : formats heures/minutes textuels et notation « ' » minutes.
+    ("3h", 10800), ("1h45min", 6300), ("1h45m", 6300), ("45'", 2700), ("20'", 1200),
+    # « 1:75 » n'est pas un temps valide : 75 min ou 75 s dépasse 60.
+    ("1:75", None),
 ])
 def test_parse_race_time(text, expected):
     from race_plan_logic import parse_race_time

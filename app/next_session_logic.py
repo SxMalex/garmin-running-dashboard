@@ -6,6 +6,7 @@ sans dépendance à Streamlit.
 import numpy as np
 import pandas as pd
 from datetime import date, datetime, timedelta, timezone
+from xml.sax.saxutils import escape as xml_escape
 from formatting import seconds_to_pace_str
 from forme_logic import downgrade_session, forme_downgrade
 
@@ -193,6 +194,11 @@ def _pace_tss(runs: pd.DataFrame, threshold_sec: float) -> pd.Series:
     )
 
 
+def pace_tss(runs: pd.DataFrame, threshold_sec: float) -> pd.Series:
+    """TSS d'allure de chaque course — la formule exacte du PMC (page Activités)."""
+    return _pace_tss(runs, threshold_sec)
+
+
 def cross_training_factor(activities_df: pd.DataFrame, threshold_sec: float) -> float:
     """
     Facteur de conversion charge Garmin → TSS, calibré sur l'athlète.
@@ -293,7 +299,11 @@ def compute_pmc_series(activities_df: pd.DataFrame, threshold_sec: float) -> pd.
 
     daily = daily.set_index("day")
     today_ts = pd.Timestamp(datetime.now().date())
-    full_range = pd.date_range(daily.index.min(), today_ts, freq="D")
+    # Une activité datée de demain (montre en avance, fuseau horaire) ne doit
+    # pas être ignorée : on réindexe jusqu'à la dernière date connue si elle
+    # dépasse aujourd'hui, pas jusqu'à aujourd'hui seul.
+    end_ts = max(today_ts, daily.index.max())
+    full_range = pd.date_range(daily.index.min(), end_ts, freq="D")
     if len(full_range) == 0:
         return pd.DataFrame(columns=columns)
     frame = daily.reindex(full_range).fillna(0.0)
@@ -396,17 +406,19 @@ def compute_tsb(activities_df: pd.DataFrame) -> tuple[float, float, float]:
     last = pmc.iloc[-1]
     # On lit le TSB de la série plutôt que de le recalculer : un seul chiffre
     # de fraîcheur entre cette fonction, la courbe PMC et la page Comparatif.
-    return (
-        round(float(last["ctl"]), 1),
-        round(float(last["atl"]), 1),
-        round(float(last["tsb"]), 1),
-    )
+    # Le TSB se calcule à partir du CTL et de l'ATL déjà arrondis, sinon le
+    # TSB affiché ne correspond plus exactement à la soustraction des deux
+    # autres chiffres affichés (ex. 82 / 30,0 mais TSB à 51,6 au lieu de 52,0).
+    ctl = round(float(last["ctl"]), 1)
+    atl = round(float(last["atl"]), 1)
+    return ctl, atl, round(ctl - atl, 1)
 
 
 def recommend_session(
     running_df: pd.DataFrame,
     downgrade: int = 0,
     load_df: pd.DataFrame | None = None,
+    now: datetime | None = None,
 ) -> dict:
     """
     Analyse les dernières sorties et retourne un dict de recommandations.
@@ -422,6 +434,12 @@ def recommend_session(
     filtré, pour que la fraîcheur qui choisit la séance soit celle affichée
     ailleurs dans l'application. Par défaut, `running_df` sert aussi de source
     de charge — le contrat de sortie est inchangé dans les deux cas.
+
+    `now` : horodatage de référence, par défaut l'instant présent — permet aux
+    tests d'injecter une heure fixe. `days_since` et `days_since_long` se
+    comptent en jours calendaires (dates locales), pas en blocs de 24 h : une
+    sortie d'hier reste « il y a 1 jour » qu'on regarde à 8 h ou à 20 h
+    aujourd'hui.
     """
     recent = running_df.sort_values("startTimeLocal", ascending=False).head(20)
 
@@ -429,12 +447,13 @@ def recommend_session(
     avg_pace_sec = recent.loc[recent["avgPace_sec"] > 0, "avgPace_sec"].mean()
     avg_elev = recent["elevationGain"].dropna().mean()
 
+    today = (now or datetime.now()).date()
     last_run_date = recent["startTimeLocal"].max()
-    days_since = (datetime.now() - last_run_date).days
+    days_since = (today - last_run_date.date()).days
 
     long_runs = recent[recent["distance_km"] >= avg_dist * 1.2]
     days_since_long = (
-        (datetime.now() - long_runs["startTimeLocal"].max()).days
+        (today - long_runs["startTimeLocal"].max().date()).days
         if not long_runs.empty else 999
     )
 
@@ -511,17 +530,34 @@ def parse_ors_route(geojson: dict) -> dict | None:
         return None
 
 
+# Attribution requise par les CGU d'openrouteservice et la licence ODbL des
+# données OpenStreetMap qu'il sert — seule source de parcours de cette page.
+GPX_ORS_ATTRIBUTION = (
+    "Itinéraire © openrouteservice.org by HeiGIT | Map data © OpenStreetMap contributors"
+)
+
+
 def build_gpx(route: dict, session_label: str, target_pace_str: str) -> str:
-    """Génère un fichier GPX (course) compatible Garmin Connect."""
+    """
+    Génère un fichier GPX (course) compatible Garmin Connect.
+
+    `session_label` est échappé XML (un nom de séance peut contenir « & »,
+    « < »… — cf. `coach_logic.parse_workout_target`) : sans ça, un caractère
+    spécial produit un GPX invalide. Le parcours vient toujours d'ORS : les
+    métadonnées portent `<copyright>` et `<desc>` d'attribution ORS/OSM.
+    """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    name = f"Prochaine sortie — {session_label}"
+    name = xml_escape(f"Prochaine sortie — {session_label}")
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<gpx version="1.1" creator="Running Dashboard"',
         '     xmlns="http://www.topografix.com/GPX/1/1"',
         '     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"',
         '     xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd">',
-        f'  <metadata><name>{name}</name><time>{now}</time></metadata>',
+        # Ordre imposé par le schéma GPX 1.1 (metadataType) : name, desc,
+        # author?, copyright, link*, time.
+        f'  <metadata><name>{name}</name><desc>{xml_escape(GPX_ORS_ATTRIBUTION)}</desc>'
+        f'<copyright author="OpenStreetMap contributors" /><time>{now}</time></metadata>',
         '  <trk>',
         f'    <name>{name}</name>',
         f'    <desc>Allure cible : {target_pace_str} — {route["distance_km"]:.2f} km · D+ {route["ascent_m"]} m</desc>',

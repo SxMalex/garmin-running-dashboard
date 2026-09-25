@@ -141,6 +141,30 @@ class TestBuildGpx:
         gpx = _build_gpx(sample_route, "Tempo", "4:45/km")
         assert "4:45/km" in gpx
 
+    def test_session_label_with_ampersand_is_escaped(self, sample_route):
+        """Un nom de séance avec un caractère XML spécial ne doit pas casser le
+        GPX (ex. « Tempo & Strides » depuis parse_workout_target)."""
+        gpx = _build_gpx(sample_route, "Tempo & Strides", "4:45/km")
+        assert "Tempo & Strides" not in gpx  # non échappé tel quel
+        assert "Tempo &amp; Strides" in gpx
+        ET.fromstring(gpx)  # toujours un XML bien formé
+
+    def test_ors_attribution_in_metadata(self, sample_route):
+        """Conformité CGU ORS / licence ODbL OpenStreetMap : attribution dans
+        les métadonnées du GPX exporté (le parcours vient toujours d'ORS)."""
+        ns = {"gpx": "http://www.topografix.com/GPX/1/1"}
+        gpx = _build_gpx(sample_route, "Endurance", "5:30/km")
+        root = ET.fromstring(gpx)
+        metadata = root.find("gpx:metadata", ns)
+        assert metadata is not None
+        copyright_el = metadata.find("gpx:copyright", ns)
+        assert copyright_el is not None
+        assert copyright_el.attrib["author"] == "OpenStreetMap contributors"
+        desc = metadata.find("gpx:desc", ns)
+        assert desc is not None
+        assert "openrouteservice.org" in desc.text
+        assert "OpenStreetMap" in desc.text
+
 
 # ===========================================================================
 # build_gpx — round-trip coordinate fidelity
@@ -349,6 +373,31 @@ class TestRecommendSession:
             result = _recommend_session(df)
         assert result["session_key"] == "endurance"
 
+    def test_days_since_is_calendar_based_not_24h_blocks(self):
+        """Repro fuzz repro_days_since : une sortie d'hier doit compter « il y a
+        1 jour » qu'on la consulte tôt le matin ou tard le soir — days_since se
+        calcule en jours calendaires, pas en blocs de 24 h."""
+        today = date.today()
+        yesterday_19h = (
+            datetime.combine(today - timedelta(days=1), datetime.min.time())
+            + timedelta(hours=19)
+        )
+        rows = [{
+            "startTimeLocal": yesterday_19h, "activityType": "running",
+            "distance_km": 10.0, "duration_min": 55.0, "avgPace_sec": 330.0,
+            "avgHR": 148.0, "elevationGain": 60.0, "activityName": "Run",
+            "startLat": 48.85, "startLon": 2.35, "activityId": 1,
+        }]
+        df = pd.DataFrame(rows)
+        df["startTimeLocal"] = pd.to_datetime(df["startTimeLocal"])
+        morning = datetime.combine(today, datetime.min.time()) + timedelta(hours=8)
+        evening = datetime.combine(today, datetime.min.time()) + timedelta(hours=20)
+        with patch.object(logic, "compute_tsb", return_value=(50.0, 38.0, 0.0)):
+            seen_morning = _recommend_session(df, now=morning)
+            seen_evening = _recommend_session(df, now=evening)
+        assert seen_morning["days_since"] == 1
+        assert seen_evening["days_since"] == 1
+
     def test_endurance_normal_tsb(self, make_running_df):
         df = make_running_df()
         with patch.object(logic, "compute_tsb", return_value=(40.0, 42.0, -2.0)):
@@ -526,6 +575,35 @@ class TestComputePmcSeries:
         assert result.iloc[0]["atl"] > 0
         # ATL réagit plus vite que CTL (k_atl < k_ctl → pondération nouvelle TSS plus forte)
         assert result.iloc[0]["atl"] > result.iloc[0]["ctl"]
+
+    def test_future_dated_activity_not_dropped(self):
+        """
+        Fuzz f_next2 : une activité datée de demain (montre en avance, fuseau
+        horaire) ne doit pas disparaître de la réindexation (qui s'arrêtait à
+        aujourd'hui). Elle doit rester la dernière ligne de la série, avec
+        l'invariant TSB = CTL - ATL comme toutes les autres.
+        """
+        tomorrow = (
+            datetime.combine(date.today() + timedelta(days=1), datetime.min.time())
+            + timedelta(hours=8)
+        )
+        df = pd.DataFrame([{
+            "startTimeLocal": tomorrow,
+            "activityType": "running",
+            "distance_km": 10.0,
+            "duration_min": 55.0,
+            "avgPace_sec": 330.0,
+            "avgHR": 148.0,
+            "elevationGain": 60.0,
+        }])
+        df["startTimeLocal"] = pd.to_datetime(df["startTimeLocal"])
+        result = _compute_pmc_series(df, threshold_sec=330.0)
+        assert not result.empty
+        assert result.iloc[-1]["date"] == pd.Timestamp(tomorrow).normalize()
+        assert result.iloc[-1]["tss"] > 0
+        assert result.iloc[-1]["tsb"] == pytest.approx(
+            result.iloc[-1]["ctl"] - result.iloc[-1]["atl"]
+        )
 
     def test_tsb_est_toujours_ctl_moins_atl(self, make_running_df):
         """

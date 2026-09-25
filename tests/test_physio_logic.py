@@ -166,6 +166,28 @@ class TestAerobicDecoupling:
         assert not res["valid"]
         assert "FC suspecte" in res["reason"]
 
+    def test_full_run_lock_makes_drift_unmeasurable(self):
+        """Repro fuzz repro_full_lock.py : une FC calée sur la cadence dès le
+        départ et jusqu'à la fin n'a aucun bord abrupt (`_abrupt_boundary`) à
+        l'intérieur de la sortie, donc `hr_cadence_lock` ne détecte rien et son
+        masque reste vide. La dérive doit malgré tout être jugée non mesurable."""
+        rng = np.random.default_rng(0)
+        n = 1200
+        t = [3.0 * i for i in range(n)]
+        cad = list(172 + rng.normal(0, 1.0, n))
+        hr = [c + rng.normal(0, 0.8) for c in cad]
+        v = list(3.0 + rng.normal(0, 0.05, n))
+        streams = {
+            "time": t, "heartrate": hr, "cadence": cad, "velocity_smooth": v,
+            "altitude": [100.0] * n, "distance": list(np.cumsum(v) * 3),
+        }
+        lock = hr_cadence_lock(streams)
+        assert not lock["detected"]  # hors de portée : pas de marche d'entrée/sortie
+        res = aerobic_decoupling(streams, exclude_mask=lock["mask"])
+        assert not res["valid"]
+        assert "ensemble de la sortie" in res["reason"]
+        assert res["decoupling_pct"] is None
+
     def test_hilly_flag(self):
         streams = make_streams(3600, alt=lambda t: 100 + 40 * np.sin(t / 120))
         res = aerobic_decoupling(streams)

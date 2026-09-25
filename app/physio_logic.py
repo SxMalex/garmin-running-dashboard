@@ -288,6 +288,26 @@ def aerobic_decoupling(
         result["reason"] = "Aucun point exploitable après l'échauffement."
         return result
 
+    # Une FC calée sur la cadence dès le départ et jusqu'à la fin n'a pas de
+    # « bord » abrupt à l'intérieur de la sortie : `hr_cadence_lock` (bâti sur
+    # une marche d'entrée/sortie, cf. `_abrupt_boundary`) ne peut pas la voir
+    # et son masque d'exclusion reste vide. On rejoue ici le même contrôle que
+    # `efficiency_trend` (`summary_lock_suspect`), mais sur la moyenne réelle
+    # du temps d'effort exploité : une dérive calculée sur une FC qui n'est
+    # que la cadence recopiée n'est pas mesurable.
+    if streams.get("cadence"):
+        cad = _series(streams, "cadence", n)
+        valid_cad = kept & np.isfinite(cad)
+        if valid_cad.any():
+            avg_hr_kept = _wmean(hr[valid_cad], w[valid_cad])
+            avg_cad_kept = _wmean(cad[valid_cad], w[valid_cad])
+            if summary_lock_suspect(avg_hr_kept, avg_cad_kept):
+                result["reason"] = (
+                    "FC suspecte (calée sur la cadence) sur l'ensemble de la sortie : "
+                    "la dérive n'est pas mesurable."
+                )
+                return result
+
     mean_v = _wmean(v[kept], kw[kept])
     cv = float(np.sqrt(_wmean((v[kept] - mean_v) ** 2, kw[kept])) / mean_v)
     result["speed_cv"] = round(cv, 3)

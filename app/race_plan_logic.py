@@ -18,6 +18,7 @@ Garde-fous issus de la revue de conception :
 
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta
 
 import pandas as pd
@@ -128,6 +129,24 @@ def _riegel(time_s: float, from_km: float, to_km: float) -> float:
     return time_s * (to_km / from_km) ** RIEGEL_EXPONENT
 
 
+def _robust_p10(projected: pd.Series) -> float | None:
+    """
+    Allure 10 km la plus fiable parmi des projections Riegel candidates.
+
+    Écarte d'abord celles hors de `PLAUSIBLE_RACE_PACE` (saisie erronée —
+    ex. un vélo enregistré en course). Une seule activité aberrante ne doit
+    pas non plus fixer l'allure à elle seule : à partir de 3 candidats
+    plausibles, on retient la 2e meilleure projection plutôt que le minimum
+    brut, qui reste dicté par la plus rapide.
+    """
+    plausible = projected[(projected >= PLAUSIBLE_RACE_PACE[0])
+                          & (projected <= PLAUSIBLE_RACE_PACE[1])]
+    if plausible.empty:
+        return None
+    ordered = plausible.sort_values().to_numpy()
+    return float(ordered[1] if len(ordered) >= 3 else ordered[0])
+
+
 def athlete_baseline(
     activities_df: pd.DataFrame,
     today: date,
@@ -174,10 +193,12 @@ def athlete_baseline(
                      & (runs["startTimeLocal"] >= pd.Timestamp(today - timedelta(weeks=26)))
                      & (runs["distance_km"] >= 3) & (runs["avgPace_sec"] > 0)]
         if not races.empty:
-            last = races.sort_values("startTimeLocal").iloc[-1]
-            p10 = _riegel(float(last["avgPace_sec"] * last["distance_km"]),
-                          float(last["distance_km"]), 10.0) / 10.0
-            source = "race"
+            projected = _riegel(races["avgPace_sec"] * races["distance_km"],
+                                races["distance_km"], 10.0) / 10.0
+            robust = _robust_p10(projected)
+            if robust is not None:
+                p10 = robust
+                source = "race"
     if p10 is None and predictions:
         km, time_s = min(predictions.items(), key=lambda kv: abs(kv[0] - 10.0))
         if time_s and km:
@@ -187,11 +208,14 @@ def athlete_baseline(
         valid = recent8[(recent8["avgPace_sec"] > 0) & (recent8["distance_km"] >= 3)]
         if not valid.empty:
             t = valid["avgPace_sec"] * valid["distance_km"]
-            p10 = float((t * (10.0 / valid["distance_km"]) ** RIEGEL_EXPONENT).min()) / 10.0
-            source = "training"
-            assumptions.append("Allures estimées sur tes entraînements (sans course ni "
-                               "prédiction) : probablement trop prudentes. Renseigne un temps "
-                               "visé ou fais un test pour les affiner.")
+            projected = t * (10.0 / valid["distance_km"]) ** RIEGEL_EXPONENT / 10.0
+            robust = _robust_p10(projected)
+            if robust is not None:
+                p10 = robust
+                source = "training"
+                assumptions.append("Allures estimées sur tes entraînements (sans course ni "
+                                   "prédiction) : probablement trop prudentes. Renseigne un "
+                                   "temps visé ou fais un test pour les affiner.")
     if p10 is None:
         p10, source = DEFAULT_10K_PACE, "default"
         assumptions.append("Aucune course récente : allures par défaut (10 km en 60 min), "
@@ -715,26 +739,54 @@ def plan_sessions(plan: dict) -> list[dict]:
 
 def parse_race_time(text: str | None, distance: str | None = None) -> float | None:
     """
-    « 1:45:00 », « 45:30 » ou « 1h45 » → secondes ; None si vide ou illisible.
-    Deux composantes se lisent mm:ss, sauf pour un semi ou un marathon où
-    « 1:45 » veut évidemment dire 1 h 45 (et non 1 min 45 s).
+    « 1:45:00 », « 45:30 », « 1h45 », « 1h45min », « 3h » ou « 45' » → secondes ;
+    None si vide, illisible, ou si une composante minutes/secondes est ≥ 60
+    (« 1:75 » n'est pas un temps valide).
+
+    Deux composantes se lisent mm:ss, sauf pour un semi ou un marathon (ou si
+    le texte contient « h ») où « 1:45 » veut évidemment dire 1 h 45 (et non
+    1 min 45 s). Une seule composante se lit en heures si le texte contient
+    « h » (« 3h » = 3 h), en minutes si elle porte une unité minutes — « ' »
+    ou « min »/« mn » (« 45' » = « 45 min ») : sans heures ni secondes, il
+    n'y a rien d'autre à déduire du nombre seul.
     """
     if not text or not str(text).strip():
         return None
-    raw = str(text).strip().lower().replace("h", ":").replace("'", ":").replace('"', "")
-    parts = [p for p in raw.split(":") if p != ""]
+    original = str(text).strip().lower()
+    has_h = "h" in original
+    has_apostrophe = "'" in original
+    has_min_word = bool(re.search(r"\d\s*(?:min|mn|m)\b", original))
+    raw = original.replace("h", ":").replace("'", ":").replace('"', "")
+    # Unité minutes textuelle (« min », « mn » ou un « m » isolé, ex. le « m »
+    # de « 1h45m ») : on la retire une fois le marqueur repéré ci-dessus, pour
+    # ne garder que les nombres à découper sur les deux-points.
+    raw = re.sub(r"(?<=\d)\s*(?:min|mn|m)\b", "", raw)
+    parts = [p.strip() for p in raw.split(":") if p.strip() != ""]
     try:
         nums = [int(p) for p in parts]
     except ValueError:
         return None
-    if len(nums) == 2 and ("h" in str(text).lower()
-                           or DISTANCES.get(distance or "", 0) >= 21):
+
+    if len(nums) == 1:
+        if has_h:
+            total = nums[0] * 3600
+        elif has_apostrophe or has_min_word:
+            total = nums[0] * 60
+        else:
+            return None
+        return float(total) if total > 0 else None
+
+    if len(nums) == 2 and (has_h or DISTANCES.get(distance or "", 0) >= 21):
         nums.append(0)
     if len(nums) == 2:
         m, s = nums
+        if not (0 <= s < 60):
+            return None
         total = m * 60 + s
     elif len(nums) == 3:
         h, m, s = nums
+        if not (0 <= m < 60 and 0 <= s < 60):
+            return None
         total = h * 3600 + m * 60 + s
     else:
         return None

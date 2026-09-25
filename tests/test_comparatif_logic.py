@@ -291,19 +291,19 @@ def _day_runs(rows: list[dict]) -> pd.DataFrame:
 
 def test_day_comparison_une_sortie_par_annee():
     df = _day_runs([
-        {"startTimeLocal": "2026-08-13 07:53", "distance_km": 6.39, "duration_min": 45.7,
-         "avgHR": 140.0, "maxHR": 174.0, "elevationGain": 71.0, "avgCadence": 164.8,
-         "trainingLoad": 54.0, "calories": 475, "activityName": "Triors"},
-        {"startTimeLocal": "2025-08-13 21:41", "distance_km": 2.96, "duration_min": 22.0,
-         "avgHR": 140.0, "maxHR": 155.0, "elevationGain": 12.0, "avgCadence": 153.3,
-         "trainingLoad": 26.5, "calories": 216, "activityName": "Vitrolles"},
+        {"startTimeLocal": "2026-08-13 07:00", "distance_km": 6.0, "duration_min": 42.0,
+         "avgHR": 140.0, "maxHR": 170.0, "elevationGain": 70.0, "avgCadence": 165.0,
+         "trainingLoad": 50.0, "calories": 470, "activityName": "Sortie A"},
+        {"startTimeLocal": "2025-08-13 20:00", "distance_km": 3.0, "duration_min": 22.0,
+         "avgHR": 140.0, "maxHR": 155.0, "elevationGain": 12.0, "avgCadence": 153.0,
+         "trainingLoad": 26.0, "calories": 216, "activityName": "Sortie B"},
     ])
     out = day_comparison(df, doy=225)
     assert out["year"].tolist() == [2026, 2025]
-    assert out.loc[0, "km"] == 6.39
-    assert out.loc[0, "start_time"] == "07:53"
-    assert out.loc[0, "names"] == ["Triors"]
-    assert out.loc[1, "start_time"] == "21:41"
+    assert out.loc[0, "km"] == 6.0
+    assert out.loc[0, "start_time"] == "07:00"
+    assert out.loc[0, "names"] == ["Sortie A"]
+    assert out.loc[1, "start_time"] == "20:00"
 
 
 def test_day_comparison_agrege_plusieurs_sorties_du_meme_jour():
@@ -360,6 +360,31 @@ def test_day_comparison_aligne_les_annees_bissextiles():
     ])
     out = day_comparison(df, doy=74)
     assert sorted(out["year"].tolist()) == [2024, 2025]
+
+
+def test_day_comparison_28_fevrier_n_agrege_pas_le_29():
+    """
+    Repro fuzz repro_leap_day : `aligned_doy` fait exprès retomber le 29/02
+    d'une année bissextile sur la même valeur que le 28 (pour superposer les
+    courbes) — mais day_comparison doit filtrer sur le (mois, jour) RÉEL,
+    sinon le 28/02 d'une année non bissextile agrège aussi le 29/02 d'une
+    année bissextile, deux jours calendaires distincts.
+    """
+    df = _day_runs([
+        {"startTimeLocal": "2024-02-28 08:00", "distance_km": 10.0, "duration_min": 55.0,
+         "activityName": "28 fev bissextile"},
+        {"startTimeLocal": "2024-02-29 18:00", "distance_km": 21.1, "duration_min": 110.0,
+         "activityName": "29 fev bissextile"},
+        {"startTimeLocal": "2025-02-28 08:00", "distance_km": 8.0, "duration_min": 45.0,
+         "activityName": "28 fev non bissextile"},
+    ])
+    doy = int(aligned_doy(pd.Series([pd.Timestamp("2025-02-28")])).iloc[0])
+    out = day_comparison(df, doy)
+    assert sorted(out["year"].tolist()) == [2024, 2025]
+    row_2024 = out[out["year"] == 2024].iloc[0]
+    assert row_2024["sorties"] == 1
+    assert row_2024["km"] == 10.0
+    assert row_2024["names"] == ["28 fev bissextile"]
 
 
 def test_day_comparison_tolere_les_colonnes_absentes():

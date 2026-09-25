@@ -1,7 +1,6 @@
 """Tests des records personnels, estimations Riegel et formats de temps."""
 
 import pandas as pd
-import pytest
 
 from progression_logic import (
     RACE_TARGETS,
@@ -71,6 +70,21 @@ class TestParsePersonalRecords:
     def test_empty_input(self):
         assert parse_personal_records(None) == []
         assert parse_personal_records([]) == []
+
+    def test_course_records_ordered_by_distance(self):
+        """type_order (typeId Garmin, ordre de distance croissante) doit primer
+        sur le tri alphabétique du label, qui donnait ['1 km', '10 km', '5 km',
+        'Marathon', 'Semi-marathon']."""
+        rows = parse_personal_records([
+            self._pr(6, 12000.0),   # Marathon
+            self._pr(4, 2400.0),    # 10 km
+            self._pr(1, 200.0),     # 1 km
+            self._pr(3, 1100.0),    # 5 km
+            self._pr(5, 5500.0),    # Semi-marathon
+        ])
+        assert [r["label"] for r in rows] == [
+            "1 km", "5 km", "10 km", "Semi-marathon", "Marathon",
+        ]
 
 
 class TestRiegelEstimates:
