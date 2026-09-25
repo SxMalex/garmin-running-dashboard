@@ -2,8 +2,10 @@
 
 ## Stack
 
-- **Streamlit 1.52+** — multipage app (`app/main.py` + `app/pages/`) ; 1.52 pour
-  `st.metric(delta_arrow=)`, les polices de `config.toml` (`theme.fontFaces`)
+- **Streamlit 1.61+** — `app/main.py` est un **routeur** `st.navigation`
+  (`app/nav.py`, pages de `app/pages/`) ; 1.61 pour `server.allowedHosts`
+  (anti DNS rebinding), 1.52 pour `st.metric(delta_arrow=)`, `theme.fontFaces`,
+  `st.container(horizontal=)`
 - **Python 3.12**, Pandas, Plotly, NumPy
 - **Docker Compose** — service `app` (Streamlit), service `caddy` (HTTPS) en prod
 - **Garmin Connect** via la lib non officielle `garminconnect` (0.3.6, client
@@ -19,8 +21,10 @@ Le `GarminClient` expose le **même contrat de DataFrames** que l'ancien
 logique pure de rester communes. Abandonné au passage : page Segments (pas
 d'équivalent Garmin), multi-user OAuth.
 
-Pages (réorganisation juillet 2026) : `main.py` (Accueil = cockpit du jour,
-allégé), `1_Activities` (seul endroit avec le détail complet d'une activité),
+Pages (réorganisation juillet 2026, navigation en pôles septembre 2026) :
+`0_Accueil` (cockpit du jour : carte séance, fraîcheur, semaine, signaux via
+`home_logic.py`), `1_Activities` (explorateur cliquable + répartition 80/20 via `activities_logic.py`,
+seul endroit avec le détail complet d'une activité),
 `2_Stats` (5 onglets — la charge a déménagé), `3_Forme` (fusion ex-Santé +
 ex-onglet Charge + verdict croisé TSB×HRV×sommeil via `forme_logic.py`, ACWR et
 monotonie en mode Pro), `4_Progression` (records, prédictions + historique,
@@ -34,20 +38,51 @@ course + renfo via `race_plan_logic.py`, envoi au calendrier Garmin). Le thème 
 `chart_theme.py` (palette validée par le validateur dataviz — ne pas réordonner
 les slots catégoriels ni réutiliser les couleurs status comme séries).
 
+## Navigation et thème (ne pas casser)
+
+- **Routeur** : `main.py` = `set_page_config` + `inject_theme()` + login (seule
+  page enregistrée sans session) puis `st.navigation(position="hidden")` et
+  `nav.render_header`. Les pôles et leurs pages vivent dans `nav.POLES` (4 pôles :
+  Aujourd'hui / Entraînement / Progrès / Objectif) ; ajouter une page = l'y
+  déclarer. Tous les liens sont des `st.page_link` (navigation côté client : la
+  session, le mode Light/Pro et les réglages survivent) — jamais de `<a href>`
+  vers une page, qui rechargerait la session.
+- **En-tête** unique (bascule Light/Pro, Actualiser, Compte, Prompt coach IA) :
+  les pages n'en rendent pas ; la barre latérale ne porte que les filtres de la
+  page et les réglages Pro. La barre d'onglets du bas n'apparaît que < 640 px (CSS).
+- **Thème « Piste claire »** : tokens dans `chart_theme.py` (papier `SURFACE`,
+  cartes `SURFACE_2`, encre `INK`, `ACCENT` volt), repris par `config.toml` et
+  `ui_theme.py`. L'accent volt ne sert qu'en **aplat** (jamais du texte sur clair) ;
+  états = pastilles `STATUS_TEXT`/`STATUS_BG` (≥ 4,5:1). Cartes =
+  `st.container(key="card-…")`. Tout texte externe injecté en HTML passe par
+  `ui_theme.esc` (une ligne vide rouvrirait le Markdown). Contrastes gardés par
+  `tests_ui/test_theme_ui.py`.
+- **Tests UI** : `logged_in(name)` passe par le routeur (premier run puis
+  `switch_page`) — `AppTest.from_file` sur une page seule ne connaîtrait pas les
+  `st.page_link`.
+
 ## Lancer le projet
 
 ```bash
 docker compose up            # dev local — Streamlit sur 127.0.0.1:8501
-.venv/bin/python -m pytest tests/ -q      # logique pure (~730), hors Docker
+.venv/bin/python -m pytest tests/ -q      # logique pure (~880), hors Docker
 .venv/bin/python -m pytest tests_ui/ -q   # pages en headless (AppTest + FakeGarmin)
+.venv/bin/python -m pytest tests_e2e/ -q  # vrai navigateur (Playwright), démo FakeGarmin
 .venv/bin/python test_connection.py       # amorce le tokenstore du serveur MCP
 ```
 
 Le venv `.venv/` n'est pas versionné : le recréer avec
-`uv venv .venv --python 3.12 && uv pip install --python .venv/bin/python -r app/requirements.txt -r requirements.txt pytest pytest-cov`.
-Les deux suites se lancent **séparément** (`tests/conftest.py` remplace
+`uv venv .venv --python 3.12 && uv pip install --python .venv/bin/python -r app/requirements.txt -r requirements.txt pytest pytest-cov playwright`
+(+ `.venv/bin/playwright install chromium`, sinon `tests_e2e/` se rabat sur le
+Chrome du système). Les suites se lancent **séparément** (`tests/conftest.py` remplace
 streamlit par un mock). `garmin_mcp/` est le serveur MCP : il réutilise la
 logique de `app/` (voir « Serveur MCP »).
+
+**Hôtes acceptés** : `server.allowedHosts` (config.toml : localhost/127.0.0.1 ;
+prod : `STREAMLIT_SERVER_ALLOWED_HOSTS=${PUBLIC_DOMAIN}`) refuse le WebSocket d'un
+Host inconnu — c'est ce qui empêche un site tiers de piloter le dashboard local
+par DNS rebinding (écriture Garmin activée en dev). `server.address = "localhost"`
+dans config.toml parce que le défaut de Streamlit écoute sur toutes les interfaces.
 
 **Publication du port** : `docker-compose.yml` publie sur `127.0.0.1:8501:8501`,
 jamais `8501:8501`. L'app n'a aucune authentification : un bind `0.0.0.0` expose
@@ -127,8 +162,8 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
 - `CACHE_DIR` : `/app/.cache` dans Docker, `~/.cache/garmin-dashboard` hors Docker
   (surchargable par env). Le `mkdir` de `_cache_set` est DANS le try/except :
   une erreur d'écriture cache ne doit jamais faire échouer l'appel API.
-- `render_refresh_button` : invalide cache disque + bump `_cache_nonce` — ne pas
-  utiliser `st.cache_data.clear()`.
+- `refresh_data` (bouton Actualiser de l'en-tête) : invalide cache disque + bump
+  `_cache_nonce` — ne pas utiliser `st.cache_data.clear()`.
 
 ## Logique métier (ne pas casser)
 
@@ -190,18 +225,31 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   sortie longue, arrêt J-9 (règles sourcées dans `SOURCES`).
 - **Plan figé** : une fois validé, c'est `goal_store.validated.plan` qui
   s'affiche et s'envoie, pas un recalcul du jour.
-- **Écriture Garmin** (page Objectif uniquement, `GARMIN_WRITE_ENABLED`) : bloquée
-  si un plan Run Coach est actif OU si son état est inconnu (lecture fraîche,
-  `get_training_plans(strict=True)`). Chaque séance porte une étiquette
+- **Écriture Garmin** (page Objectif uniquement, `GARMIN_WRITE_ENABLED`) : l'**envoi**
+  est bloqué si un plan Run Coach est actif OU si son état est inconnu (lecture
+  fraîche, `get_training_plans(strict=True)`). Le **retrait** des séances du
+  dashboard (étiquetées) reste permis dans ce cas, volontairement : c'est le
+  nettoyage quand on passe à Run Coach ; il ne touche jamais une séance non étiquetée. Chaque séance porte une étiquette
   `[GD-<plan>-<jour>-<run|str>]` et une empreinte de contenu ; journal sous
   verrou (`goal_store.locked`, réentrant), réconciliation par étiquette avec
   planification vérifiée, et `remove_workout(required_tag=)` avant toute
   suppression. Dédup par créneau (jour + course/renfo), pas par type.
 - **Modes Light/Pro** (`ui_mode.py`) : état hors clés de widget ; les réglages
   Pro ne portent que sur les seuils physio, jamais sur CTL/ATL (un seul TSB).
+- **Intensité** (`activities_logic`) : IF = allure seuil du TSS
+  (`reference_threshold_sec`) ÷ allure, TSS = `next_session_logic.pace_tss` —
+  exactement la charge du PMC (testé). Zones : < 0,78 récup … > 1,03 VMA.
+- **Projections** (`forecast_logic`) : tendance Theil-Sen sur 8 semaines, départ
+  ancré sur la médiane des 7 derniers jours (sinon une saison en V projetait une
+  régression alors que la forme remonte), gains amortis (τ 75 j), plafonds
+  ±2 %/mois (temps) et ±1 pt/mois (VO2max), bande ≥ ±1 % / ±1 pt ; aucune
+  projection sous 8 points ou 4 semaines. Toujours affichée comme estimation.
+- **Graphiques Plotly** : le frontend Streamlit force le fond gris des champs par
+  dessus le template `gar` (même avec `theme=None`, qui en plus masque les
+  graduations) → fond rendu transparent en CSS (`ui_theme`), pas par figure.
 - **Séance du jour** : `next_session_logic.todays_session` + `forme_logic.parse_recovery`
   + `coach_logic.load_coach_context` + `goal_store.validated_sessions` — chemin
-  unique Accueil / Prochaine sortie / MCP. Priorité : Run Coach actif (même sans
+  unique Accueil (`pages/0_Accueil.py`) / Prochaine sortie / MCP. Priorité : Run Coach actif (même sans
   séance à venir) > plan Objectif validé (celui que la page Objectif envoie) >
   logique interne. La séance du jour du plan est ignorée si une course est déjà
   enregistrée aujourd'hui.
@@ -221,12 +269,17 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
 ```bash
 .venv/bin/python -m pytest tests/ -q
 .venv/bin/python -m pytest tests_ui/ -q
+.venv/bin/python -m pytest tests_e2e/ -q
 ```
 
 `pythonpath = app garmin_mcp` (cf. `pytest.ini`). Les tests ne touchent JAMAIS l'API Garmin :
 `test_garmin_client.py` stubbe l'objet api (`FakeApi`) et isole le cache disque
 dans `tmp_path` ; `tests_ui/` rend les vraies pages contre `tests_ui/fake_garmin.py`
-(cache et `DATA_DIR` jetables, purgés entre tests). Les formes des fixtures Garmin ont été validées contre l'API
+(cache et `DATA_DIR` jetables, purgés entre tests) ; `tests_e2e/` démarre le vrai
+dashboard (`tests_e2e/demo_server.py`, FakeGarmin, port libre, dossiers jetables) et
+clique dans Chromium via Playwright — c'est la seule suite qui voit le CSS (un
+élément recouvert refuse le clic). Tout changement d'en-tête, de navigation ou de
+mise en page mobile doit la faire passer. Les formes des fixtures Garmin ont été validées contre l'API
 réelle (juillet 2026) — les garder synchrones si l'API change.
 
 ## Règles de commit
