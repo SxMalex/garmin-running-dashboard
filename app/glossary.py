@@ -25,7 +25,7 @@ TERMS = {
         "label": "Fraîcheur (TSB)",
         "short": "Forme − fatigue (CTL − ATL).",
         "light": "La TSB, c'est l'écart entre ta forme de fond et ta fatigue récente. Négative : "
-                 "tu es en train de charger (normal en préparation). Autour de 0 à +10 : "
+                 "tu es en train de charger (normal en préparation). Au-dessus de +5 : "
                  "frais, bon moment pour une course. Sous −20 : attention à l'accumulation.",
     },
     "tss": {
@@ -122,6 +122,25 @@ TERMS = {
                  "semaines, et chez le coureur la protection contre les blessures n'est nette "
                  "que si les mouvements sont bien exécutés.",
         "source": "Balsalobre-Fernández 2016 ; Eihara 2022 ; Wu 2024",
+    },
+    "intensite": {
+        "label": "Intensité et répartition 80/20",
+        "short": "Allure de la sortie en % de ton allure seuil (100 % = seuil).",
+        "light": "Chaque sortie est comparée à ton allure seuil : sous ~88 % c'est facile, "
+                 "autour de 100 % c'est une séance au seuil. Les coureurs qui progressent "
+                 "passent environ 80 % de leur temps en facile et gardent le dur pour quelques "
+                 "séances clés. Le piège, c'est la « zone grise » : des footings trop rapides "
+                 "qui fatiguent sans faire progresser.",
+        "source": "Seiler 2010 ; Stöggl & Sperlich 2014",
+    },
+    "forecast": {
+        "label": "Projection « si tu continues comme ça »",
+        "short": "Ta tendance récente prolongée prudemment — une estimation, pas une promesse.",
+        "light": "On prend la tendance des derniers mois (en ignorant les valeurs aberrantes), "
+                 "on la prolonge en supposant que les gains ralentissent avec le temps, et on "
+                 "plafonne ce qui est physiologiquement plausible. La bande autour de la courbe "
+                 "montre l'incertitude : plus l'horizon est lointain, plus elle s'élargit. Une "
+                 "blessure, une coupure ou un nouveau bloc d'entraînement changent tout.",
     },
     "taper": {
         "label": "Affûtage",

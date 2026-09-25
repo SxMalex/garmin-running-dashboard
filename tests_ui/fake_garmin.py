@@ -165,8 +165,29 @@ class FakeGarmin:
                                   "sleepScores": {"overall": {"value": 78}}}}
 
     def get_hrv_data(self, cdate):
-        return {"hrvSummary": {"calendarDate": cdate, "status": "BALANCED",
+        self.calls.append("get_hrv_data")
+        return {"hrvSummary": {"calendarDate": cdate, "status": getattr(self, "hrv_status", "BALANCED"),
                                "lastNightAvg": 55, "weeklyAvg": 54}}
+
+    def get_race_predictions(self, startdate=None, enddate=None, _type=None):
+        """Prédictions de course : désactivées par défaut (les pages doivent
+        encaisser leur absence) ; `with_predictions=True` simule 6 mois de
+        progression régulière (≈ −3 s/semaine sur 10 km)."""
+        self.calls.append("get_race_predictions")
+        if not getattr(self, "with_predictions", False):
+            return {}
+
+        def _day(d, weeks_ago):
+            t10 = 3000 + 3 * weeks_ago
+            return {"calendarDate": d.isoformat(), "time5K": round(t10 * 0.476),
+                    "time10K": t10, "timeHalfMarathon": round(t10 * 2.22),
+                    "timeMarathon": round(t10 * 4.65)}
+        today = date.today()
+        if startdate is None:
+            return _day(today, 0)
+        start, end = date.fromisoformat(startdate), date.fromisoformat(enddate)
+        return [_day(start + timedelta(days=i), ((end - start).days - i) / 7)
+                for i in range((end - start).days + 1)]
 
     def get_training_plans(self, *args, **kwargs):
         if getattr(self, "plans_error", None):
@@ -218,6 +239,3 @@ class FakeGarmin:
         if int(workout_id) not in lib:
             raise RuntimeError("API Error 404 - Not Found")
         return {"workoutId": int(workout_id), **lib[int(workout_id)]}
-
-    def get_race_predictions(self, *args, **kwargs):
-        return {}
