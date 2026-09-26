@@ -48,6 +48,12 @@ def _run(i: int, day: datetime, kind: str = "running") -> dict:
             "startLongitude": 1.44,
             "activityTrainingLoad": float(rng.integers(40, 180)),
             "vO2MaxValue": 50.0,
+            # Dynamique de course : dépend de la vitesse, comme sur une vraie montre
+            "avgGroundContactTime": round(400 - 45 * speed + float(rng.normal(0, 3)), 1),
+            "avgVerticalRatio": round(10.5 - 0.7 * speed + float(rng.normal(0, 0.2)), 2),
+            "avgStrideLength": round(speed * 60 / 176 * 100 + float(rng.normal(0, 2)), 1),
+            "avgPower": round(85 * speed + float(rng.normal(0, 6))),
+            "aerobicTrainingEffect": round(float(rng.uniform(2.0, 4.2)), 1),
         }
     return {
         "activityId": 1000 + i,
@@ -168,6 +174,13 @@ class FakeGarmin:
         self.calls.append("get_hrv_data")
         return {"hrvSummary": {"calendarDate": cdate, "status": getattr(self, "hrv_status", "BALANCED"),
                                "lastNightAvg": 55, "weeklyAvg": 54}}
+
+    def get_activity_weather(self, activity_id):
+        """Météo Garmin (°F) : une sortie sur deux par temps chaud et lourd."""
+        self.calls.append("get_activity_weather")
+        hot = int(activity_id) % 2 == 0
+        return {"temp": 86 if hot else 59, "dewPoint": 68 if hot else 45, "relativeHumidity": 55,
+                "windSpeed": 6, "weatherTypeDTO": {"desc": "Ensoleillé" if hot else "Nuageux"}}
 
     def get_race_predictions(self, startdate=None, enddate=None, _type=None):
         """Prédictions de course : désactivées par défaut (les pages doivent

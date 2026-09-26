@@ -422,9 +422,20 @@ class TestGetActivities:
         }
         # Contrat complet (19 colonnes, cf. CLAUDE.md) : trainingLoad porte le
         # PMC du sport croisé, son absence passerait inaperçue sans ce test.
-        assert set(df.columns) == expected
+        # + colonnes optionnelles de dynamique de course (NaN sans capteur).
+        from garmin_client import DYNAMICS_COLUMNS
+        assert set(df.columns) == expected | set(DYNAMICS_COLUMNS)
         assert df["trainingLoad"].iloc[0] == garmin_activity.get("activityTrainingLoad")
         assert pd.api.types.is_datetime64_any_dtype(df["startTimeLocal"])
+
+    def test_running_dynamics_are_optional(self, garmin_activity):
+        act = {**garmin_activity, "avgGroundContactTime": 252.4, "avgStrideLength": 104.2,
+               "avgVerticalRatio": 8.1, "avgPower": 290, "aerobicTrainingEffect": 3.4}
+        df = GarminClient(api=FakeApi([act]), athlete_id=1).get_activities(limit=10)
+        assert df["avgGroundContact_ms"].iloc[0] == 252.4 and df["avgPower_w"].iloc[0] == 290
+        assert df["aerobicTE"].iloc[0] == 3.4
+        plain = GarminClient(api=FakeApi([garmin_activity]), athlete_id=2).get_activities(limit=10)
+        assert plain["avgGroundContact_ms"].isna().all()
 
     def test_second_call_hits_cache(self, garmin_activity):
         api = FakeApi([garmin_activity])
@@ -793,3 +804,24 @@ def test_training_plans_strict_bypasses_cache():
     assert api.calls == 1
     client.get_training_plans(strict=True)
     assert api.calls == 2
+
+
+
+def test_activity_weather_is_cached_and_tolerant(tmp_path, monkeypatch):
+    import garmin_client as gcm
+    monkeypatch.setattr(gcm, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(gcm, "API_COOLDOWN_S", 0)
+
+    class Api:
+        calls = 0
+        def get_activity_weather(self, activity_id):
+            Api.calls += 1
+            if activity_id == "2":
+                raise RuntimeError("404")
+            return {"temp": 77, "dewPoint": 60}
+
+    client = gcm.GarminClient(api=Api(), athlete_id=1)
+    assert client.get_activity_weather(1)["temp"] == 77
+    client.get_activity_weather(1)
+    assert Api.calls == 1                      # immuable : servi par le cache
+    assert client.get_activity_weather(2) == {}

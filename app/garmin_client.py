@@ -407,6 +407,28 @@ def summarize_activity(summary_dto: dict) -> dict:
     }
 
 
+# Dynamique de course (colonnes OPTIONNELLES, en plus du contrat des 19) :
+# NaN quand la montre ne la mesure pas. colonne → clés Garmin possibles
+# (liste d'activités « avg… », résumé de détail sans préfixe).
+DYNAMICS_COLUMNS = {
+    "avgGroundContact_ms": ("avgGroundContactTime", "groundContactTime"),
+    "avgVerticalOsc_cm": ("avgVerticalOscillation", "verticalOscillation"),
+    "avgVerticalRatio": ("avgVerticalRatio", "verticalRatio"),
+    "avgStride_cm": ("avgStrideLength", "strideLength"),
+    "avgPower_w": ("avgPower", "averagePower"),
+    "aerobicTE": ("aerobicTrainingEffect",),
+    "anaerobicTE": ("anaerobicTrainingEffect",),
+}
+
+
+def _first_number(act: dict, keys: tuple[str, ...]):
+    for k in keys:
+        v = act.get(k)
+        if isinstance(v, (int, float)) and v > 0:
+            return float(v)
+    return None
+
+
 def activity_row(act: dict) -> dict:
     """Convertit une activité Garmin (liste) en ligne du DataFrame commun."""
     distance_m = act.get("distance", 0) or 0
@@ -439,6 +461,7 @@ def activity_row(act: dict) -> dict:
         "workoutType": event_key or "uncategorized",
         "trainingLoad": act.get("activityTrainingLoad"),
         "vo2max": act.get("vO2MaxValue"),
+        **{col: _first_number(act, keys) for col, keys in DYNAMICS_COLUMNS.items()},
     }
 
 
@@ -654,6 +677,26 @@ class GarminClient:
             _cache_set(self.athlete_id, cache_key, result, bucket=STREAMS_BUCKET)
         time.sleep(API_COOLDOWN_S)
         return result
+
+    def get_activity_weather(self, activity_id: int) -> dict:
+        """
+        Météo relevée par Garmin pendant une activité (températures en °F).
+        Immuable : cache long des streams. {} si l'activité n'en a pas (tapis,
+        pas de GPS) — pas une erreur.
+        """
+        cache_key = f"weather_{activity_id}"
+        cached = _cache_get(self.athlete_id, cache_key, ttl=STREAMS_TTL, bucket=STREAMS_BUCKET)
+        if cached is not None:
+            return cached
+        try:
+            data = self.api.get_activity_weather(str(activity_id)) or {}
+        except Exception as e:
+            logger.warning("Météo indisponible pour l'activité %s : %s", activity_id, e)
+            return {}
+        data = data if isinstance(data, dict) else {}
+        _cache_set(self.athlete_id, cache_key, data, bucket=STREAMS_BUCKET)
+        time.sleep(API_COOLDOWN_S)
+        return data
 
     def get_splits_aggregate(self, activity_ids: list[int]) -> pd.DataFrame:
         """
