@@ -125,7 +125,7 @@ def test_new_tools_registered():
     import asyncio
     names = {t.name for t in asyncio.run(server.mcp.list_tools())}
     assert {"daily_briefing", "training_load", "activity_analysis", "aerobic_trend",
-            "race_plan_preview", "current_goal", "garmin_call"} <= names
+            "race_plan_preview", "current_goal", "health_watch", "running_form", "garmin_call"} <= names
 
 
 def test_briefing_without_runs_does_not_crash(tmp_path, monkeypatch):
@@ -190,3 +190,35 @@ def test_garmin_call_connectapi_allows_path_and_params(monkeypatch):
     monkeypatch.setattr(server, "_get_client", lambda: fake)
     server.garmin_call("connectapi", {"path": "/x", "params": {"a": 1}})
     assert "connectapi:/x" in fake.calls
+
+
+def test_health_watch_tool_is_json_and_honest(client, monkeypatch):
+    import json
+    from datetime import date, timedelta
+    import insights
+    today = date.today()
+    nights = [(today - timedelta(days=i)).isoformat() for i in range(34, -1, -1)]
+    monkeypatch.setattr(client, "get_sleep_range", lambda s, e: [
+        {"calendarDate": d, "averageRespirationValue": 14.0 + (0.1 if i % 2 else 0)} for i, d in enumerate(nights)])
+    monkeypatch.setattr(client, "get_hrv_range", lambda s, e: [])
+    monkeypatch.setattr(client, "get_resting_hr_range", lambda s, e: [
+        {"calendarDate": d, "restingHR": 48 + (i % 3)} for i, d in enumerate(nights)])
+    out = insights.health_watch(client)
+    json.dumps(out)                                   # sérialisable tel quel
+    assert out["available"] and out["level"] == 0
+    by = {s["signal"]: s for s in out["signals"]}
+    assert by["HRV nocturne"]["status"] == "missing" and "caveat" in out
+    monkeypatch.setattr(client, "get_resting_hr_range", lambda s, e: [])
+    monkeypatch.setattr(client, "get_sleep_range", lambda s, e: [])
+    assert insights.health_watch(client) == {"available": False,
+                                              "note": "Pas de nuit mesurée ces 2 derniers jours."}
+
+
+def test_running_form_tool_is_json(client):
+    import json
+    import insights
+    out = insights.running_form(client)
+    json.dumps(out)
+    assert "spike" in out and "reading_guide" in out
+    assert isinstance(out["form_at_equal_pace"], list)
+    assert all("series" not in r for r in out["form_at_equal_pace"])
