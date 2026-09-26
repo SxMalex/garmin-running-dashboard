@@ -133,6 +133,36 @@ TERMS = {
                  "qui fatiguent sans faire progresser.",
         "source": "Seiler 2010 ; Stöggl & Sperlich 2014",
     },
+    "veille_sante": {
+        "label": "Veille santé",
+        "short": "FC de repos, HRV, respiration et SpO2 de la nuit comparées à ta norme.",
+        "light": "Avant un rhume, le corps se trahit souvent 1 à 2 jours à l'avance : le cœur "
+                 "bat plus vite au repos, la HRV baisse, on respire plus vite la nuit. Chaque "
+                 "signal pris seul trompe souvent (une grosse séance, un verre de vin, la chaleur "
+                 "suffisent) : on ne s'alarme que quand plusieurs dévient ensemble de TA norme "
+                 "des 30 derniers jours. Ce n'est pas un diagnostic.",
+        "source": "Mishra 2020 ; Natarajan 2020 ; Miller 2020",
+    },
+    "foulee": {
+        "label": "Forme de foulée à allure égale",
+        "short": "Contact au sol, rebond, foulée et puissance, corrigés de la vitesse.",
+        "light": "Quand tu cours plus vite, ton pied reste moins longtemps au sol : comparer deux "
+                 "sorties brutes ne veut rien dire. On compare donc chaque sortie à ce que tu "
+                 "produis d'habitude à la même vitesse. Si, à allure égale, le contact au sol "
+                 "s'allonge ou la foulée raccourcit semaine après semaine, c'est souvent la fatigue "
+                 "qui s'installe — avant la douleur.",
+    },
+    "jour_de_course": {
+        "label": "Allure à effort égal et ravitaillement",
+        "short": "Plus lent en montée, un peu plus vite en descente, même effort partout.",
+        "light": "Courir à allure constante sur un parcours vallonné, c'est se mettre dans le rouge "
+                 "dans les côtes. Le plan calcule, kilomètre par kilomètre, l'allure qui demande le "
+                 "même effort d'après le coût énergétique de la pente. En descente on regagne moins "
+                 "qu'on ne perd en montée. Au-delà de 1 h 15 d'effort, les glucides pris régulièrement "
+                 "(à tester à l'entraînement) évitent le coup de barre ; la chaleur et l'humidité "
+                 "ralentissent tout le monde, mieux vaut ajuster l'objectif que subir.",
+        "source": "Minetti 2002 ; Jeukendrup 2014 ; règle de Hadley (chaleur)",
+    },
     "forecast": {
         "label": "Projection « si tu continues comme ça »",
         "short": "Ta tendance récente prolongée prudemment — une estimation, pas une promesse.",

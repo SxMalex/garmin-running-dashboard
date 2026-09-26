@@ -6,12 +6,15 @@ personnels et efficacité aérobie. Répond à « est-ce que je progresse ? ».
 
 from datetime import date, timedelta
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
 from forecast_logic import race_projection, trend_word, vo2max_projection
+from running_form_logic import form_report
+from ui_theme import chip, esc, html_block
 from physio_ui import render_aerobic_progress, render_physio_settings
 from ui_mode import explain
 from progression_logic import (
@@ -262,6 +265,57 @@ if not vo2.empty:
     explain("vo2max")
 else:
     st.info("Pas de VO2max sur les activités chargées.")
+
+st.divider()
+
+# ---------------------------------------------------------------------------
+# Forme de foulée à allure égale
+# ---------------------------------------------------------------------------
+st.subheader("Forme de foulée, à allure égale")
+form = form_report(df)
+if not form:
+    st.info("Pas assez de sorties avec dynamique de course (contact au sol, foulée, puissance) sur "
+            "18 semaines : il en faut 5 dans les 6 dernières semaines et 5 dans les 12 d'avant. "
+            "Toutes les montres ne la mesurent pas.")
+else:
+    _WORD = {"warning": ("à surveiller", "warning"), "good": ("mieux", "good"), "neutral": ("stable", "neutral")}
+    with st.container(key="card-form"):
+        cols = st.columns(len(form))
+        for col, r in zip(cols, form):
+            word, status = _WORD[r["status"]]
+            with col:
+                html_block(f'<div class="gd-kicker">{esc(r["label"])}</div>'
+                           f'<div><span class="gd-big" style="font-size:2.4rem">{r["delta"]:+.1f}</span> '
+                           f'{esc(r["unit"])} {chip(word, status)}</div>')
+                st.caption(("Attention : " + r["meaning"] + ".") if r["status"] == "warning"
+                           else f"{r['recent_n']} sorties récentes vs {r['ref_n']} avant.")
+        pick = st.segmented_control("Métrique", [r["column"] for r in form], key="form_metric",
+                                    format_func={r["column"]: r["label"] for r in form}.get,
+                                    required=True, default=form[0]["column"],
+                                    label_visibility="collapsed")
+        r = next(x for x in form if x["column"] == pick)
+        series = r["series"].sort_values("t")
+        split = pd.Timestamp(date.today()) - pd.Timedelta(weeks=6)
+        fig_f = go.Figure()
+        fig_f.add_vrect(x0=split, x1=pd.Timestamp(date.today()), fillcolor=ct.rgba(ct.BLUE, 0.07),
+                        line_width=0, annotation_text="6 dernières semaines",
+                        annotation_position="top left", annotation_font=dict(color=ct.INK_MUTED, size=11))
+        fig_f.add_trace(go.Scatter(x=series["t"], y=series["resid"], mode="markers", name="Sortie",
+                                   marker=dict(color=ct.BLUE, size=8, opacity=0.8),
+                                   customdata=np.stack([series["y"], series["speed"] * 3.6], axis=1),
+                                   hovertemplate="%{x|%d/%m} · %{customdata[0]:.1f} " + r["unit"]
+                                                 + " à %{customdata[1]:.1f} km/h<br>écart à allure égale "
+                                                 "%{y:+.1f}<extra></extra>"))
+        trend_f = series.set_index("t")["resid"].rolling("28D", min_periods=3).median()
+        fig_f.add_trace(go.Scatter(x=trend_f.index, y=trend_f.to_numpy(), mode="lines", name="Tendance 4 sem.",
+                                   line=dict(color=ct.INK_SECONDARY, width=2, dash="dot"), hoverinfo="skip"))
+        fig_f.add_hline(y=0, line=dict(color=ct.BASELINE, width=1))
+        fig_f.update_layout(height=280, margin=dict(l=0, r=0, t=30, b=0), showlegend=False,
+                            yaxis=dict(title=f"écart ({r['unit']}) à allure égale"))
+        st.plotly_chart(fig_f)
+        st.caption("Chaque point : la sortie comparée à ce que tu produis habituellement à la même "
+                   "vitesse. Au-dessus de zéro = plus que d'habitude.")
+explain("foulee")
 
 st.divider()
 

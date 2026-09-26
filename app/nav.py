@@ -54,6 +54,7 @@ POLES: tuple[Pole, ...] = (
     )),
     Pole("goal", "Objectif", ":material/flag:", (
         PageDef("pages/9_Objectif.py", "Mon plan", "objectif", ":material/event:"),
+        PageDef("pages/10_Jour_de_course.py", "Jour de course", "jour-de-course", ":material/sports_score:"),
         PageDef("pages/7_AI_Coach.py", "Coach IA", "coach", ":material/auto_awesome:"),
     )),
 )

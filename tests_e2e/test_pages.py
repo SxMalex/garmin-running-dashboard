@@ -35,3 +35,19 @@ def test_charts_blend_into_the_cards(open_page):
     bg = page.locator('[data-testid="stPlotlyChart"] rect.bg').first
     bg.wait_for(state="attached")
     assert bg.evaluate("e => getComputedStyle(e).fill") in ("transparent", "rgba(0, 0, 0, 0)")
+
+
+def test_race_day_gpx_upload_builds_the_pace_band(open_page, tmp_path):
+    pts = "".join(f'<trkpt lat="43.6" lon="{1.44 + k * 25 / 80600:.6f}"><ele>{150 + (60 if 120 < k < 160 else 0)}</ele></trkpt>'
+                  for k in range(400))                                   # ~10 km, une côte vers le km 3-4
+    gpx = tmp_path / "parcours.gpx"
+    gpx.write_text(f'<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg>{pts}'
+                   '</trkseg></trk></gpx>')
+    page = open_page("/jour-de-course")
+    page.locator('input[type="file"]').set_input_files(str(gpx))
+    settle(page)
+    page.get_by_role("textbox", name="Temps visé").fill("50:00")
+    page.keyboard.press("Enter")
+    settle(page)
+    expect(page.get_by_text("Bracelet d'allure")).to_be_visible()
+    expect(page.get_by_text("Dénivelé").first).to_be_visible()

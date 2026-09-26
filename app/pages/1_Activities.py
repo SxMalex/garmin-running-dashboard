@@ -14,6 +14,7 @@ from plotly.subplots import make_subplots
 from activities_logic import METRICS, ZONE_LABELS, enrich, intensity_distribution, polarization
 from formatting import decimate, md_escape, seconds_to_pace_str
 from next_session_logic import reference_threshold_sec
+from raceday_logic import cool_equivalent_pace, heat_slowdown, weather_from_garmin
 from physio_ui import render_physio_settings, render_signal_quality
 from ui_mode import explain
 from ui_theme import chip, html_block
@@ -54,6 +55,11 @@ _athlete_id = get_athlete_id()
 @st.cache_data(ttl=3600, show_spinner="Chargement des détails...")
 def load_activity_details(athlete_id: int, activity_id: int) -> dict:
     return get_garmin_client().get_activity_details(activity_id)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_weather(athlete_id: int, activity_id: int) -> dict:
+    return get_garmin_client().get_activity_weather(activity_id)
 
 
 @st.cache_data(ttl=3600, show_spinner="Chargement des streams...")
@@ -523,6 +529,25 @@ if _picked_id is not None and (filtered["activityId"] == _picked_id).any():
     m6.metric("🔥 Calories", f"{int(selected_row['calories'])} kcal" if pd.notna(selected_row.get("calories")) else "—")
     m7.metric("⛰️ D+", f"{int(selected_row['elevationGain'])} m" if pd.notna(selected_row.get("elevationGain")) else "—")
     m8.metric("❤️‍🔥 FC max", f"{int(selected_row['maxHR'])} bpm" if pd.notna(selected_row.get("maxHR")) else "—")
+
+    # Météo de la sortie : relire une allure à la lumière de la chaleur
+    _weather = weather_from_garmin(load_weather(_athlete_id, int(activity_id)))
+    if _weather:
+        _bits = [f"{_weather['temp_c']:.0f} °C"]
+        if _weather["dewpoint_c"] is not None:
+            _bits.append(f"point de rosée {_weather['dewpoint_c']:.0f} °C")
+        if _weather["desc"]:
+            _bits.append(md_escape(_weather["desc"]).lower())
+        _heat = heat_slowdown(_weather["temp_c"], _weather["dewpoint_c"])
+        _pace = selected_row.get("avgPace_sec")
+        if (_heat and _heat["mid"] > 0 and selected_row.get("activityType") == "running"
+                and pd.notna(_pace) and _pace > 0):
+            st.info(f"**Chaleur** ({', '.join(_bits)}) : à effort égal, on court ~{_heat['low']:g} à "
+                    f"{_heat['high']:g} % plus lentement. Ton allure {seconds_to_pace_str(_pace)} vaut "
+                    f"≈ **{seconds_to_pace_str(cool_equivalent_pace(_pace, _heat))}** au frais.",
+                    icon=":material/thermostat:")
+        else:
+            st.caption("Météo : " + ", ".join(_bits))
 
     # Chargement des détails et splits
     with st.spinner("Chargement des détails..."):
