@@ -25,6 +25,16 @@ l'API Garmin non officielle s'authentifie par identifiants, pas par OAuth multi-
 
 ## Fonctionnalités
 
+- **Signaux cachés** — **veille santé** (FC de repos, HRV, respiration et SpO2
+  de la nuit comparées à ta norme des 30 derniers jours : plusieurs signaux qui
+  dévient ensemble précèdent souvent un rhume de 1 à 2 jours), **pic de sortie**
+  (une sortie > +10 % de ta plus longue du mois, prévue ou faite), **forme de
+  foulée à allure égale** (contact au sol, ratio vertical, foulée, puissance
+  corrigés de la vitesse), **chaleur** (météo de chaque sortie et allure
+  équivalente au frais)
+- **Jour de course** — importe le GPX du parcours : allure kilomètre par
+  kilomètre à effort égal (coût énergétique de la pente), objectif corrigé de la
+  chaleur prévue, ravitaillement placé au kilomètre, bracelet d'allure en CSV
 - **Navigation en 4 pôles** — Aujourd'hui / Entraînement / Progrès / Objectif,
   une question par pôle ; en-tête commun (Light/Pro, Actualiser, Compte,
   Prompt coach IA) et, sur téléphone, barre d'onglets en bas. Thème clair
@@ -363,7 +373,8 @@ gar/
         ├── 6_Heatmap.py        # Heatmaps multi-calques (Folium)
         ├── 7_AI_Coach.py       # Prompts LLM avec contexte complet
         ├── 8_Comparatif.py     # Années superposées (charge, volume, physio, récup)
-        └── 9_Objectif.py       # Objectif de course → plan → envoi au calendrier
+        ├── 9_Objectif.py       # Objectif de course → plan → envoi au calendrier
+        └── 10_Jour_de_course.py # GPX → allure au km à effort égal, chaleur, ravitaillement
 ```
 
 ---
@@ -531,10 +542,19 @@ dashboard — fraîcheur, séance du jour, dérive cardiaque, plan vers ton obje
 et tu en discutes (« pourquoi je stagne ? », « mon plan est-il trop chargé ? »).
 
 Outils exposés : `daily_briefing`, `training_load`, `activity_analysis`,
-`aerobic_trend`, `race_plan_preview`, `current_goal`, plus l'accès en lecture aux
+`aerobic_trend`, `health_watch` (veille santé), `running_form` (foulée à allure
+égale, pic de sortie), `race_plan_preview`, `current_goal`, plus l'accès en lecture aux
 ~100 méthodes de lecture de `garminconnect` (`garmin_call`). **Lecture seule** (liste
 blanche `get_*` / `count_*` / `download_*`) : envoyer des séances à la montre se
 fait uniquement depuis la page Objectif, sur confirmation.
+
+**Commandes prêtes à l'emploi** (prompts MCP, menu `/` de Claude Code ou le
+bouton « + » de Claude Desktop) : `bilan_semaine` (niveau débutant ou confirmé),
+`pourquoi_fatigue`, `seance_du_jour`, `prepa_course` (distance, date, temps visé),
+`debrief` (dernière sortie ou un identifiant), `ajuste_plan` (« vacances du 3 au
+10 », « genou sensible »…). Elles s'adaptent à ta situation au moment où tu les
+lances : si Run Coach pilote la montre, Claude commente ses séances sans en
+proposer d'autres ; si la veille santé s'allume, la récupération passe en premier.
 
 1. Amorcer la session du serveur (une fois) : le script demande email, mot de
    passe (s'ils ne sont pas dans `.env`) et code MFA, puis enregistre les tokens

@@ -33,7 +33,7 @@ VO2max, efficacité aérobie et dérive via `physio_logic.py`), `5_Next_Session`
 `recommend_session(df, downgrade=n)` en **repli** — la source primaire est le
 plan Garmin Run Coach via `coach_logic.py`), `6_Heatmap`, `7_AI_Coach` (contexte
 enrichi forme/HRV/sommeil/records), `8_Comparatif` (années superposées sur un axe
-jour-de-l'année via `comparatif_logic.py`), `9_Objectif` (course datée → plan
+jour-de-l'année via `comparatif_logic.py`), `10_Jour_de_course` (GPX → allure au km, chaleur, ravitaillement), `9_Objectif` (course datée → plan
 course + renfo via `race_plan_logic.py`, envoi au calendrier Garmin). Le thème graphique central est
 `chart_theme.py` (palette validée par le validateur dataviz — ne pas réordonner
 les slots catégoriels ni réutiliser les couleurs status comme séries).
@@ -244,6 +244,23 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   régression alors que la forme remonte), gains amortis (τ 75 j), plafonds
   ±2 %/mois (temps) et ±1 pt/mois (VO2max), bande ≥ ±1 % / ±1 pt ; aucune
   projection sous 8 points ou 4 semaines. Toujours affichée comme estimation.
+- **Veille santé** (`illness_logic`) : dernière nuit vs norme J−30…J−3 (médiane,
+  MAD, planchers de dispersion) ; un signal compte s'il dévie ≥ 2 σ ET d'un écart
+  physiologique (FC +4 bpm, respiration +1/min, HRV −10 %, SpO2 −2 pts). Un signal
+  ISOLÉ n'alerte que s'il persiste 2 nuits ou dépasse 3 σ (sinon, rejoué sur 60
+  nuits réelles, la carte s'allumait une nuit sur sept). Signal absent ou norme
+  < 10 nuits : dit, pas inventé. `load_health_frame` = chemin unique Accueil / MCP.
+- **Foulée** (`running_form_logic`) : toujours à allure égale (résidu d'un modèle
+  linéaire en vitesse, 6 semaines vs 12 précédentes, ≥ 5 sorties par fenêtre).
+  Colonnes de dynamique **optionnelles** du DataFrame (`garmin_client.DYNAMICS_COLUMNS`,
+  NaN sans capteur) : le contrat des 19 colonnes reste intact. Pic de sortie :
+  ratio à la plus longue des 30 jours, > 1,10 à surveiller, > 1,30 élevé.
+- **Jour de course** (`raceday_logic`) : GPX refusé s'il contient DOCTYPE/ENTITY ou
+  dépasse 5 Mo (XML fourni par l'utilisateur) ; allure = coût Minetti, gain en
+  descente plafonné (× 0,88) ; météo Garmin en °F convertie.
+- **Prompts MCP** (`garmin_mcp/prompts.py`) : builders purs (situation → texte) ;
+  la situation lit le plan Run Coach en strict (panne → « inconnu », jamais « pas
+  de plan ») et le prompt s'affiche même sans connexion Garmin.
 - **Graphiques Plotly** : le frontend Streamlit force le fond gris des champs par
   dessus le template `gar` (même avec `theme=None`, qui en plus masque les
   graduations) → fond rendu transparent en CSS (`ui_theme`), pas par figure.
