@@ -13,6 +13,7 @@ from raceday_logic import (
     minetti_cost,
     pacing_plan,
     parse_gpx,
+    split_pct,
     weather_from_garmin,
 )
 
@@ -98,3 +99,45 @@ def test_fueling_follows_duration():
     assert long["carbs_g_per_h"] == (30, 60) and len(long["events"]) >= 3
     assert all(e["at_s"] < long["total_s"] - 600 for e in long["events"])
     assert fueling_plan(pacing_plan(prof, 3 * 3600))["carbs_g_per_h"] == (60, 90)
+
+
+def _flat(km_total):
+    edges = list(np.arange(0, km_total * 1000, 1000.0)) + [km_total * 1000]
+    return pd.DataFrame([{"km": k + 1, "length_m": edges[k + 1] - edges[k], "gain": 0.0, "loss": 0.0,
+                          "grade": 0.0, "ele_end": 0.0} for k in range(len(edges) - 1)])
+
+
+def test_even_strategy_on_flat_course_is_constant():
+    """Comportement historique conservé : « régulière » = même allure sur le plat."""
+    plan = pacing_plan(_flat(10), 3000, strategy="even")
+    assert plan["pace_s"].nunique() == 1
+
+
+@pytest.mark.parametrize("km_total, target", [(5, 1300), (10, 3000), (21.0975, 6600), (42.195, 14400)])
+def test_progressive_strategy_builds_up_and_keeps_the_target(km_total, target):
+    """Le bracelet ne doit plus être plat : départ retenu, fin plus rapide, même temps final."""
+    plan = pacing_plan(_flat(km_total), target, strategy="progressive")
+    pace = plan["pace_s"].to_numpy()
+    assert abs(plan["elapsed_s"].iloc[-1] - target) < 1
+    assert pace[0] > pace[len(pace) // 2] > pace[-1]            # lent → stable → rapide
+    assert np.all(np.diff(pace) <= 1e-9)                         # jamais de ralentissement sur le plat
+    half = split_pct(plan["length_m"], plan["split_s"])
+    assert -3.5 < half < -0.3                                    # léger negative split, pas un sprint
+    assert pace.max() / pace.min() < 1.06
+
+
+def test_progressive_strategy_still_follows_the_hills():
+    plan = pacing_plan(km_profile(parse_gpx(_gpx())), 3000, strategy="progressive")
+    assert plan.loc[plan["km"] == 4, "pace_s"].iloc[0] > plan.loc[plan["km"] == 5, "pace_s"].iloc[0] * 1.15
+
+
+def test_unknown_strategy_fails():
+    with pytest.raises(ValueError):
+        pacing_plan(_flat(5), 1300, strategy="yolo")
+
+
+def test_split_pct_prorates_the_middle_segment():
+    assert split_pct([1000, 1000], [300, 300]) == pytest.approx(0)
+    assert split_pct([1000, 1000], [300, 330]) == pytest.approx(10)
+    # 3 segments : la mi-course (1,5 km) coupe le 2e en deux
+    assert split_pct([1000, 1000, 1000], [300, 300, 270]) == pytest.approx(420 / 450 * 100 - 100)

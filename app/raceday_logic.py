@@ -9,6 +9,12 @@ Chaleur et jour de course. Logique pure, testée.
   énergétique de la course selon la pente (Minetti et al. 2002, J Appl Physiol).
   Les descentes aident moins qu'elles ne coûtent en montée : le gain en descente
   est plafonné, on ne « rattrape » pas tout.
+- **Stratégie** : à effort égal seul, un parcours plat donnait la même allure à
+  chaque kilomètre — mauvais conseil, on part alors trop vite dans l'euphorie du
+  départ. La stratégie « progressive » part 1,5 à 2,5 % plus lentement (le temps
+  que le cardio s'installe), tient l'allure au milieu et accélère sur le dernier
+  cinquième : léger *negative split*, la répartition des records du 5 km au
+  marathon (Abbiss & Laursen 2008 ; Díaz et al. 2018). Le temps visé est conservé.
 - **Ravitaillement** : repères de Jeukendrup (2014) selon la durée — rien sous
   ~75 min, 30-60 g de glucides/h jusqu'à 2 h 30, 60-90 g/h au-delà ; des prises
   régulières placées au kilomètre, avant les montées plutôt qu'en plein effort.
@@ -160,23 +166,90 @@ def minetti_cost(grade: float) -> float:
     return 155.4 * i**5 - 30.4 * i**4 - 43.3 * i**3 + 46.3 * i**2 + 19.5 * i + 3.6
 
 
-def pacing_plan(profile: pd.DataFrame, target_time_s: float) -> pd.DataFrame:
+def effort_factor(grade: float) -> float:
+    """Allure à effort égal ÷ allure à plat pour une pente (fraction), gain en descente plafonné."""
+    return max(minetti_cost(grade) / minetti_cost(0.0), DOWNHILL_FLOOR)
+
+
+PACING_STRATEGIES = {"progressive": "Progressive", "even": "Régulière"}
+
+
+def progression_shape(total_km: float) -> dict:
     """
-    Allure par kilomètre pour finir en `target_time_s` à effort égal. Ajoute
-    pace_s (s/km), split_s (temps du segment) et elapsed_s (cumul).
+    Paramètres de la stratégie progressive selon la distance : départ plus lent
+    de `start_pct` % qui s'efface sur `warm_frac` de la course, accélération
+    jusqu'à `kick_pct` % à partir de `kick_from`. Plus la course est longue, plus
+    le départ est retenu et l'accélération finale modeste (le marathon se perd
+    dans la première moitié, il ne se gagne pas au sprint).
+    """
+    if total_km <= 12:
+        return {"start_pct": 1.5, "warm_frac": 0.15, "kick_pct": 2.0, "kick_from": 0.8}
+    if total_km <= 25:
+        return {"start_pct": 2.0, "warm_frac": 0.15, "kick_pct": 2.0, "kick_from": 0.8}
+    return {"start_pct": 2.5, "warm_frac": 0.12, "kick_pct": 1.5, "kick_from": 0.85}
+
+
+def strategy_multipliers(profile: pd.DataFrame, strategy: str = "even") -> np.ndarray:
+    """Multiplicateur d'allure par segment (1 = allure de base ; > 1 = plus lent)."""
+    km = profile["length_m"].to_numpy() / 1000
+    if strategy != "progressive" or km.sum() <= 0:
+        return np.ones(len(km))
+    total = float(km.sum())
+    x = (np.cumsum(km) - km / 2) / total                            # milieu du segment, 0 → 1
+    s = progression_shape(total)
+    slow = s["start_pct"] / 100 * np.clip(1 - x / s["warm_frac"], 0, 1)
+    fast = s["kick_pct"] / 100 * np.clip((x - s["kick_from"]) / (1 - s["kick_from"]), 0, 1)
+    return 1 + slow - fast
+
+
+def pacing_plan(profile: pd.DataFrame, target_time_s: float, strategy: str = "even") -> pd.DataFrame:
+    """
+    Allure par kilomètre pour finir en `target_time_s` : effort égal selon la
+    pente, modulé par la stratégie (`even` ou `progressive`). Ajoute pace_s
+    (s/km), split_s (temps du segment) et elapsed_s (cumul). Le temps final vaut
+    `target_time_s` quelle que soit la stratégie.
     """
     if profile.empty or not target_time_s or target_time_s <= 0:
         raise ValueError("Profil vide ou temps visé invalide.")
-    flat = minetti_cost(0.0)
-    factor = np.array([max(minetti_cost(g) / flat, DOWNHILL_FLOOR) for g in profile["grade"]])
+    if strategy not in PACING_STRATEGIES:
+        raise ValueError(f"Stratégie inconnue : {strategy}")
+    factor = np.array([effort_factor(g) for g in profile["grade"]])
+    mult = strategy_multipliers(profile, strategy)
     km = profile["length_m"].to_numpy() / 1000
-    base = target_time_s / float((factor * km).sum())             # allure à plat (s/km)
+    base = target_time_s / float((factor * mult * km).sum())      # allure à plat (s/km)
     out = profile.copy()
-    out["pace_s"] = base * factor
+    out["pace_s"] = base * factor * mult
     out["split_s"] = out["pace_s"] * km
     out["elapsed_s"] = out["split_s"].cumsum()
     out.attrs["flat_pace_s"] = base
     return out
+
+
+def half_split_pct(plan: pd.DataFrame) -> float:
+    """Écart d'allure 2e moitié / 1re moitié du plan, en % (< 0 = negative split)."""
+    return split_pct(plan["length_m"].to_numpy(), plan["split_s"].to_numpy())
+
+
+def split_pct(lengths_m, times_s) -> float:
+    """
+    Allure de la 2e moitié de la distance comparée à la 1re, en % (positif = on
+    a ralenti). Le segment qui chevauche la mi-course est réparti au prorata.
+    """
+    lengths = np.asarray(lengths_m, dtype=float)
+    times = np.asarray(times_s, dtype=float)
+    half = lengths.sum() / 2
+    first_d = first_t = 0.0
+    for d, t in zip(lengths, times):
+        take = min(d, max(half - first_d, 0.0))
+        if take <= 0:
+            break
+        first_d += take
+        first_t += t * take / d
+    second_t = times.sum() - first_t
+    second_d = lengths.sum() - first_d
+    if first_d <= 0 or second_d <= 0 or first_t <= 0:
+        return 0.0
+    return float((second_t / second_d) / (first_t / first_d) - 1) * 100
 
 
 # ---------------------------------------------------------------------------
