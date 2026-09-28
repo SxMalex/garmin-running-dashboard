@@ -332,3 +332,20 @@ def test_meal_prompt_uses_the_validated_plan(logged_in, goal):
     prompt = at.code[0].value
     assert "Aucun plan d'entraînement actif" not in prompt
     assert "plan Objectif validé" in prompt and "À retenir pour la prochaine course" in prompt
+
+
+def test_objectif_writes_nothing_under_a_fallback_athlete_id(logged_in, fake_api, monkeypatch):
+    """Revue #1 : un 429 sur socialProfile rangeait l'objectif sous un autre dossier."""
+    import garmin_client
+    import goal_store
+    at = logged_in("9_Objectif.py")
+    for writer in ("save_goal", "clear_goal", "validate_plan", "record_push", "forget_push"):
+        monkeypatch.setattr(goal_store, writer, lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("écriture sous un id de repli")))
+    garmin_client._SESSION.update(athlete_id=123456, reliable=False, checked_at=10**12)
+    at.session_state["garmin_athlete_id_reliable"] = False
+    at.run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert any("identifiant de ton compte" in w.value for w in at.warning)
+    # Ni formulaire ni bouton d'écriture : rien à cliquer pour ranger au mauvais endroit
+    assert not [b for b in at.button if not b.key.startswith("gd-")] and not at.text_input

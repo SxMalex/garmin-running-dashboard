@@ -8,6 +8,7 @@ import time
 
 import pandas as pd
 import pytest
+from pathlib import Path
 from garminconnect import (
     GarminConnectAuthenticationError,
     GarminConnectConnectionError,
@@ -793,3 +794,379 @@ def test_training_plans_strict_bypasses_cache():
     assert api.calls == 1
     client.get_training_plans(strict=True)
     assert api.calls == 2
+
+
+# ---------------------------------------------------------------------------
+# Session partagée, déconnexion, identifiant d'athlète (revue PR #1)
+# ---------------------------------------------------------------------------
+class _StubClient:
+    """Imite garminconnect 0.3.6 : le rafraîchissement réécrit le tokenstore mémorisé."""
+
+    def __init__(self, store, profile=None, fail=0):
+        self._tokenstore_path = str(store)
+        self.di_token, self.di_refresh_token, self.jwt_web = "tok", "refresh", None
+        self.profile, self.fail, self.profile_calls = profile or {"profileId": 777}, fail, 0
+        self.active = self.max_active = 0
+
+    def connectapi(self, path, **kwargs):
+        self.profile_calls += 1
+        if self.fail:
+            self.fail -= 1
+            raise RuntimeError("API Error 429")
+        return self.profile
+
+    def _refresh_session(self):
+        import time as _t
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        _t.sleep(0.01)
+        if self._tokenstore_path:
+            Path(self._tokenstore_path).mkdir(parents=True, exist_ok=True)
+            (Path(self._tokenstore_path) / "garmin_tokens.json").write_text("{}")
+        self.active -= 1
+
+
+class _StubApi:
+    def __init__(self, client, display_name="uuid-1"):
+        self.client, self.display_name = client, display_name
+
+
+@pytest.fixture
+def session_env(tmp_path, monkeypatch):
+    import garmin_client as gcm
+    store = tmp_path / "tokens"
+    monkeypatch.setenv("GARMIN_TOKENSTORE", str(store))
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(gcm, "ATHLETE_ID_RETRY_S", 0)
+    gcm.reset_session_state()
+    yield gcm, store
+    gcm.reset_session_state()
+
+
+def test_logout_holds_even_if_another_tab_refreshes_afterwards(session_env):
+    """Revue #1 : un onglet resté ouvert recréait garmin_tokens.json après la déconnexion."""
+    gcm, store = session_env
+    api = _StubApi(_StubClient(store))
+    gcm.adopt_session(api)
+    api.client._refresh_session()
+    assert (store / "garmin_tokens.json").exists()
+    gcm.end_session()
+    assert not store.exists()
+    api.client._refresh_session()            # l'onglet de l'autre appareil rafraîchit…
+    assert not store.exists()                # …et ne recrée rien
+    assert api.client.di_refresh_token is None
+    assert gcm.shared_athlete_id() == (0, False)
+
+
+def test_tabs_share_one_session_and_refresh_one_at_a_time(session_env, monkeypatch):
+    import threading
+    gcm, store = session_env
+    resumed = []
+    api = _StubApi(_StubClient(store))
+    monkeypatch.setattr(gcm, "resume_session", lambda: resumed.append(1) or api)
+    assert gcm.shared_session() is api and gcm.shared_session() is api
+    assert resumed == [1]                     # une reprise pour tout le process
+    threads = [threading.Thread(target=api.client._refresh_session) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert api.client.max_active == 1         # jamais deux rafraîchissements du même jeton
+
+
+def test_new_login_neutralizes_the_previous_session(session_env):
+    gcm, store = session_env
+    old, new = _StubApi(_StubClient(store)), _StubApi(_StubClient(store))
+    gcm.adopt_session(old)
+    gcm.adopt_session(new)
+    assert old.client._tokenstore_path is None and new.client._tokenstore_path
+    assert gcm.shared_session() is new
+
+
+def test_athlete_id_survives_a_transient_failure(session_env):
+    """Revue #1 : un 429 sur socialProfile rangeait l'objectif sous un autre id."""
+    gcm, store = session_env
+    assert gcm.resolve_athlete_id(_StubApi(_StubClient(store, fail=2))) == (777, True)   # retry
+    # Garmin muet, mais l'id de ce compte est connu d'une connexion précédente
+    assert gcm.resolve_athlete_id(_StubApi(_StubClient(store, fail=9))) == (777, True)
+    # Jamais résolu pour ce compte : repli sur le hash, marqué NON fiable
+    athlete_id, reliable = gcm.resolve_athlete_id(_StubApi(_StubClient(store, fail=9), "uuid-2"))
+    assert athlete_id not in (0, 777) and reliable is False
+
+
+# --- Matrice de cas limites de la session partagée (contre-revue B1-B5) -------
+class _SlowProfileClient(_StubClient):
+    def __init__(self, store, delay, fail=0):
+        super().__init__(store, fail=fail)
+        self.delay = delay
+
+    def connectapi(self, path, **kwargs):
+        import time as _t
+        _t.sleep(self.delay)
+        return super().connectapi(path, **kwargs)
+
+
+def test_an_existing_session_never_waits_for_the_network(session_env, monkeypatch):
+    """Contre-revue : le recontrôle d'id tenait le verrou global (tous les onglets figés)."""
+    import threading
+    import time as _t
+    gcm, store = session_env
+    monkeypatch.setattr(gcm, "ATHLETE_ID_RECHECK_S", 0)
+    api = _StubApi(_SlowProfileClient(store, delay=0.0, fail=99))
+    gcm.adopt_session(api)                                   # id de repli : non fiable
+    assert gcm.shared_athlete_id()[1] is False
+    api.client.delay = 0.5                                    # Garmin lent pendant le recontrôle
+    t0 = _t.perf_counter()
+    gcm.shared_athlete_id()                                   # lance le recontrôle en arrière-plan
+    assert gcm.shared_session() is api
+    assert _t.perf_counter() - t0 < 0.2                       # ni l'un ni l'autre n'attend
+    worker = gcm._SESSION["recheck"]
+    api.client.fail = 0
+    worker.join(5)
+
+
+def test_background_recheck_upgrades_the_id_and_ignores_a_replaced_session(session_env, monkeypatch):
+    gcm, store = session_env
+    monkeypatch.setattr(gcm, "ATHLETE_ID_RECHECK_S", 0)
+    api = _StubApi(_StubClient(store, fail=99), display_name="uuid-9")
+    gcm.adopt_session(api)
+    assert gcm.shared_athlete_id() == (gcm.shared_athlete_id()[0], False)
+    api.client.fail = 0
+    gcm._SESSION["checked_at"] = -1
+    gcm.shared_athlete_id()
+    gcm._SESSION["recheck"] and gcm._SESSION["recheck"].join(5)
+    assert gcm.shared_athlete_id() == (777, True)
+    # Recontrôle d'une session remplacée entre-temps : son résultat est jeté
+    old = _StubApi(_StubClient(store, fail=99), display_name="uuid-10")
+    gcm.adopt_session(old)
+    gcm.adopt_session(_StubApi(_StubClient(store, profile={"profileId": 555}), display_name="uuid-11"))
+    old.client.fail = 0                                     # l'ancien recontrôle aboutit (777)…
+    gcm._recheck_athlete_id(old)
+    assert gcm.shared_athlete_id() == (555, True)           # …sans écraser la session courante
+
+
+def test_failed_resume_is_not_replayed_on_every_run(session_env, monkeypatch):
+    gcm, store = session_env
+    calls = []
+    monkeypatch.setattr(gcm, "resume_session", lambda: calls.append(1))
+    for _ in range(5):
+        assert gcm.shared_session() is None
+    assert calls == [1]                                       # Garmin injoignable : 1 essai, pas 5
+    gcm._SESSION["resume_failed_at"] -= gcm.RESUME_RETRY_S + 1
+    gcm.shared_session()
+    assert calls == [1, 1]                                    # retenté après le délai
+
+
+def test_simultaneous_refreshes_hit_garmin_once(session_env):
+    """Six onglets à l'expiration : un seul rafraîchissement (les autres trouvent le jeton neuf)."""
+    import threading
+    gcm, store = session_env
+
+    class Rotating(_StubClient):
+        refreshes = 0
+
+        def _refresh_session(self):
+            import time as _t
+            _t.sleep(0.02)
+            Rotating.refreshes += 1
+            self.di_token = f"tok{Rotating.refreshes}"
+
+    api = _StubApi(Rotating(store))
+    gcm.adopt_session(api)
+    barrier = threading.Barrier(6)
+
+    def tab():
+        barrier.wait()
+        api.client._refresh_session()
+
+    threads = [threading.Thread(target=tab) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert Rotating.refreshes == 1
+
+
+def test_logout_during_an_inflight_refresh_leaves_no_valid_token(session_env):
+    import threading
+    gcm, store = session_env
+
+    class Slow(_StubClient):
+        def _refresh_session(self):
+            import time as _t
+            _t.sleep(0.2)
+            self.di_token, self.di_refresh_token = "fresh", "fresh-refresh"
+
+    api = _StubApi(Slow(store))
+    gcm.adopt_session(api)
+    t = threading.Thread(target=api.client._refresh_session)
+    t.start()
+    gcm.end_session()                                        # pendant le rafraîchissement
+    t.join()
+    assert api.client.di_token is None and api.client.di_refresh_token is None
+    assert api.client._tokenstore_path is None and not store.exists()
+    api.client._refresh_session()                            # plus rien ne repart
+    assert api.client.di_token is None
+
+
+def test_corrupt_athlete_ids_file_is_repaired(session_env):
+    gcm, store = session_env
+    path = gcm._athlete_ids_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"uuid-1": 77')                         # écriture interrompue
+    assert gcm.resolve_athlete_id(_StubApi(_StubClient(store))) == (777, True)
+    import json as _json
+    assert _json.loads(path.read_text()) == {"uuid-1": 777}
+    assert not list(path.parent.glob(".athlete_ids.json.*.tmp"))  # pas de fichier temporaire oublié
+
+
+def test_logout_that_cannot_wait_for_a_slow_refresh_still_wins(session_env, monkeypatch):
+    """Rafraîchissement plus long que l'attente de la déconnexion : les jetons revenus sont effacés."""
+    import threading
+    gcm, store = session_env
+
+    class VerySlow(_StubClient):
+        def _refresh_session(self):
+            import time as _t
+            _t.sleep(0.3)
+            self.di_token, self.di_refresh_token = "fresh", "fresh-refresh"
+
+    api = _StubApi(VerySlow(store))
+    gcm.adopt_session(api)
+    t = threading.Thread(target=api.client._refresh_session)
+    t.start()
+    import time as _t
+    _t.sleep(0.05)                                           # le rafraîchissement tient le verrou
+    gcm.end_session()                                        # n'attend que 10 ms
+    t.join()
+    assert api.client.di_token is None and api.client.di_refresh_token is None
+
+
+def test_concurrent_first_loads_resume_once(session_env, monkeypatch):
+    """Deux onglets ouverts au démarrage : une seule reprise, la même session pour les deux."""
+    import threading
+    import time as _t
+    gcm, store = session_env
+    api, calls = _StubApi(_StubClient(store)), []
+
+    def slow_resume():
+        calls.append(1)
+        _t.sleep(0.2)
+        return api
+
+    monkeypatch.setattr(gcm, "resume_session", slow_resume)
+    got = []
+    threads = [threading.Thread(target=lambda: got.append(gcm.shared_session())) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert calls == [1] and got == [api, api, api]
+
+
+def test_session_helpers_tolerate_odd_objects(session_env, monkeypatch):
+    gcm, store = session_env
+    gcm._neutralize(object())                                # pas de client : rien à faire
+
+    class Frozen:
+        __slots__ = ()                                       # setattr impossible
+    gcm._wipe_tokens(Frozen())                               # ne lève pas
+    api = _StubApi(_StubClient(store))
+    gcm.adopt_session(api)
+    wrapper = api.client._refresh_session
+    gcm.adopt_session(api)                                   # réadoption : pas de double enveloppe
+    assert api.client._refresh_session is wrapper
+
+
+def test_athlete_id_edge_cases(session_env, monkeypatch):
+    gcm, store = session_env
+    empty = _StubClient(store, profile={"displayName": "x"})    # réponse sans id
+    athlete_id, reliable = gcm.resolve_athlete_id(_StubApi(empty, display_name="uuid-e"))
+    assert empty.profile_calls == 1 and reliable is False      # pas de nouvel essai inutile
+    path = gcm._athlete_ids_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"uuid-z": "pas-un-nombre"}')
+    assert gcm._known_athlete_id("uuid-z") is None
+    import os
+    monkeypatch.setattr(os, "replace", lambda *a: (_ for _ in ()).throw(OSError("disque plein")))
+    assert gcm.resolve_athlete_id(_StubApi(_StubClient(store), "uuid-w")) == (777, True)  # jamais bloquant
+
+
+def test_account_without_display_name_is_not_remembered(session_env):
+    """Sans display_name, rien à associer : aucun fichier d'ids écrit (et l'id reste fiable)."""
+    gcm, store = session_env
+    assert gcm.resolve_athlete_id(_StubApi(_StubClient(store), display_name="")) == (777, True)
+    assert not gcm._athlete_ids_path().exists()
+
+
+# --- Contre-revue 2 : la déconnexion doit gagner contre toute reprise concurrente ---
+def test_logout_wins_against_a_resume_started_during_a_slow_refresh(session_env, monkeypatch):
+    """Rafraîchissement lent dans l'onglet A, déconnexion dans B, un onglet C relance un run."""
+    import threading
+    import time as _t
+    gcm, store = session_env
+
+    class Slow(_StubClient):
+        def _refresh_session(self):
+            _t.sleep(0.5)
+            self.di_token, self.di_refresh_token = "fresh", "fresh-refresh"
+            if self._tokenstore_path:
+                Path(self._tokenstore_path).mkdir(parents=True, exist_ok=True)
+                (Path(self._tokenstore_path) / "garmin_tokens.json").write_text("{}")
+
+    api = _StubApi(Slow(store))
+    gcm.adopt_session(api)
+    store.mkdir(parents=True, exist_ok=True)
+    (store / "garmin_tokens.json").write_text("{}")
+    monkeypatch.setattr(gcm, "resume_session",
+                        lambda: _StubApi(_StubClient(store)) if (store / "garmin_tokens.json").exists() else None)
+    tab_a = threading.Thread(target=api.client._refresh_session)
+    tab_a.start()
+    _t.sleep(0.05)
+    t0 = _t.perf_counter()
+    gcm.end_session()
+    assert _t.perf_counter() - t0 < 0.2                     # la déconnexion n'attend pas le rafraîchissement
+    tab_c = threading.Thread(target=gcm.shared_session)
+    tab_c.start()
+    tab_a.join()
+    tab_c.join()
+    assert gcm._SESSION["api"] is None
+    assert not (store / "garmin_tokens.json").exists()
+
+
+def test_resume_in_flight_when_logging_out_is_discarded(session_env, monkeypatch):
+    """Reprise lancée avant la déconnexion, terminée après : elle ne s'installe pas."""
+    import threading
+    import time as _t
+    gcm, store = session_env
+    resumed = _StubApi(_StubClient(store))
+
+    def slow_resume():
+        _t.sleep(0.3)
+        return resumed
+
+    monkeypatch.setattr(gcm, "resume_session", slow_resume)
+    tab = threading.Thread(target=gcm.shared_session)
+    tab.start()
+    _t.sleep(0.05)
+    gcm.end_session()
+    tab.join()
+    assert gcm._SESSION["api"] is None
+    assert resumed.client._tokenstore_path is None           # neutralisée, pas abandonnée vivante
+
+
+def test_explicit_login_after_logout_is_installed(session_env):
+    gcm, store = session_env
+    gcm.end_session()
+    api = _StubApi(_StubClient(store))
+    gcm.adopt_session(api)                                   # connexion explicite : légitime
+    assert gcm.shared_session() is api
+
+
+def test_a_finished_recheck_does_not_forget_a_newer_one(session_env):
+    import threading
+    gcm, store = session_env
+    newer = threading.Thread(target=lambda: None)
+    gcm._SESSION["recheck"] = newer
+    gcm._recheck_athlete_id(_StubApi(_StubClient(store)))   # un ancien fil se termine
+    assert gcm._SESSION["recheck"] is newer

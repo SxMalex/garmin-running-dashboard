@@ -30,6 +30,7 @@ from race_plan_logic import (
     predictions_by_km,
 )
 from ui_helpers import (
+    athlete_id_is_reliable,
     cache_nonce,
     cached_load_activities,
     get_athlete_id,
@@ -57,6 +58,16 @@ from workout_export import (
 st.set_page_config(page_title="Objectif — Running Dashboard", page_icon="🎯", layout="wide")
 require_login()
 _athlete_id = get_athlete_id()
+if not athlete_id_is_reliable():
+    # Garmin n'a pas donné le profileId : l'id de repli rangerait l'objectif, le
+    # plan validé et le journal des séances dans un autre dossier que celui relu
+    # ensuite (objectif « perdu », retrait du calendrier sans mémoire).
+    st.title("Objectif de course")
+    st.warning("Garmin n'a pas confirmé l'identifiant de ton compte (réponse lente ou refusée). "
+               "Ton objectif et ton plan ne sont ni lus ni modifiés tant que ce n'est pas fait, "
+               "pour ne pas les ranger au mauvais endroit : réessaie dans une minute.",
+               icon=":material/sync_problem:")
+    st.stop()
 TODAY = date.today()
 WRITE_ENABLED = os.getenv("GARMIN_WRITE_ENABLED", "").lower() in ("1", "true", "yes")
 

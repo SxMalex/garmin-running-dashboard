@@ -5,6 +5,7 @@ from datetime import date, datetime
 
 import chart_theme
 import chart_theme as ct
+from forme_logic import tsb_metric_delta
 from ui_helpers import cache_nonce
 from next_session_logic import (
     THRESHOLD_SLIDER_MAX,
@@ -94,15 +95,8 @@ def render(activities_df: pd.DataFrame, cutoff: datetime) -> None:
     pmc_view = pmc[pmc["date"] >= pd.Timestamp(cutoff)].copy()
 
     last    = pmc.iloc[-1]
-    tsb_now = last["tsb"]
-    if tsb_now > 25:
-        tsb_status, tsb_color = "Sous-entraîné", "off"
-    elif tsb_now >= 5:
-        tsb_status, tsb_color = "Forme optimale ✓", "normal"
-    elif tsb_now >= -20:
-        tsb_status, tsb_color = "Charge normale", "off"
-    else:
-        tsb_status, tsb_color = "Sur-entraîné ⚠️", "inverse"
+    tsb_now = float(last["tsb"])
+    tsb_status, tsb_color = tsb_metric_delta(tsb_now)      # mêmes seuils que le haut de page
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("CTL — Forme",    f"{last['ctl']:.1f}", help="Charge chronique sur 42 jours (fitness)")

@@ -190,3 +190,54 @@ def test_garmin_call_connectapi_allows_path_and_params(monkeypatch):
     monkeypatch.setattr(server, "_get_client", lambda: fake)
     server.garmin_call("connectapi", {"path": "/x", "params": {"a": 1}})
     assert "connectapi:/x" in fake.calls
+
+
+def test_mcp_retries_a_fallback_athlete_id(monkeypatch, tmp_path):
+    """Contre-revue : un id de repli au démarrage restait jusqu'au redémarrage du MCP."""
+    import garmin_client
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(garmin_client, "ATHLETE_ID_RETRY_S", 0)
+    monkeypatch.setattr(server, "_use_dashboard_data_dir", lambda: None)
+
+    class Api:
+        display_name, fail = "uuid-mcp", True
+        def __init__(self):
+            self.client = self
+        def connectapi(self, path, **kw):
+            if Api.fail:
+                raise RuntimeError("API Error 429")
+            return {"profileId": 4242}
+
+    monkeypatch.setattr(server, "_get_client", lambda: Api())
+    monkeypatch.setattr(server, "_gc", None)
+    first = server._get_gc()
+    assert first.athlete_id_reliable is False
+    assert server._get_gc() is first                        # pas de nouvel essai avant la minute
+    Api.fail = False
+    monkeypatch.setattr(server, "_gc_built_at", server._gc_built_at - server.GC_RECHECK_S)
+    again = server._get_gc()
+    assert again.athlete_id == 4242 and again.athlete_id_reliable is True
+    assert server._get_gc() is again                        # fiable : plus jamais reconstruit
+
+
+def test_mcp_does_not_read_the_plan_under_an_unconfirmed_account(client, monkeypatch):
+    """Contre-revue 2 : sous un id de repli, le briefing annonçait la logique interne sans le dire."""
+    goal = {"distance": "10 km", "race_date": (date.today() + timedelta(weeks=8)).isoformat(),
+            "target_text": "45:00"}
+    goal_store.save_goal(42, goal, {})
+    reads = []
+    monkeypatch.setattr(goal_store, "validated_sessions", lambda *a, **k: reads.append(a) or None)
+    client.athlete_id_reliable = False
+    brief = insights.daily_briefing(client)
+    assert reads == [] and "non confirmé" in brief["account_note"]
+    g = insights.current_goal(client)
+    assert g["goal"] is None and "non confirmé" in g["note"]
+    client.athlete_id_reliable = True
+    assert insights.daily_briefing(client)["account_note"] is None and reads
+    assert insights.current_goal(client)["goal"]["distance"] == "10 km"
+
+
+def test_client_built_with_an_id_carries_the_given_reliability():
+    from fake_garmin import FakeGarmin as _Fake
+    assert GarminClient(_Fake(), athlete_id=7).athlete_id_reliable is True
+    assert GarminClient(_Fake(), athlete_id=7, athlete_id_reliable=False).athlete_id_reliable is False

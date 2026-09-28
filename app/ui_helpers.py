@@ -13,8 +13,9 @@ from formatting import map_zoom
 from garmin_client import (
     ACTIVITY_HISTORY_LIMIT,
     GarminClient,
-    athlete_id_of,
-    resume_session,
+    adopt_session,
+    shared_athlete_id,
+    shared_session,
     safe_load_activities,
 )
 
@@ -29,32 +30,63 @@ ACCENT_COLOR = ct.PACE  # la couleur suit l'entité (allure/tracé)
 
 def get_session_api():
     """
-    Retourne l'objet Garmin de la session courante, en le reprenant depuis le
-    tokenstore si besoin. Retourne None si aucune session valide n'existe
-    (→ la page d'accueil affiche alors le formulaire de connexion).
+    La session Garmin du process (partagée par tous les onglets, cf.
+    `garmin_client.shared_session`), reprise du tokenstore au besoin. None si
+    aucune session valide (→ formulaire de connexion). Relue à chaque run :
+    une déconnexion faite dans un autre onglet s'applique ici aussi.
     """
-    if "garmin_api" in st.session_state:
-        return st.session_state["garmin_api"]
-    api = resume_session()
-    if api is not None:
-        store_session(api)
+    api = shared_session()
+    if api is None:
+        drop_session()
+        return None
+    if (st.session_state.get("garmin_api") is not api
+            or not st.session_state.get("garmin_athlete_id_reliable")):
+        athlete_id, reliable = shared_athlete_id()       # (un id de repli est retenté)
+        st.session_state["garmin_api"] = api
+        st.session_state["garmin_athlete_id"] = athlete_id
+        st.session_state["garmin_athlete_id_reliable"] = reliable
     return api
 
 
 def store_session(api) -> None:
-    """Enregistre une session Garmin fraîchement connectée."""
-    st.session_state["garmin_api"] = api
-    st.session_state["garmin_athlete_id"] = athlete_id_of(api)
+    """Enregistre une session Garmin fraîchement connectée (pour tout le process)."""
+    adopt_session(api)
+    get_session_api()
 
 
 def drop_session() -> None:
     """Vide la session Streamlit (sans toucher au tokenstore)."""
-    for key in ("garmin_api", "garmin_athlete_id"):
+    for key in ("garmin_api", "garmin_athlete_id", "garmin_athlete_id_reliable"):
         st.session_state.pop(key, None)
 
 
 def get_athlete_id() -> int:
     return st.session_state.get("garmin_athlete_id", 0)
+
+
+def validated_plan_sessions():
+    """
+    Séances du plan Objectif validé pour la session — le seul chemin des pages.
+    Sous un id de repli (Garmin n'a pas confirmé le compte), le plan serait lu
+    dans un autre dossier : None, et un avis le dit (la séance du jour retombe
+    alors sur la logique interne, sans prétendre suivre le plan).
+    """
+    import goal_store
+
+    if not athlete_id_is_reliable():
+        st.caption(":material/sync_problem: Plan Objectif non lu : Garmin n'a pas encore confirmé "
+                   "ton compte. Réessai automatique dans la minute.")
+        return None
+    return goal_store.validated_sessions(get_athlete_id())
+
+
+def athlete_id_is_reliable() -> bool:
+    """
+    False quand l'id vient du repli (Garmin n'a pas donné le profileId) : il
+    ne faut alors RIEN écrire de durable (objectif, plan validé, journal), qui
+    partirait dans un autre dossier que celui relu au prochain démarrage.
+    """
+    return bool(st.session_state.get("garmin_athlete_id_reliable", False))
 
 
 def require_login() -> None:
@@ -79,6 +111,7 @@ def get_garmin_client() -> GarminClient:
     return GarminClient(
         api=st.session_state["garmin_api"],
         athlete_id=get_athlete_id(),
+        athlete_id_reliable=athlete_id_is_reliable(),
     )
 
 

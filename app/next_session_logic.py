@@ -194,11 +194,6 @@ def _pace_tss(runs: pd.DataFrame, threshold_sec: float) -> pd.Series:
     )
 
 
-def pace_tss(runs: pd.DataFrame, threshold_sec: float) -> pd.Series:
-    """TSS d'allure de chaque course — la formule exacte du PMC (page Activités)."""
-    return _pace_tss(runs, threshold_sec)
-
-
 def cross_training_factor(activities_df: pd.DataFrame, threshold_sec: float) -> float:
     """
     Facteur de conversion charge Garmin → TSS, calibré sur l'athlète.
@@ -227,6 +222,38 @@ def cross_training_factor(activities_df: pd.DataFrame, threshold_sec: float) -> 
     return min(max(k, CROSS_TRAINING_K_MIN), CROSS_TRAINING_K_MAX)
 
 
+def activity_tss(activities_df: pd.DataFrame, threshold_sec: float,
+                 calibration_df: pd.DataFrame | None = None) -> pd.Series:
+    """
+    TSS de CHAQUE activité, tel que le PMC le compte (même index que
+    `activities_df`) : course à l'allure (courses sans allure exclues), sport
+    croisé par sa charge Garmin × facteur, plafonnés à `_MAX_TSS_PER_ACTIVITY` ;
+    NaN pour ce que le PMC ignore.
+
+    `calibration_df` = l'historique sur lequel calibrer le facteur du sport
+    croisé. Une page qui affiche une vue filtrée DOIT passer l'historique
+    complet : calibré sur le filtre (« wing » seul → aucune course → facteur
+    de repli), une séance valait 50 ici et 200 dans le PMC.
+    """
+    if activities_df is None:
+        return pd.Series(dtype=float)
+    # Calcul par POSITION, index d'origine remis à la fin : un index dupliqué
+    # (concat sans ignore_index) mélangeait sinon les valeurs de deux activités.
+    frame = activities_df.reset_index(drop=True)
+    out = pd.Series(np.nan, index=frame.index, dtype=float)
+    if frame.empty:
+        return out.set_axis(activities_df.index)
+    runs = _running_rows(frame)
+    if not runs.empty:
+        out.loc[runs.index] = _pace_tss(runs, threshold_sec)
+    cross = _cross_training_rows(frame)
+    if not cross.empty:
+        k = cross_training_factor(frame if calibration_df is None else calibration_df, threshold_sec)
+        out.loc[cross.index] = (pd.to_numeric(cross["trainingLoad"], errors="coerce") * k).clip(
+            upper=_MAX_TSS_PER_ACTIVITY)
+    return out.set_axis(activities_df.index)
+
+
 def daily_tss(activities_df: pd.DataFrame, threshold_sec: float) -> pd.DataFrame:
     """
     TSS quotidien, décomposé en course et sport croisé.
@@ -237,24 +264,27 @@ def daily_tss(activities_df: pd.DataFrame, threshold_sec: float) -> pd.DataFrame
     l'application (Accueil, Forme, Prochaine sortie, Coach IA, Comparatif).
     """
     columns = ["day", "tss_run", "tss_cross", "tss"]
+    if activities_df is None or activities_df.empty:
+        return pd.DataFrame(columns=columns)
+    # Par position (index remis à plat), comme activity_tss : un index dupliqué
+    # ne doit ni lever ni additionner deux activités.
+    activities_df = activities_df.reset_index(drop=True)
     runs = _running_rows(activities_df)
     cross = _cross_training_rows(activities_df)
+    # Une seule formule par activité (activity_tss), partagée avec la page Activités.
+    per_activity = activity_tss(activities_df, threshold_sec) if not (runs.empty and cross.empty) else None
 
     parts = []
     if not runs.empty:
         parts.append(
-            _pace_tss(runs, threshold_sec)
+            per_activity.loc[runs.index]
             .groupby(runs["startTimeLocal"].dt.normalize())
             .sum()
             .rename("tss_run")
         )
     if not cross.empty:
-        k = cross_training_factor(activities_df, threshold_sec)
-        converted = (
-            pd.to_numeric(cross["trainingLoad"], errors="coerce") * k
-        ).clip(upper=_MAX_TSS_PER_ACTIVITY)
         parts.append(
-            converted
+            per_activity.loc[cross.index]
             .groupby(cross["startTimeLocal"].dt.normalize())
             .sum()
             .rename("tss_cross")
@@ -283,7 +313,8 @@ def compute_pmc_series(activities_df: pd.DataFrame, threshold_sec: float) -> pd.
     semaine.
 
     Conventions : `ctl`, `atl` et `tsb` sont les valeurs en fin de journée
-    (après TSS du jour), et `tsb` vaut exactement `ctl - atl` sur la même ligne.
+    (après TSS du jour), et `tsb` vaut exactement `round(ctl, 1) - round(atl, 1)`
+    sur la même ligne — la soustraction des deux chiffres affichés.
     C'est la SEULE définition du TSB dans l'application : `compute_tsb` en
     dérive, la courbe de `tab_charge` la trace (le TSB est donc bien l'écart
     vertical entre les courbes CTL et ATL) et la page Comparatif la reprend.
@@ -319,7 +350,11 @@ def compute_pmc_series(activities_df: pd.DataFrame, threshold_sec: float) -> pd.
         records.append({
             "date": d, "tss": tss,
             "tss_run": float(row["tss_run"]), "tss_cross": float(row["tss_cross"]),
-            "ctl": ctl_v, "atl": atl_v, "tsb": ctl_v - atl_v,
+            # TSB = différence des CTL/ATL ARRONDIS affichés : c'est l'unique
+            # définition, relue telle quelle par compute_tsb, tab_charge, le
+            # Comparatif et le Calendrier (sinon 40,04 / 30,05 donnait +9,9 ici
+            # et 10,0 là).
+            "ctl": ctl_v, "atl": atl_v, "tsb": round(round(ctl_v, 1) - round(atl_v, 1), 1),
         })
 
     return pd.DataFrame(records)
@@ -404,14 +439,9 @@ def compute_tsb(activities_df: pd.DataFrame) -> tuple[float, float, float]:
     if pmc.empty:
         return 0.0, 0.0, 0.0
     last = pmc.iloc[-1]
-    # On lit le TSB de la série plutôt que de le recalculer : un seul chiffre
-    # de fraîcheur entre cette fonction, la courbe PMC et la page Comparatif.
-    # Le TSB se calcule à partir du CTL et de l'ATL déjà arrondis, sinon le
-    # TSB affiché ne correspond plus exactement à la soustraction des deux
-    # autres chiffres affichés (ex. 82 / 30,0 mais TSB à 51,6 au lieu de 52,0).
-    ctl = round(float(last["ctl"]), 1)
-    atl = round(float(last["atl"]), 1)
-    return ctl, atl, round(ctl - atl, 1)
+    # Le TSB est RELU dans la série, jamais recalculé : compute_pmc_series le
+    # pose déjà comme la différence des CTL/ATL arrondis (82 / 30,0 → 52,0).
+    return round(float(last["ctl"]), 1), round(float(last["atl"]), 1), float(last["tsb"])
 
 
 def recommend_session(

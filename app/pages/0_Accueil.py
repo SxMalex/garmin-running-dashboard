@@ -41,6 +41,7 @@ from ui_helpers import (
     render_activity_map,
     render_garmin_attribution,
     require_login,
+    validated_plan_sessions,
 )
 from ui_mode import explain, is_pro
 from ui_theme import (
@@ -109,7 +110,7 @@ verdict = compute_forme_verdict(tsb, hrv_status, sleep_score)
 # « Pourquoi » par défaut : les facteurs du verdict, pas sa phrase (déjà en titre).
 _why = " · ".join(verdict["reasons"]) or verdict["headline"]
 
-goal_sessions = goal_store.validated_sessions(_athlete_id)
+goal_sessions = validated_plan_sessions()
 rec = _coach = _today_session = None
 if len(running_df) >= 3:
     # Même chaîne que Prochaine sortie et le MCP : Run Coach > plan Objectif

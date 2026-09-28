@@ -148,20 +148,257 @@ def clear_tokens() -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
-def athlete_id_of(api: Garmin) -> int:
-    """profileId Garmin de la session — sert à cloisonner le cache disque."""
+# ---------------------------------------------------------------------------
+# Session partagée par le process (le dashboard est mono-utilisateur)
+# ---------------------------------------------------------------------------
+# Un objet Garmin par onglet posait deux problèmes (revue PR #1) :
+# - garminconnect 0.3.6 réécrit garmin_tokens.json à chaque rafraîchissement
+#   (`_tokenstore_path`) : un onglet resté ouvert recréait le fichier après une
+#   déconnexion, et le visiteur suivant était reconnecté ;
+# - chaque onglet rafraîchissait le même refresh token de son côté.
+# D'où UNE session par process : les onglets la partagent, son rafraîchissement
+# est sérialisé, et la déconnexion la neutralise (plus de chemin de réécriture,
+# plus de jetons en mémoire) avant d'effacer le tokenstore.
+# Aucun appel réseau n'a lieu sous `_SESSION_LOCK` (le dictionnaire seulement) :
+# sinon un onglet qui reprend ou revérifie la session figeait tous les autres.
+ATHLETE_ID_ATTEMPTS = 3
+ATHLETE_ID_RETRY_S = 1.0
+ATHLETE_ID_RECHECK_S = 60.0     # un id de repli est retenté (en arrière-plan) au plus 1×/min
+RESUME_RETRY_S = 10.0           # une reprise en échec (Garmin injoignable) n'est pas rejouée à chaque run
+_SESSION_LOCK = threading.RLock()
+_RESUME_LOCK = threading.Lock()
+# `generation` : incrémentée à chaque déconnexion. Une reprise lancée avant ne
+# peut plus s'installer après (elle serait une session vivante, jamais
+# neutralisée, qui recréerait le tokenstore au prochain rafraîchissement).
+_SESSION: dict = {"api": None, "athlete_id": 0, "reliable": False, "checked_at": 0.0,
+                  "resume_failed_at": None, "recheck": None, "generation": 0}
+
+
+def _wipe_tokens(client) -> None:
+    # Le chemin d'abord : un dump concurrent n'a alors plus où écrire.
+    for attr in ("_tokenstore_path", "di_token", "di_refresh_token", "jwt_web"):
+        try:
+            setattr(client, attr, None)
+        except Exception:
+            pass
+
+
+def _serialize_refresh(api) -> None:
+    """
+    Un seul rafraîchissement de jetons à la fois sur l'objet partagé, et un
+    seul par expiration : un fil qui attendait le verrou pendant qu'un autre
+    rafraîchissait trouve un jeton neuf et n'en redemande pas (six onglets à
+    l'expiration = un appel, pas six). Après une déconnexion, plus rien.
+    """
+    client = getattr(api, "client", None)
+    original = getattr(client, "_refresh_session", None) if client is not None else None
+    if original is None or getattr(client, "_gd_refresh_lock", None) is not None:
+        return
+    lock = threading.Lock()
+
+    def _locked(*args, **kwargs):
+        before = getattr(client, "di_token", None)
+        with lock:
+            if getattr(client, "_gd_neutralized", False):
+                return None
+            if before is not None and getattr(client, "di_token", None) != before:
+                return None                     # un autre fil vient de le faire
+            result = original(*args, **kwargs)
+            if getattr(client, "_gd_neutralized", False):
+                _wipe_tokens(client)            # déconnexion survenue pendant l'appel
+            return result
+
+    client._refresh_session = _locked
+    client._gd_refresh_lock = lock
+
+
+def _neutralize(api) -> None:
+    """
+    Coupe tout ce qu'un objet Garmin abandonné pourrait encore écrire ou envoyer,
+    SANS attendre : le drapeau et le chemin du tokenstore tombent tout de suite ;
+    un rafraîchissement en vol efface ses jetons neufs à son retour (wrapper de
+    `_serialize_refresh`). Attendre son verrou figeait l'onglet jusqu'à 30 s et
+    ouvrait une fenêtre où une reprise relisait le tokenstore encore présent.
+    """
+    client = getattr(api, "client", None)
+    if client is None:
+        return
     try:
-        profile = api.client.connectapi("/userprofile-service/socialProfile") or {}
-        for key in ("profileId", "id", "userProfileId"):
-            if profile.get(key):
-                return int(profile[key])
+        client._gd_neutralized = True
     except Exception:
         pass
-    # Repli stable : hash du display_name (UUID) de la session
+    _wipe_tokens(client)
+
+
+def _athlete_ids_path() -> Path:
+    import goal_store                   # DATA_DIR relu à chaque appel (tests, MCP)
+    return goal_store.data_dir() / "athlete_ids.json"
+
+
+def _read_athlete_ids() -> dict:
+    """Fichier absent ou corrompu (écriture interrompue) → {} : il sera réécrit sain."""
+    try:
+        data = json.loads(_athlete_ids_path().read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _remember_athlete_id(display_name: str, athlete_id: int) -> None:
+    if not display_name:
+        return
+    try:
+        known = _read_athlete_ids()
+        if known.get(display_name) != athlete_id:
+            known[display_name] = athlete_id
+            path = _athlete_ids_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Atomique : le fichier est partagé avec le serveur MCP (même DATA_DIR).
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            tmp.write_text(json.dumps(known))
+            os.replace(tmp, path)
+    except Exception as e:                      # jamais bloquant
+        logger.warning("Identifiant d'athlète non mémorisé : %s", e)
+
+
+def _known_athlete_id(display_name: str) -> Optional[int]:
+    try:
+        value = _read_athlete_ids().get(display_name)
+        return int(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def resolve_athlete_id(api: Garmin) -> tuple[int, bool]:
+    """
+    (profileId Garmin, fiable ?). Plusieurs tentatives, puis l'id déjà résolu
+    pour ce compte lors d'une connexion précédente ; en dernier recours le hash
+    du display_name, marqué NON fiable : il ne doit pas servir à ranger des
+    données durables (objectif, plan, journal), qui partiraient dans un autre
+    dossier qu'au prochain démarrage. Réseau : à appeler hors `_SESSION_LOCK`.
+    """
     display_name = getattr(api, "display_name", "") or ""
+    for attempt in range(ATHLETE_ID_ATTEMPTS):
+        try:
+            profile = api.client.connectapi("/userprofile-service/socialProfile") or {}
+            for key in ("profileId", "id", "userProfileId"):
+                if profile.get(key):
+                    athlete_id = int(profile[key])
+                    _remember_athlete_id(display_name, athlete_id)
+                    return athlete_id, True
+            break                               # réponse sans id : réessayer n'y changera rien
+        except Exception as e:
+            logger.info("socialProfile indisponible (essai %d) : %s", attempt + 1, e)
+            if attempt < ATHLETE_ID_ATTEMPTS - 1:
+                time.sleep(ATHLETE_ID_RETRY_S * (attempt + 1))
+    known = _known_athlete_id(display_name)
+    if known:
+        return known, True
     if display_name:
-        return int(hashlib.md5(display_name.encode()).hexdigest()[:8], 16)
-    return 0
+        return int(hashlib.md5(display_name.encode()).hexdigest()[:8], 16), False
+    return 0, False
+
+
+def adopt_session(api: Garmin, generation: Optional[int] = None) -> bool:
+    """
+    Fait d'`api` LA session du process. `generation` (reprise) : la génération
+    lue avant de relire le tokenstore — si une déconnexion est passée entre-temps,
+    la reprise est refusée et l'objet neutralisé. Connexion explicite : None.
+    Retourne True si la session est installée.
+    """
+    _serialize_refresh(api)
+    athlete_id, reliable = resolve_athlete_id(api)          # réseau : hors verrou
+    with _SESSION_LOCK:
+        if generation is not None and generation != _SESSION["generation"]:
+            stale, old = api, None
+        else:
+            stale, old = None, _SESSION["api"]
+            _SESSION.update(api=api, athlete_id=athlete_id, reliable=reliable,
+                            checked_at=time.monotonic(), resume_failed_at=None)
+    if stale is not None:
+        _neutralize(stale)
+        return False
+    if old is not None and old is not api:
+        _neutralize(old)
+    return True
+
+
+def shared_session() -> Optional[Garmin]:
+    """
+    La session du process, reprise du tokenstore au premier besoin ; None si
+    aucune. Session en place : aucune attente. Reprise : une seule à la fois
+    (les autres onglets l'attendent, ils n'ont rien à afficher sans elle) ;
+    en échec, pas de nouvel essai avant `RESUME_RETRY_S`.
+    """
+    with _SESSION_LOCK:
+        if _SESSION["api"] is not None:
+            return _SESSION["api"]
+        failed_at = _SESSION["resume_failed_at"]
+    if failed_at is not None and time.monotonic() - failed_at < RESUME_RETRY_S:
+        return None
+    with _RESUME_LOCK:
+        with _SESSION_LOCK:
+            if _SESSION["api"] is not None:                # reprise faite par un autre onglet
+                return _SESSION["api"]
+            generation = _SESSION["generation"]
+        api = resume_session()
+        if api is None:
+            with _SESSION_LOCK:
+                _SESSION["resume_failed_at"] = time.monotonic()
+            return None
+        return api if adopt_session(api, generation) else None
+
+
+def _recheck_athlete_id(api) -> None:
+    try:
+        athlete_id, reliable = resolve_athlete_id(api)
+        with _SESSION_LOCK:
+            if reliable and _SESSION["api"] is api:       # la session n'a pas changé entre-temps
+                _SESSION.update(athlete_id=athlete_id, reliable=True)
+    finally:
+        with _SESSION_LOCK:
+            if _SESSION["recheck"] is threading.current_thread():   # pas celui d'une session plus récente
+                _SESSION["recheck"] = None
+
+
+def shared_athlete_id() -> tuple[int, bool]:
+    """
+    (id, fiable) de la session, sans jamais attendre le réseau : un id de repli
+    est retenté en arrière-plan au plus une fois par minute, et les pages
+    retrouvent le bon dossier dès que Garmin répond.
+    """
+    with _SESSION_LOCK:
+        api = _SESSION["api"]
+        if (api is not None and not _SESSION["reliable"] and _SESSION["recheck"] is None
+                and time.monotonic() - _SESSION["checked_at"] >= ATHLETE_ID_RECHECK_S):
+            _SESSION["checked_at"] = time.monotonic()
+            thread = threading.Thread(target=_recheck_athlete_id, args=(api,), daemon=True,
+                                      name="athlete-id-recheck")
+            _SESSION["recheck"] = thread
+            thread.start()
+        return _SESSION["athlete_id"], _SESSION["reliable"]
+
+
+def reset_session_state() -> None:
+    """Oublie la session du process sans rien neutraliser (tests)."""
+    with _SESSION_LOCK:
+        _SESSION.update(api=None, athlete_id=0, reliable=False, checked_at=0.0,
+                        resume_failed_at=None, recheck=None, generation=0)
+
+
+def end_session() -> None:
+    """
+    Déconnexion pour tous les onglets, dans cet ordre et sous le verrou : plus de
+    session, génération suivante (toute reprise en vol sera refusée), objet
+    neutralisé, tokenstore effacé. Rien d'autre ne peut s'intercaler.
+    """
+    with _SESSION_LOCK:
+        api = _SESSION["api"]
+        _SESSION.update(api=None, athlete_id=0, reliable=False, resume_failed_at=None,
+                        generation=_SESSION["generation"] + 1)
+        if api is not None:
+            _neutralize(api)
+        clear_tokens()
 
 
 # ---------------------------------------------------------------------------
@@ -529,9 +766,15 @@ class GarminClient:
     les pages et la logique métier restent inchangées.
     """
 
-    def __init__(self, api: Garmin, athlete_id: Optional[int] = None):
+    def __init__(self, api: Garmin, athlete_id: Optional[int] = None,
+                 athlete_id_reliable: bool = True):
         self.api = api
-        self.athlete_id = athlete_id if athlete_id is not None else athlete_id_of(api)
+        if athlete_id is not None:
+            # L'appelant qui fournit l'id dit s'il est fiable (id de repli de la session ?)
+            self.athlete_id, self.athlete_id_reliable = athlete_id, athlete_id_reliable
+        else:
+            # False = id de repli : ne rien ranger de durable dessous (cf. resolve_athlete_id)
+            self.athlete_id, self.athlete_id_reliable = resolve_athlete_id(api)
 
     # ------------------------------------------------------------------
     # Activités

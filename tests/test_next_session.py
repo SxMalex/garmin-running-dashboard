@@ -35,6 +35,11 @@ from next_session_logic import (
 # _parse_ors_route
 # ===========================================================================
 
+
+def _displayed_tsb(row) -> float:
+    """TSB = différence des CTL/ATL arrondis au dixième (la seule définition)."""
+    return round(round(float(row["ctl"]), 1) - round(float(row["atl"]), 1), 1)
+
 class TestParseOrsRoute:
     def test_valid_response(self, sample_ors_geojson):
         result = _parse_ors_route(sample_ors_geojson)
@@ -566,9 +571,7 @@ class TestComputePmcSeries:
         # IF=1, duration_h=1 → tss=100
         assert result.iloc[0]["tss"] == pytest.approx(100.0)
         # TSB = CTL - ATL sur la même ligne : négatif le jour d'une séance
-        assert result.iloc[0]["tsb"] == pytest.approx(
-            result.iloc[0]["ctl"] - result.iloc[0]["atl"]
-        )
+        assert result.iloc[0]["tsb"] == _displayed_tsb(result.iloc[0])
         assert result.iloc[0]["tsb"] < 0
         # Après la TSS, ATL et CTL sont strictement positifs
         assert result.iloc[0]["ctl"] > 0
@@ -601,22 +604,40 @@ class TestComputePmcSeries:
         assert not result.empty
         assert result.iloc[-1]["date"] == pd.Timestamp(tomorrow).normalize()
         assert result.iloc[-1]["tss"] > 0
-        assert result.iloc[-1]["tsb"] == pytest.approx(
-            result.iloc[-1]["ctl"] - result.iloc[-1]["atl"]
-        )
+        assert result.iloc[-1]["tsb"] == _displayed_tsb(result.iloc[-1])
 
     def test_tsb_est_toujours_ctl_moins_atl(self, make_running_df):
         """
         Invariant de la seule définition du TSB dans l'app : sur CHAQUE jour de
-        la série, tsb == ctl - atl. C'est ce qui garantit un chiffre unique
-        entre la métrique du haut de la page Forme, celle de tab_charge, la
-        courbe PMC et la page Comparatif — et que le TSB tracé soit bien
-        l'écart vertical entre les courbes CTL et ATL.
+        la série, tsb == round(ctl, 1) - round(atl, 1) — la soustraction des
+        deux chiffres affichés. C'est ce qui garantit un chiffre unique entre la
+        métrique du haut de la page Forme, celle de tab_charge, la courbe PMC et
+        la page Comparatif ; l'écart à ctl - atl brut reste sous 0,1.
         """
         df = make_running_df(n=25, days_apart=2, with_location=False)
         result = _compute_pmc_series(df, threshold_sec=330.0)
         assert not result.empty
-        assert ((result["tsb"] - (result["ctl"] - result["atl"])).abs() < 1e-9).all()
+        assert all(r["tsb"] == _displayed_tsb(r) for _, r in result.iterrows())
+        assert ((result["tsb"] - (result["ctl"] - result["atl"])).abs() <= 0.1 + 1e-9).all()
+
+    def test_tsb_du_haut_de_page_egale_celui_de_l_onglet_charge(self, monkeypatch):
+        """
+        Revue #1 : sur une limite d'arrondi, compute_tsb (soustraction des arrondis)
+        et tab_charge (last["tsb"] brut) donnaient deux chiffres. La série est
+        construite pour tomber sur cette limite : le test échoue si l'une des deux
+        définitions revient.
+        """
+        import next_session_logic
+        from pmc_edge import rounding_edge_daily
+        daily, c, a = rounding_edge_daily(pd.Timestamp.now())
+        monkeypatch.setattr(next_session_logic, "daily_tss", lambda df, thr: daily.copy())
+        df = pd.DataFrame([{"startTimeLocal": pd.Timestamp.now(), "activityType": "running",
+                            "distance_km": 10.0, "duration_min": 55.0, "avgPace_sec": 330.0}])
+        last = _compute_pmc_series(df, 330).iloc[-1]
+        ctl, atl, tsb = _compute_tsb(df)
+        assert (ctl, atl) == (round(c, 1), round(a, 1))
+        assert tsb == last["tsb"] == round(round(c, 1) - round(a, 1), 1)
+        assert tsb != round(c - a, 1)                    # la série est bien sur la limite
 
     def test_compute_tsb_reprend_le_tsb_de_la_serie(self, make_running_df):
         """compute_tsb ne doit pas recalculer sa propre fraîcheur."""
@@ -869,7 +890,7 @@ class TestPmcAvecSportCroise:
         assert (pmc["tss"] == pmc["tss_run"] + pmc["tss_cross"]).all()
         assert pmc["tss_cross"].sum() > 0
         # Le TSB reste l'écart vertical exact entre CTL et ATL
-        assert (pmc["tsb"] - (pmc["ctl"] - pmc["atl"])).abs().max() < 1e-9
+        assert all(r["tsb"] == _displayed_tsb(r) for _, r in pmc.iterrows())
 
     def test_seuil_de_reference_ignore_les_autres_sports(self, make_running_df):
         """Une sortie vélo de 8 km ne doit pas déplacer l'allure seuil."""

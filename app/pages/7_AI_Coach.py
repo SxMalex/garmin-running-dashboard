@@ -9,7 +9,6 @@ from datetime import date, timedelta
 import streamlit as st
 import pandas as pd
 
-import goal_store
 from coach_logic import nutrition_focus, target_label
 from forme_logic import hrv_label, parse_recovery
 from formatting import seconds_to_pace_str, weekday_fr
@@ -22,6 +21,7 @@ from ui_helpers import (
     render_garmin_attribution,
     get_athlete_id,
     require_login,
+    validated_plan_sessions,
 )
 
 st.set_page_config(
@@ -379,7 +379,7 @@ if _is_nutrition:
     with st.spinner("Préparation du contexte alimentaire…"):
         _coach = cached_coach_context(_athlete_id)
         context = _format_nutrition_context(get_garmin_client(), _coach,
-                                        goal_store.validated_sessions(_athlete_id))
+                                        validated_plan_sessions())
     if _diet_notes.strip():
         context += f"\n\n=== Mes contraintes ===\n{_diet_notes.strip()}"
     system_prompt, request = _NUTRITION_SYSTEM_PROMPT, _NUTRITION_REQUEST

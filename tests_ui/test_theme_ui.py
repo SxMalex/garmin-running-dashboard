@@ -125,7 +125,6 @@ def test_logout_clears_tokens_and_shows_login(logged_in, monkeypatch):
     cleared = []
     # main.py importe clear_tokens depuis garmin_client à chaque run.
     monkeypatch.setattr(garmin_client, "clear_tokens", lambda: cleared.append(True))
-    monkeypatch.setattr(ui_helpers, "resume_session", lambda: None)
     at = logged_in("main.py").run()
     at.button(key="gd-logout").click().run()
     assert not at.exception, [e.value for e in at.exception]

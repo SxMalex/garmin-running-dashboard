@@ -13,12 +13,11 @@ import plotly.graph_objects as go
 import streamlit as st
 from datetime import date
 
-import goal_store
 from coach_logic import (
     target_label,
 )
 from formatting import map_zoom, md_escape, seconds_to_pace_str, weekday_fr
-from forme_logic import TSB_FATIGUE, TSB_FRESH, hrv_label, parse_recovery
+from forme_logic import hrv_label, parse_recovery, tsb_metric_delta
 from next_session_logic import (
     SESSION_TYPES,
     parse_ors_route as _parse_ors_route,
@@ -35,6 +34,7 @@ from ui_helpers import (
     render_garmin_attribution,
     get_athlete_id,
     require_login,
+    validated_plan_sessions,
 )
 
 import chart_theme as ct
@@ -206,7 +206,7 @@ _coach = cached_coach_context(_athlete_id, _today.isoformat())
 # `load_df=df` : la fraîcheur qui choisit la séance intègre le sport croisé,
 # comme le TSB affiché sur l'Accueil et la page Forme.
 _today_session = todays_session(df, _hrv_status, _sleep_score, _coach,
-                                goal_store.validated_sessions(_athlete_id))
+                                validated_plan_sessions())
 rec = _today_session["rec"]
 s = SESSION_TYPES[rec["session_key"]]
 rec["session"] = s
@@ -352,12 +352,7 @@ col1.metric("CTL — Forme", f"{rec['ctl']:.1f}", help="Fitness chronique sur 42
 col2.metric("ATL — Fatigue", f"{rec['atl']:.1f}", help="Fatigue aiguë sur 7 jours")
 
 tsb = rec["tsb"]
-if tsb > TSB_FRESH:
-    tsb_delta, tsb_dc = "Bien reposé", "normal"
-elif tsb >= TSB_FATIGUE:
-    tsb_delta, tsb_dc = "Charge normale", "off"
-else:
-    tsb_delta, tsb_dc = "Récupération nécessaire", "inverse"
+tsb_delta, tsb_dc = tsb_metric_delta(tsb)
 
 col3.metric("TSB — Fraîcheur", f"{tsb:.1f}", delta=tsb_delta, delta_color=tsb_dc)
 col4.metric("Repos depuis", f"{rec['days_since']} j", help="Jours depuis la dernière sortie")

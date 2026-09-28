@@ -74,6 +74,20 @@ def _activities(gc) -> pd.DataFrame:
     return gc.get_activities(limit=ACTIVITY_HISTORY_LIMIT)
 
 
+_UNCONFIRMED = ("Compte Garmin non confirmé (profileId indisponible) : le plan Objectif du "
+                "dashboard n'est pas lu, pour ne pas le chercher dans un autre dossier. "
+                "Réessaie dans une minute.")
+
+
+def _reliable(gc) -> bool:
+    return getattr(gc, "athlete_id_reliable", True)
+
+
+def _validated_sessions(gc):
+    """Plan Objectif validé — jamais lu sous un id d'athlète de repli (même règle que les pages)."""
+    return goal_store.validated_sessions(gc.athlete_id) if _reliable(gc) else None
+
+
 def daily_briefing(gc, today: date | None = None) -> dict:
     """Verdict du jour : fraîcheur, récupération, séance (plan Garmin d'abord), risque."""
     today = today or date.today()
@@ -87,7 +101,7 @@ def daily_briefing(gc, today: date | None = None) -> dict:
     # Même garde que l'Accueil (≥ 3 courses) : sinon séance annoncée ici et
     # pas sur la page, voire plantage sur un historique vide.
     session = (todays_session(df, recovery["hrv_status"], recovery["sleep_score"], coach,
-                              goal_store.validated_sessions(gc.athlete_id))
+                              _validated_sessions(gc))
                if n_runs >= 3 else None)
     rec = session["rec"] if session else None
     task = (rec or {}).get("coach_task")
@@ -117,6 +131,7 @@ def daily_briefing(gc, today: date | None = None) -> dict:
                         "phase": (coach.get("phase") or {}).get("label"),
                         "days_to_event": coach.get("days_to_event")} if coach else None),
         "load_risk": load_risk(pmc) if pmc is not None else {},
+        "account_note": None if _reliable(gc) else _UNCONFIRMED,
         "note": "Priorité de la séance : plan Garmin Run Coach s'il est actif (la montre le "
                 "suit, le dashboard ne réécrit rien), sinon plan Objectif validé dans le "
                 "dashboard (source « plan_objectif »), sinon recommandation calculée depuis "
@@ -206,6 +221,8 @@ def current_goal(gc) -> dict:
     aperçu recalculé, marqué comme tel.
     """
     from workout_export import plan_id_of
+    if not _reliable(gc):
+        return {"goal": None, "note": _UNCONFIRMED}       # « aucun objectif » serait faux
     doc = goal_store.load(gc.athlete_id)
     goal, prefs = doc.get("goal"), doc.get("prefs") or {}
     if not goal:

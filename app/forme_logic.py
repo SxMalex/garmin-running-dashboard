@@ -10,6 +10,17 @@ _HRV_DEGRADED = {"UNBALANCED", "LOW", "POOR"}
 # l'Accueil, les métriques de Forme / Prochaine sortie et le glossaire.
 TSB_FRESH = 5.0      # au-dessus : frais
 TSB_FATIGUE = -20.0  # en dessous : fatigue accumulée
+
+
+def tsb_metric_delta(tsb: float) -> tuple[str, str]:
+    """(libellé, delta_color de st.metric) de la fraîcheur : le même partout
+    (Forme, onglet Charge, Prochaine sortie) — trois seuils en dur ailleurs
+    donnaient trois verdicts pour un même TSB."""
+    if tsb > TSB_FRESH:
+        return "Bien reposé", "normal"
+    if tsb >= TSB_FATIGUE:
+        return "Charge normale", "off"
+    return "Récupération nécessaire", "inverse"
 # Statuts HRV Garmin → libellé français. « NONE » (pas encore de baseline, les
 # premières semaines ou après une coupure) n'est PAS un statut : parse_recovery
 # le ramène à None, sinon il passait pour « HRV dans ta baseline ».

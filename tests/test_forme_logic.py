@@ -164,3 +164,13 @@ def test_hrv_labels_are_french():
     assert hrv_label(None) is None and hrv_label("") is None
     v = compute_forme_verdict(tsb=0.0, hrv_status="LOW", sleep_score=None)
     assert "HRV basse" in v["reasons"][1]
+
+
+def test_tsb_label_is_the_same_everywhere_at_the_boundaries():
+    """Revue #1 : trois jeux de seuils en dur (Forme, onglet Charge, Accueil) donnaient trois verdicts."""
+    from forme_logic import TSB_FATIGUE, TSB_FRESH, tsb_metric_delta
+    assert tsb_metric_delta(TSB_FRESH + 0.1) == ("Bien reposé", "normal")
+    assert tsb_metric_delta(TSB_FRESH) == ("Charge normale", "off")
+    assert tsb_metric_delta(TSB_FATIGUE) == ("Charge normale", "off")
+    assert tsb_metric_delta(TSB_FATIGUE - 0.1) == ("Récupération nécessaire", "inverse")
+    assert tsb_metric_delta(30)[0] == "Bien reposé"            # plus de « Sous-entraîné » d'un seul onglet
