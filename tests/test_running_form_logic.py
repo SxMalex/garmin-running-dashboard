@@ -167,3 +167,13 @@ def test_spike_text_says_when_the_reference_is_a_planned_session():
                for d, km in ((2, 8.5), (9, 12.0))]
     sig = spike_signal(run_spike(df, planned, TODAY))
     assert "séance prévue avant" in sig["body"] and "plus longue sortie du mois" not in sig["body"]
+
+
+def test_planned_sessions_without_any_run_history_compare_to_each_other():
+    """Premier plan, aucune course encore : la 2e séance se compare à la 1re (référence « prévue »)."""
+    df = pd.DataFrame({"startTimeLocal": [TODAY - pd.Timedelta(days=2)], "activityType": "cycling",
+                       "distance_km": [30.0], "avgPace_sec": 0.0, "activityName": "vélo"})
+    planned = [{"date": (TODAY + pd.Timedelta(days=d)).date().isoformat(), "kind": "run", "distance_km": km}
+               for d, km in ((1, 5.0), (3, 10.0))]
+    p = run_spike(df, planned, TODAY)["planned"]
+    assert p["km"] == 10 and p["ref_km"] == 5 and p["ref_source"] == "planned" and p["level"] == "high"

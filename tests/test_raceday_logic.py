@@ -182,3 +182,20 @@ def test_official_gpx_reuses_the_saved_goal():
     assert goal_distance_for(21.3, "Semi-marathon", DISTANCES) == "Semi-marathon"
     assert goal_distance_for(23.5, "Semi-marathon", DISTANCES) is None     # autre parcours
     assert goal_distance_for(10.0, None, DISTANCES) is None
+
+
+def test_xml_error_after_the_prepass_is_still_a_gpx_error(monkeypatch):
+    """Défense : si ET refusait ce qu'expat a accepté, la page recevrait une GpxError, pas une trace."""
+    import raceday_logic
+    def boom(data):
+        raise raceday_logic.ET.ParseError("syntax error")
+    monkeypatch.setattr(raceday_logic.ET, "fromstring", boom)
+    with pytest.raises(GpxError, match="illisible"):
+        parse_gpx(_gpx())
+
+
+def test_km_profile_of_a_too_short_track_is_refused():
+    track = pd.DataFrame({"lat": [43.6, 43.6001], "lon": [1.44, 1.44], "ele": [150.0, 150.0],
+                          "dist": [0.0, 11.0]})
+    with pytest.raises(GpxError, match="inexploitable"):
+        km_profile(track)

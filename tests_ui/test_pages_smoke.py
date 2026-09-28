@@ -243,3 +243,24 @@ def test_ai_coach_rest_day_is_not_a_session_to_keep(logged_in, monkeypatch):
     at = logged_in("7_AI_Coach.py", ai_slot_on=True, ai_slot_date=slot, ai_slot_time=time(7, 0)).run()
     prompt = at.code[0].value
     assert "prévoit du repos" in prompt and "ne la remplace pas" not in prompt
+
+
+def test_ai_coach_slot_with_the_objectif_plan(logged_in, monkeypatch):
+    """Branche plan Objectif (sans Run Coach) : la séance validée du jour est transmise à l'IA."""
+    from datetime import date, time, timedelta
+    import goal_store
+    import ui_helpers
+    slot = date.today() + timedelta(days=3)
+    sessions = [{"date": slot.isoformat(), "kind": "tempo", "title": "Tempo 3 × 2 km",
+                 "distance_km": 10, "target": "4:50/km"},
+                {"date": slot.isoformat(), "kind": "strength", "title": "Renfo", "duration_min": 25}]
+    monkeypatch.setattr(ui_helpers, "cached_coach_context", lambda athlete_id, cdate=None: None)
+    monkeypatch.setattr(goal_store, "validated_sessions", lambda athlete_id, today=None: sessions)
+    at = logged_in("7_AI_Coach.py", ai_slot_on=True, ai_slot_date=slot, ai_slot_time=time(12, 0)).run()
+    assert not at.exception, [e.value for e in at.exception]
+    prompt = at.code[0].value
+    assert "Tempo 3 × 2 km — course, 10 km (4:50/km) (plan Objectif validé)" in prompt
+    assert "Renfo — renforcement, 25 min" in prompt and "ne la remplace pas" in prompt
+    empty_day = logged_in("7_AI_Coach.py", ai_slot_on=True, ai_slot_date=slot + timedelta(days=1),
+                          ai_slot_time=time(12, 0)).run()
+    assert "Rien de prévu ce jour-là par le plan Objectif" in empty_day.code[0].value
