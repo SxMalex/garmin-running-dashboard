@@ -37,7 +37,10 @@ l'API Garmin non officielle s'authentifie par identifiants, pas par OAuth multi-
   progressive** par défaut (départ retenu, fin plus rapide, temps final inchangé)
   ou régulière, ta gestion habituelle lue sur tes 3 dernières courses, objectif
   corrigé de la chaleur prévue (le bracelet peut s'y caler), ravitaillement placé
-  au kilomètre, bracelet d'allure en CSV
+  au kilomètre, bracelet d'allure en CSV. GPX robuste : trace ou route, variantes
+  d'un même départ et tours d'une boucle reconnus (et signalés), fichiers
+  invalides ou hostiles refusés proprement — rejoué sur des cartes de test
+  (`tests/fixtures/gpx/`)
 - **Calendrier** — les sorties mois par mois (courses, entraînements ou les
   deux) ; clique deux jours pour **comparer deux sorties** : allure corrigée de la
   pente et de la chaleur (Riegel entre deux distances), gestion 2e / 1re moitié,
@@ -340,6 +343,7 @@ gar/
 │   ├── test_progression_logic.py # Records, Riegel, historique prédictions
 │   ├── test_comparatif_logic.py  # Alignement des années, cumuls, instantanés
 │   ├── test_compare_logic.py     # Calendrier, allure corrigée, bloc d'avant, verdict
+│   ├── test_gpx_cards.py         # Cartes GPX réalistes (fixtures/gpx/make_cards.py)
 │   ├── test_coach_logic.py       # Plan Garmin Run Coach, cibles, fusion reco
 │   ├── test_formatting.py        # decimate, map_zoom
 │   ├── test_next_session.py      # Logique TSB / recommandation / GPX / ACWR

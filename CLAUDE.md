@@ -251,15 +251,41 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   MAD, planchers de dispersion) ; un signal compte s'il dévie ≥ 2 σ ET d'un écart
   physiologique (FC +4 bpm, respiration +1/min, HRV −10 %, SpO2 −2 pts). Un signal
   ISOLÉ n'alerte que s'il persiste 2 nuits ou dépasse 3 σ (sinon, rejoué sur 60
-  nuits réelles, la carte s'allumait une nuit sur sept). Signal absent ou norme
+  nuits réelles, la carte s'allumait une nuit sur sept) — un signal ignoré perd
+  `flagged` (statut `ignored`), sinon la carte et le MCP le listaient sous un
+  verdict « rien ». Sur l'Accueil, la carte santé ne passe en tête qu'au niveau
+  ≥ 1 (verte, elle chassait une vraie alerte de la coupe à 4). Signal absent ou norme
   < 10 nuits : dit, pas inventé. `load_health_frame` = chemin unique Accueil / MCP.
 - **Foulée** (`running_form_logic`) : toujours à allure égale (résidu d'un modèle
   linéaire en vitesse, 6 semaines vs 12 précédentes, ≥ 5 sorties par fenêtre).
   Colonnes de dynamique **optionnelles** du DataFrame (`garmin_client.DYNAMICS_COLUMNS`,
   NaN sans capteur) : le contrat des 19 colonnes reste intact. Pic de sortie :
-  ratio à la plus longue des 30 jours, > 1,10 à surveiller, > 1,30 élevé.
-- **Jour de course** (`raceday_logic`) : GPX refusé s'il contient DOCTYPE/ENTITY ou
-  dépasse 5 Mo (XML fourni par l'utilisateur) ; allure = coût Minetti, gain en
+  ratio à la plus longue des 30 jours, > 1,10 à surveiller, > 1,30 élevé (au
+  pour-cent près). Une séance PRÉVUE se compare aussi à la plus longue séance
+  prévue avant elle (un plan à +10 %/semaine ne se signale pas contre lui-même) ;
+  les séances prévues viennent de `planned_runs` = la même source que la semaine
+  de l'Accueil (Run Coach s'il pilote, distance estimée à l'allure médiane).
+  Reprise après ≥ 30 jours sans courir (avec un historique plus ancien) : une
+  sortie ≥ 8 km, faite ou prévue, est signalée (`level = "comeback"`).
+- **Jour de course** (`raceday_logic`) : GPX de plus de 5 Mo refusé (et
+  `server.maxUploadSize = 5` dans config.toml) ; DOCTYPE/ENTITY refusés par une
+  pré-passe **expat** (tout encodage, toute position — un filtre sur les octets
+  se contournait en UTF-16 ; expat ≥ 2.4.1 bloque de toute façon l'explosion
+  d'entités). La trace (`trk`) prime sur la route (`rte`) — les mettre bout à
+  bout triplait la distance ; traces contiguës (≤ 200 m) enchaînées SAUF si la
+  chaîne est déjà bouclée (variantes 10 km / semi partant de la même arche) —
+  mais un tour de plus de la même boucle (±5 %, même tracé) s'enchaîne (marathon
+  en deux tours) ; sinon la plus longue. La route sert si la trace manque, est
+  inexploitable ou fait moins de la moitié de la route. Chaque choix est dit
+  (`attrs["note"]`). Point illisible écarté ; tracé < 100 m, profil vide ou
+  encodage illisible → `GpxError` (jamais une exception brute). Longueurs
+  calculées en un passage vectoriel (24 000 traces < 0,5 s) et lecture mise en
+  cache par la page (`_read_course`). Garde d'allure jugée à plat
+  (`flat_equivalent_km`) : un KV à 17 min/km n'est pas une faute de frappe.
+  Cartes de test réalistes : `tests/fixtures/gpx/make_cards.py` →
+  `tests/test_gpx_cards.py` (et e2e). Temps visé : remis au défaut du parcours
+  quand il change, lu en h:mm dès 18 km (`reading_distance`), refusé hors
+  2:30-15:00/km (`implausible_target`). Allure = coût Minetti, gain en
   descente plafonné (× 0,88) ; météo Garmin en °F convertie. Stratégie
   `progressive` par défaut sur la page (départ +1,5 à 2,5 %, accélération sur le
   dernier cinquième, `progression_shape` selon la distance) : `even` seule donne
@@ -276,10 +302,16 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   APRÈS les traces cliquables (intercalées, elles décalaient le point renvoyé).
   Infobulle = `compare_logic.day_hover` (noms Garmin échappés : Plotly interprète
   le HTML du survol).
+- **Météo d'activité** : `get_activity_weather(strict=True)` sous `st.cache_data`
+  (un 429 n'est pas figé 24 h) ; un 404 = « pas de météo » (tapis), mis en cache
+  avec un marqueur daté revérifié après un jour (`WEATHER_ABSENT_TTL`).
 - **Coach IA — dates** : « Situation au » rejoue le contexte (sorties ≤ date,
   CTL/TSB de la série PMC ce jour-là, HRV/sommeil d'alors) et omet records et
   prédictions, qui n'existent qu'au présent ; aujourd'hui, `compute_tsb` comme
-  partout. « Prochaine séance » ajoute le créneau au contexte et à la question.
+  partout. « Prochaine séance » ajoute le créneau au contexte et à la question,
+  avec la séance que le plan (Run Coach, sinon Objectif) prévoit ce jour-là :
+  séance → « ne la remplace pas » ; repos → « est-ce raisonnable ? » ; rien ou
+  au-delà de l'horizon connu → séance libre.
 - **Prompts MCP** (`garmin_mcp/prompts.py`) : builders purs (situation → texte) ;
   la situation lit le plan Run Coach en strict (panne → « inconnu », jamais « pas
   de plan ») et le prompt s'affiche même sans connexion Garmin.
