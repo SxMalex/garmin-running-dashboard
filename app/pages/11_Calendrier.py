@@ -58,8 +58,16 @@ def load_streams(athlete_id: int, activity_id: int) -> dict:
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
+def _load_weather(athlete_id: int, activity_id: int) -> dict | None:
+    return weather_from_garmin(get_garmin_client().get_activity_weather(activity_id, strict=True))
+
+
 def load_weather(athlete_id: int, activity_id: int) -> dict | None:
-    return weather_from_garmin(get_garmin_client().get_activity_weather(activity_id))
+    """Météo de la sortie ; un échec passager n'est pas mis en cache (réessayé au rerun)."""
+    try:
+        return _load_weather(athlete_id, activity_id)
+    except Exception:
+        return None
 
 
 @st.cache_data(ttl=3600, show_spinner=False)

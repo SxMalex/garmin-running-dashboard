@@ -7,6 +7,9 @@
 app/.garmin/
 garmin_tokens.json
 *.gpx
+# Cartes de test : tracés SYNTHÉTIQUES (cercles générés par make_cards.py), aucune
+# donnée réelle — seule exception à la règle ci-dessus.
+!tests/fixtures/gpx/*.gpx
 *.fit
 goal.json*
 

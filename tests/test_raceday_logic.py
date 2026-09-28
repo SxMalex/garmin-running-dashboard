@@ -141,3 +141,44 @@ def test_split_pct_prorates_the_middle_segment():
     assert split_pct([1000, 1000], [300, 330]) == pytest.approx(10)
     # 3 segments : la mi-course (1,5 km) coupe le 2e en deux
     assert split_pct([1000, 1000, 1000], [300, 300, 270]) == pytest.approx(420 / 450 * 100 - 100)
+
+
+def test_target_reading_and_plausibility():
+    from race_plan_logic import parse_race_time
+    from raceday_logic import implausible_target, reading_distance
+    # GPX de semi : « 1:45 » = 1 h 45, pas 105 s (bug de revue)
+    assert parse_race_time("1:45", reading_distance(21.2)) == 6300
+    assert parse_race_time("45:00", reading_distance(10.1)) == 2700
+    assert implausible_target(6300, 21.1) is None
+    assert "vérifie le format" in implausible_target(3000 * 60, 21.1)   # « 50:00 » lu en heures
+    assert "vérifie le format" in implausible_target(105, 21.1)
+    assert implausible_target(None, 10) is None
+
+
+def test_course_prediction_projects_from_the_nearest_distance():
+    from raceday_logic import course_prediction
+    preds = {10.0: 3000, 21.0975: 6600}
+    assert course_prediction(preds, 10.0) == 3000
+    assert course_prediction(preds, 21.0975) == 6600
+    assert course_prediction(preds, 23.0) == pytest.approx(6600 * (23 / 21.0975) ** 1.06)
+    assert course_prediction({}, 10) is None
+
+
+def test_vertical_km_is_not_an_absurd_target():
+    """Revue : 3,5 km / +1000 m en 1 h (17:08/km) était bloqué comme « faute de format »."""
+    from raceday_logic import flat_equivalent_km, implausible_target
+    prof = pd.DataFrame({"km": [1, 2, 3, 4], "length_m": [1000, 1000, 1000, 500],
+                         "gain": [290, 290, 290, 130], "loss": [0] * 4,
+                         "grade": [0.29, 0.29, 0.29, 0.26], "ele_end": [290, 580, 870, 1000]})
+    flat = flat_equivalent_km(prof)
+    assert flat > 10                                           # un km de mur en vaut plusieurs
+    assert implausible_target(3600, 3.5, flat) is None
+    assert "vérifie le format" in implausible_target(180000, 21.1, 21.1)
+
+
+def test_official_gpx_reuses_the_saved_goal():
+    from race_plan_logic import DISTANCES
+    from raceday_logic import goal_distance_for
+    assert goal_distance_for(21.3, "Semi-marathon", DISTANCES) == "Semi-marathon"
+    assert goal_distance_for(23.5, "Semi-marathon", DISTANCES) is None     # autre parcours
+    assert goal_distance_for(10.0, None, DISTANCES) is None

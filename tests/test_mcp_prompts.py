@@ -74,3 +74,21 @@ def test_prompt_renders_even_without_garmin_connection():
     sit = prompts.safe_situation(broken)
     assert sit["coach"] == "inconnu"
     assert "Ma contrainte : voyage" in prompts.ajuste_plan(sit, "voyage")
+
+
+def test_past_race_plan_is_not_announced_as_what_the_watch_follows(tmp_path, monkeypatch):
+    """Revue #2 : seul plan_id était comparé ; un objectif passé restait « validé »."""
+    from datetime import date, timedelta
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    import goal_store
+    from fake_garmin import FakeGarmin
+    from garmin_client import GarminClient
+    from workout_export import plan_id_of
+    goal = {"distance": "10 km", "race_date": (date.today() - timedelta(days=3)).isoformat(),
+            "target_text": "45:00"}
+    goal_store.save_goal(42, goal, {})
+    goal_store.validate_plan(42, plan_id_of(goal, {}), {"weeks": []})
+    sit = prompts.situation(GarminClient(FakeGarmin(), athlete_id=42))
+    assert sit["goal"]["validated"] is False and sit["goal"]["past"] is True
+    text = prompts.ajuste_plan(sit, "voyage")
+    assert "la montre reçoit" not in text and "terminé" in text

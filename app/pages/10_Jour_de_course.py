@@ -22,14 +22,19 @@ from race_plan_logic import DISTANCES, athlete_baseline, parse_race_time, predic
 from raceday_logic import (
     PACING_STRATEGIES,
     GpxError,
+    course_prediction,
+    flat_equivalent_km,
+    goal_distance_for,
     fmt_clock,
     fmt_pace,
     fueling_plan,
     half_split_pct,
     heat_slowdown,
+    implausible_target,
     km_profile,
     pacing_plan,
     parse_gpx,
+    reading_distance,
 )
 from ui_helpers import (
     cache_nonce,
@@ -87,6 +92,31 @@ st.caption("Ton allure kilomètre par kilomètre à effort égal, la correction 
 goal = goal_store.load(_athlete_id).get("goal") or {}
 default_distance = goal.get("distance") if goal.get("distance") in DISTANCES else "10 km"
 
+@st.cache_data(max_entries=4, show_spinner="Lecture du parcours…")
+def _read_course(data: bytes) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """GPX → (trace, profil au km), une fois par fichier : pas à chaque frappe dans la page."""
+    track = parse_gpx(data)
+    return track, km_profile(track)
+
+
+def _default_target(total_km: float, label: str | None) -> tuple[str, float | None, str]:
+    """(texte par défaut, temps prédit, source) pour le parcours courant."""
+    preds = predictions_by_km(load_predictions(_athlete_id, cache_nonce()))
+    pred, source = course_prediction(preds, total_km), "Prédiction Garmin"
+    if not pred:
+        # Sans prédiction Garmin : ta forme réelle (même estimation que la page
+        # Objectif — course récente, sinon entraînements), projetée par Riegel.
+        df, _err = cached_load_activities(_athlete_id)
+        if not df.empty:
+            p10 = athlete_baseline(df, date.today(), preds)["pace_10k_sec"]
+            pred = p10 * 10 * (total_km / 10) ** 1.06
+            source = "Estimation d'après tes sorties"
+    if label and goal.get("distance") == label and goal.get("target_text"):
+        return goal["target_text"], pred, source
+    return (fmt_race_time(pred).replace("'", ":").replace('"', "") if pred else ""), pred, source
+
+
+track = None
 with st.container(key="card-rd-inputs"):
     c1, c2, c3 = st.columns([1.2, 1, 1], gap="medium")
     with c1:
@@ -96,27 +126,37 @@ with st.container(key="card-rd-inputs"):
             st.session_state["rd_distance"] = default_distance
         distance = st.selectbox("Distance (si pas de GPX)", list(DISTANCES), key="rd_distance",
                                 disabled=gpx_file is not None)
+        if gpx_file is not None:
+            try:
+                track, profile = _read_course(gpx_file.getvalue())
+            except GpxError as e:
+                st.error(str(e))
+                st.stop()
+            total_km = float(profile["length_m"].sum()) / 1000
+            course_id, course_label = f"gpx:{gpx_file.name}:{total_km:.2f}", None
+            # Le GPX officiel de la course visée (±5 %) reprend l'objectif enregistré :
+            # sinon l'import écrasait « 1:45:00 » par la prédiction Garmin.
+            course_label = goal_distance_for(total_km, goal.get("distance"), DISTANCES)
+            if track.attrs.get("note"):
+                st.caption(track.attrs["note"])
+        else:
+            total_km = DISTANCES[distance]
+            profile = _flat_profile(total_km)
+            course_id, course_label = distance, distance
     with c2:
-        preds = predictions_by_km(load_predictions(_athlete_id, cache_nonce()))
-        pred = preds.get(DISTANCES[distance])
-        pred_source = "Prédiction Garmin"
-        if not pred:
-            # Sans prédiction Garmin : ta forme réelle (même estimation que la page
-            # Objectif — course récente, sinon entraînements), projetée par Riegel.
-            df, _err = cached_load_activities(_athlete_id)
-            if not df.empty:
-                p10 = athlete_baseline(df, date.today(), preds)["pace_10k_sec"]
-                pred = p10 * 10 * (DISTANCES[distance] / 10) ** 1.06
-                pred_source = "Estimation d'après tes sorties"
-        if "rd_target" not in st.session_state:
-            st.session_state["rd_target"] = (goal.get("target_text") if goal.get("distance") == distance
-                                             and goal.get("target_text") else
-                                             (fmt_race_time(pred).replace("'", ":").replace('"', "")
-                                              if pred else ""))
+        default_text, pred, pred_source = _default_target(total_km, course_label)
+        # Nouveau parcours (distance changée, GPX importé) : le temps visé repart du
+        # défaut de CE parcours. Sinon « 50:00 » restait en passant au semi.
+        _prev = st.session_state.get("_rd_course")
+        st.session_state["_rd_course"] = course_id
+        if "rd_target" not in st.session_state or (_prev is not None and _prev != course_id):
+            st.session_state["rd_target"] = default_text
         target_text = st.text_input("Temps visé", key="rd_target", placeholder="ex. 1:45:00 ou 50:00",
-                                    help="Par défaut : ton objectif enregistré, sinon la prédiction Garmin.")
+                                    help="Par défaut : ton objectif enregistré, sinon la prédiction "
+                                         "Garmin. Remis à jour quand tu changes de parcours.")
         if pred:
-            st.caption(f"{pred_source} sur {distance} : {fmt_race_time(pred)}")
+            where = course_label or f"{total_km:.1f} km"
+            st.caption(f"{pred_source} sur {where} : {fmt_race_time(pred)}")
     with c3:
         st.markdown("**Météo prévue** (facultatif)")
         temp_c = st.number_input("Température (°C)", min_value=-10.0, max_value=45.0, value=None,
@@ -126,24 +166,15 @@ with st.container(key="card-rd-inputs"):
                                 "Il mesure l'humidité : au-dessus de 15 °C, l'air devient lourd.")
 
 # ---------------------------------------------------------------------------
-# Profil et plan d'allure
+# Temps visé → plan (garde-fou : une allure absurde est un format mal lu)
 # ---------------------------------------------------------------------------
-track = None
-if gpx_file is not None:
-    try:
-        track = parse_gpx(gpx_file.getvalue())
-        profile = km_profile(track)
-    except GpxError as e:
-        st.error(str(e))
-        st.stop()
-    total_km = float(profile["length_m"].sum()) / 1000
-else:
-    total_km = DISTANCES[distance]
-    profile = _flat_profile(total_km)
-
-target_s = parse_race_time(target_text, distance if gpx_file is None else None)
+target_s = parse_race_time(target_text, course_label or reading_distance(total_km))
 if not target_s:
     st.info("Indique un temps visé (ex. 50:00 ou 1:45:00) pour calculer le plan.")
+    st.stop()
+_problem = implausible_target(target_s, total_km, flat_equivalent_km(profile))
+if _problem:
+    st.warning(_problem)
     st.stop()
 
 heat = heat_slowdown(temp_c, dew_c)

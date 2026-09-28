@@ -219,17 +219,22 @@ def health_watch(gc, today: date | None = None) -> dict:
 
 def running_form(gc, today: date | None = None) -> dict:
     """Foulée à allure égale (dérive sur 6 semaines) et pic de sortie (dernière / prévue)."""
-    from running_form_logic import form_report, run_spike
+    from running_form_logic import form_report, planned_runs, run_spike
     today = today or date.today()
     df = _activities(gc)
     report = [{k: v for k, v in r.items() if k != "series"} for r in form_report(df, pd.Timestamp(today))]
-    spike = run_spike(df, goal_store.validated_sessions(gc.athlete_id), pd.Timestamp(today))
+    # Même source que la semaine de l'Accueil : Run Coach s'il pilote, sinon le plan Objectif.
+    planned = planned_runs(load_coach_context(gc, today), goal_store.validated_sessions(gc.athlete_id),
+                           df, pd.Timestamp(today))
+    spike = run_spike(df, planned, pd.Timestamp(today))
     return _clean({
         "form_at_equal_pace": report or "Pas de dynamique de course mesurée (capteur absent ?).",
         "spike": spike,
         "reading_guide": "delta = écart à allure égale entre les 6 dernières semaines et les 12 "
-                         "précédentes. Pic : ratio à la plus longue sortie des 30 jours ; > 1,10 "
-                         "risque accru (BJSM 2025), > 1,30 élevé.",
+                         "précédentes. Pic : ratio à la plus longue sortie des 30 jours (pour une "
+                         "séance prévue, ou à la plus longue séance prévue avant elle : "
+                         "ref_source) ; > 1,10 risque accru (BJSM 2025), > 1,30 élevé. "
+                         "level = comeback : reprise après un mois sans courir.",
     })
 
 

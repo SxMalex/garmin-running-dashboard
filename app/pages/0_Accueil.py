@@ -34,7 +34,7 @@ from next_session_logic import (
     todays_session,
 )
 from physio_logic import efficiency_change, efficiency_trend
-from running_form_logic import run_spike
+from running_form_logic import planned_runs, run_spike
 from ui_helpers import (
     cache_nonce,
     cached_coach_context,
@@ -264,13 +264,18 @@ _signals = home_signals(load_risk(_pmc), efficiency_change(efficiency_trend(df),
                         _shoes)
 _head = []
 _watch = load_health(_athlete_id, TODAY.isoformat(), cache_nonce())
-if _watch is not None:
-    # En tête : c'est le signal qui change le plus la décision du jour.
+if _watch is not None and _watch.level >= 1:
+    # En tête, mais seulement si elle alerte : la carte verte « rien à signaler »
+    # passait devant et chassait une vraie alerte (chaussures, ACWR) de la coupe à 4.
     _head.append(health_signal(_watch))
-_spike = spike_signal(run_spike(df, goal_sessions, pd.Timestamp(TODAY)))
+# Pic de sortie lu sur la même source que la semaine affichée (Run Coach s'il pilote).
+_spike = spike_signal(run_spike(df, planned_runs(_coach, goal_sessions, df, pd.Timestamp(TODAY)),
+                                pd.Timestamp(TODAY)))
 if _spike:
     _head.append(_spike)
-_signals = [*_head, *_signals][:4]
+# Carte santé « rien à signaler » : en queue (elle informe sans chasser une alerte).
+_tail = [health_signal(_watch)] if _watch is not None and _watch.level == 0 else []
+_signals = [*_head, *_signals, *_tail][:4]
 if _signals:
     st.subheader("Ce que tes données disent")
     st.caption("Des signaux qu'on ne voit pas à l'œil nu, recalculés à chaque visite.")

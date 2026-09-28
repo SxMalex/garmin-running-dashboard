@@ -101,9 +101,12 @@ SPIKE_WATCH, SPIKE_HIGH = 1.10, 1.30
 
 
 def spike_level(ratio: float | None) -> str:
+    # Au pour-cent près : un plan à +10 %/semaine arrondi au dixième de km
+    # (12,8 → 14,1 = 1,1016) n'est pas un saut de plus de 10 %.
     if ratio is None:
         return "none"
-    return "high" if ratio > SPIKE_HIGH else ("watch" if ratio > SPIKE_WATCH else "ok")
+    r = round(ratio, 2)
+    return "high" if r > SPIKE_HIGH else ("watch" if r > SPIKE_WATCH else "ok")
 
 
 def longest_run_before(activities: pd.DataFrame, when: pd.Timestamp, days: int = 30) -> float | None:
@@ -115,12 +118,70 @@ def longest_run_before(activities: pd.DataFrame, when: pd.Timestamp, days: int =
     return float(km.max()) if not km.empty and km.max() > 0 else None
 
 
+COMEBACK_KM = 8.0      # après un mois sans courir, au-delà : trop d'un coup
+
+
+def _ran_before(runs: pd.DataFrame, when: pd.Timestamp, days: int = 30) -> bool:
+    """Une course existe AVANT la fenêtre de `days` jours : c'est une reprise, pas un premier pas."""
+    return bool((pd.to_datetime(runs["startTimeLocal"]) < when - pd.Timedelta(days=days)).any())
+
+
+def planned_runs(coach: dict | None, goal_sessions: list[dict] | None,
+                 activities: pd.DataFrame, today: pd.Timestamp) -> list[dict]:
+    """
+    Séances de course à venir, au format de `run_spike`, depuis la MÊME source
+    que la semaine affichée : Run Coach s'il pilote, sinon le plan Objectif.
+    Run Coach prescrit une durée : la distance est estimée à ton allure médiane
+    des 30 derniers jours (comme le générateur de parcours), à défaut des 90
+    derniers, à défaut de tout l'historique — en reprise, justement, il n'y a
+    rien sur 30 jours, et une distance nulle masquait l'alerte. Le jour de
+    l'objectif Run Coach n'est pas une séance d'entraînement : écarté (comme
+    `kind == "race"` pour le plan Objectif).
+    """
+    if not coach:
+        return list(goal_sessions or [])
+    from coach_logic import estimated_distance_km
+
+    pace = None
+    if activities is not None and not activities.empty and "activityType" in activities:
+        runs = activities[activities["activityType"] == "running"]
+        when = pd.to_datetime(runs["startTimeLocal"])
+        for days in (30, 90, None):
+            window = runs if days is None else runs[when >= today - pd.Timedelta(days=days)]
+            p = pd.to_numeric(window.get("avgPace_sec"), errors="coerce")
+            p = p[p > 0] if p is not None else p
+            if p is not None and not p.empty:
+                pace = float(p.median())
+                break
+    event_day = (today.normalize() + pd.Timedelta(days=int(coach["days_to_event"]))).date() \
+        if coach.get("days_to_event") is not None else None
+    out = []
+    for t in coach.get("tasks") or []:
+        if t.get("rest_day") or t.get("sport") != "running" or t.get("date") is None:
+            continue
+        if event_day is not None and t["date"] == event_day:
+            continue
+        km = estimated_distance_km(t.get("duration_min") or 0, pace or 0)
+        out.append({"date": str(t["date"]), "kind": "long" if t.get("session_key") == "sortie_longue"
+                    else t.get("session_key") or "run", "distance_km": km, "title": t.get("name", "")})
+    return out
+
+
 def run_spike(activities: pd.DataFrame, planned: list[dict] | None = None,
               today: pd.Timestamp | None = None) -> dict:
     """
-    {"last": {...} | None, "planned": {...} | None} : pour la dernière course et la
-    prochaine séance prévue (plan Objectif) de plus de 12 km ou plus longue que
-    tout le mois, le rapport à la plus longue des 30 jours précédents.
+    {"last": {...} | None, "planned": {...} | None}.
+
+    - `last` : la dernière course (≤ 7 jours) rapportée à la plus longue des 30
+      jours qui la précèdent ;
+    - `planned` : la première séance prévue qui dépasse de plus de 10 % la plus
+      longue course réelle du mois OU la plus longue séance prévue avant elle.
+      Un plan qui progresse de 10 %/semaine n'est donc pas signalé contre
+      lui-même (seul un saut par rapport au réel ou à la séance d'avant l'est).
+    - Reprise : sans course dans les 30 jours mais avec un historique plus
+      ancien, une sortie (faite ou prévue) d'au moins `COMEBACK_KM` est signalée
+      (`level` = "comeback", `ratio` = None) — c'est le cas le plus risqué, que
+      le ratio ne voyait pas faute de référence.
     """
     today = pd.Timestamp(today or pd.Timestamp.today()).normalize()
     out = {"last": None, "planned": None}
@@ -130,21 +191,37 @@ def run_spike(activities: pd.DataFrame, planned: list[dict] | None = None,
     if not runs.empty:
         last = runs.iloc[-1]
         when = pd.Timestamp(last["startTimeLocal"])
+        km = float(last["distance_km"])
         ref = longest_run_before(activities, when)
-        if ref and (today - when.normalize()).days <= 7:
-            ratio = float(last["distance_km"]) / ref
-            out["last"] = {"date": when, "km": float(last["distance_km"]), "ref_km": ref,
-                           "ratio": ratio, "level": spike_level(ratio),
-                           "name": str(last.get("activityName") or "")}
+        if (today - when.normalize()).days <= 7:
+            base = {"date": when, "km": km, "ref_km": ref, "name": str(last.get("activityName") or "")}
+            if ref:
+                ratio = km / ref
+                out["last"] = {**base, "ratio": ratio, "level": spike_level(ratio)}
+            elif km >= COMEBACK_KM and _ran_before(runs, when):
+                out["last"] = {**base, "ratio": None, "level": "comeback"}
     ref_now = longest_run_before(activities, today + pd.Timedelta(days=1))
-    for s in planned or []:
+    comeback = ref_now is None and not runs.empty and _ran_before(runs, today + pd.Timedelta(days=1))
+    longest_planned = 0.0
+    for s in sorted(planned or [], key=lambda s: str(s["date"])):
         day = pd.Timestamp(s["date"])
         km = float(s.get("distance_km") or 0)
-        if day < today or s.get("kind") in ("strength", "race") or not km or not ref_now:
+        if day < today or s.get("kind") in ("strength", "race") or not km:
             continue
-        ratio = km / ref_now
+        ref = max(ref_now or 0.0, longest_planned)
+        if not ref:
+            if comeback and km >= COMEBACK_KM:
+                out["planned"] = {"date": day, "km": km, "ref_km": None, "ratio": None,
+                                  "level": "comeback", "title": s.get("title", "")}
+                break
+            longest_planned = max(longest_planned, km)
+            continue
+        ratio = km / ref
         if spike_level(ratio) != "ok":
-            out["planned"] = {"date": day, "km": km, "ref_km": ref_now, "ratio": ratio,
-                              "level": spike_level(ratio), "title": s.get("title", "")}
+            out["planned"] = {"date": day, "km": km, "ref_km": ref, "ratio": ratio,
+                              "level": spike_level(ratio), "title": s.get("title", ""),
+                              # la référence : une course faite, ou une séance prévue avant
+                              "ref_source": "planned" if longest_planned > (ref_now or 0) else "real"}
             break
+        longest_planned = max(longest_planned, km)
     return out

@@ -357,12 +357,55 @@ def _format_session_slot(slot: datetime, now: datetime) -> str:
             f"- {when} {slot.strftime('%d/%m/%Y')} à {slot.strftime('%H:%M').replace(':', ' h ')} ({delay})")
 
 
-def _slot_request(slot: datetime, nutrition: bool) -> str:
+def _planned_on(day: date, coach, goal_sessions) -> tuple[str, str | None]:
+    """
+    (bloc de contexte, "session" / "rest" / None) : ce que le plan prévoit ce jour-là —
+    même priorité que la séance du jour : Run Coach, sinon plan Objectif validé.
+    Sans ce bloc, l'IA choisissait une séance différente de celle de la montre ;
+    le booléen évite de lui dire « ne la remplace pas » un jour où rien n'est prévu.
+    """
+    lines = ["=== Séance prévue ce jour-là par le plan ==="]
+    if coach and coach.get("tasks") is not None:
+        tasks = [t for t in coach["tasks"] if t["date"] == day]
+        known = max((t["date"] for t in coach["tasks"]), default=None)
+        for t in tasks:
+            if t["rest_day"]:
+                lines.append("- Repos (plan Garmin Run Coach)")
+            else:
+                target = f" ({target_label(t)})" if t["sport"] == "running" else ""
+                lines.append(f"- {t['name']} — {t['duration_min']} min{target} (plan Garmin Run Coach)")
+        if not tasks:
+            lines.append("- Au-delà de l'horizon connu du plan Garmin Run Coach (≈ 1 semaine) : "
+                         "la séance n'est pas encore fixée." if known is not None and day > known else
+                         "- Rien de prévu ce jour-là par le plan Garmin Run Coach.")
+        kind = ("session" if any(not t["rest_day"] for t in tasks) else "rest") if tasks else None
+        return "\n".join(lines), kind
+    if goal_sessions:
+        day_s = [x for x in goal_sessions if x["date"] == day.isoformat()]
+        for x in day_s:
+            what = (f"renforcement, {x.get('duration_min', 0):.0f} min" if x["kind"] == "strength" else
+                    f"course, {x.get('distance_km', 0):g} km" + (f" ({x['target']})" if x.get("target") else ""))
+            lines.append(f"- {x['title']} — {what} (plan Objectif validé)")
+        if not day_s:
+            lines.append("- Rien de prévu ce jour-là par le plan Objectif.")
+        return "\n".join(lines), "session" if day_s else None
+    return "\n".join(lines + ["- Aucun plan actif : séance à choisir librement."]), None
+
+
+def _slot_request(slot: datetime, nutrition: bool, planned: str | None = None) -> str:
     """Question ajoutée quand le coureur précise son créneau."""
     at = f"{weekday_fr(slot.date())} {slot.strftime('%d/%m')} à {slot.strftime('%H:%M').replace(':', ' h ')}"
     if nutrition:
         return (f"\n\nMa prochaine séance a lieu {at} : dis-moi aussi quoi manger et à quelle "
                 "heure avant (repas, en-cas), puis quoi manger après pour récupérer.")
+    if planned == "rest":
+        return (f"\n6. Je voudrais courir {at}, mais mon plan prévoit du repos ce jour-là (voir "
+                "ci-dessus) : est-ce raisonnable compte tenu de ma fraîcheur, et si oui, quoi faire "
+                "de très léger sans compromettre les séances suivantes ?")
+    if planned == "session":
+        return (f"\n6. Ma prochaine séance a lieu {at} et mon plan la prévoit (voir ci-dessus) : ne la "
+                "remplace pas, dis-moi comment l'aborder compte tenu de ma fraîcheur à ce moment-là, "
+                "et comment m'y préparer (sommeil, échauffement, repas selon l'heure).")
     return (f"\n6. Ma prochaine séance a lieu {at} : que me conseilles-tu d'y faire, compte tenu "
             "de ma fraîcheur à ce moment-là, et comment m'y préparer (sommeil, échauffement, "
             "repas selon l'heure) ?")
@@ -494,7 +537,13 @@ else:
                                   "rejoue a posteriori)", 1)
 if _slot:
     context += "\n\n" + _format_session_slot(_slot, datetime.now())
-    request += _slot_request(_slot, _is_nutrition)
+    _has_plan = False
+    if not _is_nutrition:           # (le prompt repas liste déjà les séances du plan)
+        _coach_ctx = cached_coach_context(_athlete_id)
+        _goal = goal_store.validated_sessions(_athlete_id)
+        _block, _has_plan = _planned_on(_slot.date(), _coach_ctx, _goal)
+        context += "\n\n" + _block
+    request += _slot_request(_slot, _is_nutrition, planned=_has_plan)
 
 with st.expander("📋 Données incluses dans le prompt", expanded=False):
     # Les noms d'activités Garmin sont saisis par l'utilisateur : échappés ET

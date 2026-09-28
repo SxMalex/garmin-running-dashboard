@@ -41,7 +41,6 @@ def situation(gc, today: date | None = None) -> dict:
     """
     import goal_store
     from coach_logic import load_coach_context
-    from workout_export import plan_id_of
 
     today = today or date.today()
     out = {"coach": None, "goal": None, "health": None}
@@ -57,11 +56,14 @@ def situation(gc, today: date | None = None) -> dict:
         out["coach"] = "inconnu"
     try:
         doc = goal_store.load(gc.athlete_id)
-        goal, prefs = doc.get("goal"), doc.get("prefs") or {}
+        goal = doc.get("goal")
         if goal:
-            validated = (doc.get("validated") or {}).get("plan_id") == plan_id_of(goal, prefs)
+            # Même chemin que l'Accueil : un plan dont la course est passée (ou sans
+            # séances figées) n'est plus « ce que la montre reçoit ».
+            validated = goal_store.validated_sessions(gc.athlete_id, today) is not None
             out["goal"] = {"distance": goal["distance"], "race_date": goal["race_date"],
-                           "target": goal.get("target_text") or "", "validated": validated}
+                           "target": goal.get("target_text") or "", "validated": validated,
+                           "past": goal["race_date"] < today.isoformat()}
     except Exception:
         pass
     try:
@@ -87,7 +89,8 @@ def _contexte(sit: dict) -> str:
         lines.append("- L'état du plan Garmin Run Coach est inconnu (Garmin n'a pas répondu) : "
                      "sois prudent avant de proposer des changements de séances.")
     if goal:
-        state = "validé (c'est ce plan que la montre reçoit)" if goal["validated"] else "pas encore validé"
+        state = ("terminé (la date de course est passée)" if goal.get("past") else
+                 "validé (c'est ce plan que la montre reçoit)" if goal["validated"] else "pas encore validé")
         target = f", objectif {goal['target']}" if goal["target"] else ""
         lines.append(f"- Objectif enregistré : {goal['distance']} le {goal['race_date']}{target}, plan {state}. "
                      "Outil : current_goal.")

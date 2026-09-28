@@ -96,3 +96,25 @@ def test_single_mild_one_night_deviation_is_ignored():
     w = health_watch(df, TODAY)
     if w.signals[0].z < 3:
         assert w.level == 0 and "ignoré" in w.signals[0].note
+
+
+def test_isolated_signal_is_cleared_not_only_hidden():
+    """Revue #2 : niveau 0 « rien » mais la carte (et le MCP) listaient encore le signal."""
+    from home_logic import health_signal
+    w = health_watch(_frame(last={"rhr": 52.3}), TODAY)       # +4,3 bpm, z ≈ 2,9 : isolé, sous 3 σ
+    assert w.level == 0 and w.flagged == []
+    rhr = next(s for s in w.signals if s.key == "rhr")
+    assert rhr.status == "ignored" and not rhr.flagged and rhr.z >= 2
+    body = health_signal(w)["body"]
+    assert not body.startswith("FC de repos")
+    assert "FC de repos : écart isolé" in body
+
+
+
+def test_only_signal_measured_and_ignored_reads_well():
+    """Revue : « 0 signal(aux) dans ta norme () » quand le seul signal mesuré était ignoré."""
+    df = _frame(last={"rhr": 52.3})
+    df[["hrv", "resp", "spo2"]] = np.nan                     # montre sans HRV ni SpO2 : la FC seule
+    w = health_watch(df, TODAY)
+    assert w.level == 0 and "0 signal" not in w.message and "()" not in w.message
+    assert "écart isolé" in w.message

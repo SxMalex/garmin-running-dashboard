@@ -825,3 +825,29 @@ def test_activity_weather_is_cached_and_tolerant(tmp_path, monkeypatch):
     client.get_activity_weather(1)
     assert Api.calls == 1                      # immuable : servi par le cache
     assert client.get_activity_weather(2) == {}
+    # strict : l'échec remonte (la page ne le fige pas 24 h dans st.cache_data)
+    import pytest
+    with pytest.raises(RuntimeError):
+        client.get_activity_weather(2, strict=True)
+
+
+def test_weather_404_means_no_weather_and_is_cached(tmp_path, monkeypatch):
+    """Tapis : Garmin répond 404 — une réponse, pas une panne (ni relancée, ni redemandée)."""
+    import garmin_client as gcm
+    monkeypatch.setattr(gcm, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(gcm, "API_COOLDOWN_S", 0)
+
+    class Api:
+        calls = 0
+        def get_activity_weather(self, activity_id):
+            Api.calls += 1
+            raise RuntimeError("API Error 404 - Not Found")
+
+    client = gcm.GarminClient(api=Api(), athlete_id=1)
+    assert client.get_activity_weather(5, strict=True) == {}
+    assert client.get_activity_weather(5, strict=True) == {}
+    assert Api.calls == 1
+    # Un jour plus tard, l'absence est revérifiée (Garmin calcule parfois la météo après la synchro)
+    monkeypatch.setattr(gcm, "WEATHER_ABSENT_TTL", -1)
+    client.get_activity_weather(5, strict=True)
+    assert Api.calls == 2

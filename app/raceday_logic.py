@@ -19,13 +19,26 @@ Chaleur et jour de course. Logique pure, testée.
   ~75 min, 30-60 g de glucides/h jusqu'à 2 h 30, 60-90 g/h au-delà ; des prises
   régulières placées au kilomètre, avant les montées plutôt qu'en plein effort.
 
-Sécurité : un GPX est un XML fourni par l'utilisateur. On refuse les DOCTYPE /
-ENTITY (explosion d'entités) et les fichiers de plus de 5 Mo.
+Sécurité : un GPX est un XML fourni par l'utilisateur. On refuse les fichiers
+de plus de 5 Mo (et Streamlit plafonne l'upload à 5 Mo, `server.maxUploadSize`),
+puis toute déclaration DOCTYPE / ENTITY, détectée par une pré-passe expat — donc
+quel que soit l'encodage (UTF-16…) ou sa position dans le fichier, là où un
+filtre sur les octets se contournait. expat (≥ 2.4.1) bloque de toute façon
+l'explosion d'entités et ne résout pas les entités externes : la pré-passe est
+une défense de plus, et un message clair.
+
+Tracé : la trace (`trk`) prime sur la route (`rte`) — beaucoup de GPX
+d'organisateurs ou de BaseCamp portent les deux, et les mettre bout à bout
+triplait la distance. Plusieurs traces qui se suivent (≤ 200 m) sont enchaînées ;
+sinon (variantes 10 km / semi dans un même fichier) la plus longue est retenue.
+Un point illisible est écarté, un tracé inexploitable lève `GpxError`.
 """
 
 from __future__ import annotations
 
+import math
 import xml.etree.ElementTree as ET
+import xml.parsers.expat
 
 import numpy as np
 import pandas as pd
@@ -99,32 +112,178 @@ def _haversine_m(lat1, lon1, lat2, lon2):
     return 2 * r * np.arcsin(np.sqrt(a))
 
 
-def parse_gpx(data: bytes) -> pd.DataFrame:
-    """Points du tracé : lat, lon, ele (m), dist (m, cumulée)."""
-    if len(data) > MAX_GPX_BYTES:
-        raise GpxError("Fichier trop gros (5 Mo maximum).")
-    head = data[:4096].upper()
-    if b"<!DOCTYPE" in head or b"<!ENTITY" in data.upper():
-        raise GpxError("GPX refusé : les déclarations DOCTYPE/ENTITY ne sont pas acceptées.")
+_DTD_REFUSED = "GPX refusé : les déclarations DOCTYPE/ENTITY ne sont pas acceptées."
+JOIN_M = 200.0          # deux traces à moins de 200 m l'une de l'autre se suivent
+MIN_TRACK_M = 100.0
+
+
+def _reject_dtd(data: bytes) -> None:
+    """Pré-passe expat : DOCTYPE ou ENTITY → GpxError, dans tout encodage."""
+    def refuse(*_args):
+        raise GpxError(_DTD_REFUSED)
+
+    parser = xml.parsers.expat.ParserCreate()
+    parser.StartDoctypeDeclHandler = refuse
+    parser.EntityDeclHandler = refuse
     try:
-        root = ET.fromstring(data)
-    except ET.ParseError as e:
+        parser.Parse(data, True)
+    except (xml.parsers.expat.ExpatError, ValueError) as e:
+        # ValueError : encodage multi-octets déclaré sans BOM (« utf-16-le »)
         raise GpxError(f"GPX illisible : {e}") from None
-    pts = []
-    for el in root.iter():
-        tag = el.tag.rsplit("}", 1)[-1]
-        if tag in ("trkpt", "rtept") and "lat" in el.attrib and "lon" in el.attrib:
-            ele = next((c.text for c in el if c.tag.rsplit("}", 1)[-1] == "ele"), None)
-            pts.append((float(el.attrib["lat"]), float(el.attrib["lon"]),
-                        float(ele) if ele not in (None, "") else np.nan))
-    if len(pts) < 2:
-        raise GpxError("Aucun tracé dans ce GPX (il faut des points trkpt ou rtept).")
+
+
+def _local(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _number(text) -> float:
+    """Nombre GPX ; la virgule décimale de certains exports est tolérée. NaN si illisible."""
+    try:
+        v = float(str(text).strip().replace(",", "."))
+    except (TypeError, ValueError):
+        return math.nan
+    return v if math.isfinite(v) else math.nan
+
+
+def _points(parent, tag: str) -> tuple[list[tuple[float, float, float]], int]:
+    """(points lat/lon/ele valides, nombre de points écartés) des enfants `tag` de `parent`."""
+    pts, bad = [], 0
+    for el in parent:
+        if _local(el.tag) != tag:
+            continue
+        lat, lon = _number(el.attrib.get("lat")), _number(el.attrib.get("lon"))
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):              # NaN compris
+            bad += 1
+            continue
+        ele = next((_number(c.text) for c in el if _local(c.tag) == "ele"), math.nan)
+        pts.append((lat, lon, ele))
+    return pts, bad
+
+
+LAP_TOLERANCE = 0.05     # deux tours d'une même boucle : longueurs à ±5 %
+LAP_MATCH_M = 60.0       # …et chaque point du tour suivant à < 60 m du précédent
+
+
+def _same_path(a: np.ndarray, b: np.ndarray) -> bool:
+    """`b` repasse-t-il sur `a` (un tour de plus de la même boucle) ? Échantillonné : quelques ms."""
+    a_s = a[:: max(1, len(a) // 1500)]
+    b_s = b[:: max(1, len(b) // 25)]
+    d = _haversine_m(b_s[:, None, 0], b_s[:, None, 1], a_s[None, :, 0], a_s[None, :, 1])
+    return bool((d.min(axis=1) <= LAP_MATCH_M).mean() >= 0.9)
+
+
+def _best_course(pieces: list[np.ndarray]) -> tuple[pd.DataFrame | None, int]:
+    """
+    Pièces (une par trace, ou par route) → (le parcours retenu, nombre de
+    parcours distincts). Deux pièces s'enchaînent si la suivante part à moins
+    de `JOIN_M` de la fin de la chaîne ET que la chaîne n'est pas déjà bouclée
+    (sinon deux variantes partant de la même arche s'additionnaient) — sauf si
+    la suivante est un TOUR de plus de la même boucle (même longueur, même
+    tracé : marathon en deux tours de semi, une trace par tour). Longueurs
+    calculées en un seul passage vectoriel : un fichier de milliers de traces
+    ne construit qu'un DataFrame, celui du parcours retenu.
+    """
+    pieces = [p for p in pieces if len(p)]
+    if not pieces:
+        return None, 0
+    allp = np.concatenate(pieces)
+    ids = np.repeat(np.arange(len(pieces)), [len(p) for p in pieces])
+    steps = _haversine_m(allp[:-1, 0], allp[:-1, 1], allp[1:, 0], allp[1:, 1])
+    inside = ids[1:] == ids[:-1]
+    length = np.bincount(ids[1:][inside], weights=steps[inside], minlength=len(pieces))
+    first = np.r_[0, np.flatnonzero(~inside) + 1]
+    last = np.r_[np.flatnonzero(~inside), len(allp) - 1]
+
+    def gap(a, b) -> float:
+        return float(_haversine_m(allp[a, 0], allp[a, 1], allp[b, 0], allp[b, 1]))
+
+    chains = [{"pieces": [0], "len": float(length[0]), "start": first[0], "end": last[0]}]
+    for j in range(1, len(pieces)):
+        c = chains[-1]
+        joined = gap(c["end"], first[j])
+        prev = c["pieces"][-1]
+        lap = (joined <= JOIN_M and length[prev] > 0
+               and abs(length[j] / length[prev] - 1) <= LAP_TOLERANCE
+               and _same_path(pieces[prev], pieces[j]))
+        if joined <= JOIN_M and (gap(c["start"], c["end"]) > JOIN_M or lap):
+            c["laps"] = c.get("laps", 1) + (1 if lap else 0)
+            c["pieces"].append(j)
+            c["len"] += joined + float(length[j])
+            c["end"] = last[j]
+        else:
+            chains.append({"pieces": [j], "len": float(length[j]), "start": first[j], "end": last[j]})
+    best = max(chains, key=lambda c: c["len"])
+    if best["len"] < MIN_TRACK_M:
+        return None, len(chains)
+    pts = np.concatenate([pieces[i] for i in best["pieces"]])
     df = pd.DataFrame(pts, columns=["lat", "lon", "ele"])
     step = _haversine_m(df["lat"].shift(), df["lon"].shift(), df["lat"], df["lon"]).fillna(0)
     df["dist"] = step.cumsum()
+    df.attrs["laps"] = best.get("laps", 1)
+    return df, len(chains)
+
+
+def parse_gpx(data: bytes) -> pd.DataFrame:
+    """
+    Points du tracé : lat, lon, ele (m), dist (m, cumulée). `attrs["note"]`
+    signale un choix fait à la place de l'utilisateur (parcours retenu, route
+    faute de trace, points écartés) ; la page l'affiche.
+    """
+    if len(data) > MAX_GPX_BYTES:
+        raise GpxError("Fichier trop gros (5 Mo maximum).")
+    _reject_dtd(data)
+    try:
+        root = ET.fromstring(data)
+    except (ET.ParseError, ValueError) as e:
+        raise GpxError(f"GPX illisible : {e}") from None
+
+    bad = 0
+    tracks, routes = [], []
+    for el in root.iter():
+        tag = _local(el.tag)
+        if tag == "trk":
+            # Les segments d'une trace se suivent (GPS coupé en courant) : écart compté.
+            pts = []
+            for seg in (c for c in el if _local(c.tag) == "trkseg"):
+                seg_pts, n_bad = _points(seg, "trkpt")
+                bad += n_bad
+                pts += seg_pts
+            tracks.append(np.array(pts, dtype=float).reshape(-1, 3))
+        elif tag == "rte":
+            pts, n_bad = _points(el, "rtept")
+            bad += n_bad
+            routes.append(np.array(pts, dtype=float).reshape(-1, 3))
+
+    notes = []
+    df, n_courses = _best_course(tracks)
+    route, n_routes = _best_course(routes)
+    track_km = df["dist"].iloc[-1] / 1000 if df is not None else 0.0
+    if route is not None and (df is None or route["dist"].iloc[-1] > 2 * df["dist"].iloc[-1]):
+        # Pas de trace, trace inexploitable, ou trace bien plus courte que la route
+        # (un bout de trace de 150 m à côté du parcours complet) : la route.
+        had_track = any(len(t) for t in tracks)
+        notes.append((f"La trace enregistrée ({track_km:.2f} km) est bien plus courte que la route : "
+                      if df is not None else
+                      "La trace enregistrée est inexploitable (trop courte) : " if had_track else
+                      "Pas de trace enregistrée : ")
+                     + "calcul sur la route (points de passage), moins précise en distance.")
+        df, n_courses = route, n_routes
+    if df is None:
+        if not any(len(p) for p in tracks + routes):
+            raise GpxError("Aucun tracé dans ce GPX (il faut des points trkpt ou rtept valides).")
+        raise GpxError("Tracé trop court ou dégénéré (moins de 100 m) : ce n'est pas un parcours.")
     if df["ele"].isna().all():
         df["ele"] = 0.0
     df["ele"] = df["ele"].interpolate(limit_direction="both")
+    if df.attrs.get("laps", 1) > 1:
+        notes.insert(0, f"{df.attrs['laps']} tours de la même boucle enchaînés "
+                        f"({df['dist'].iloc[-1] / 1000:.1f} km).")
+    if n_courses > 1:
+        notes.insert(0, f"{n_courses} parcours distincts dans le fichier : le plus long "
+                        f"({df['dist'].iloc[-1] / 1000:.1f} km) est retenu.")
+    if bad:
+        notes.append(f"{bad} point(s) illisible(s) écarté(s).")
+    df.attrs["note"] = " ".join(notes)
     return df
 
 
@@ -151,7 +310,66 @@ def km_profile(track: pd.DataFrame, smooth_m: float = 150.0) -> pd.DataFrame:
                      "loss": float(-diff[diff < 0].sum()),
                      "grade": float((seg[-1] - seg[0]) / (b - a)) if len(seg) > 1 else 0.0,
                      "ele_end": float(seg[-1])})
+    if not rows:
+        raise GpxError("Tracé inexploitable : aucun segment de distance mesurable.")
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Temps visé : lecture et garde-fous
+# ---------------------------------------------------------------------------
+PLAUSIBLE_PACE_S = (150, 1200)    # 2:30 à 20:00 /km À PLAT : au-delà, c'est une faute de frappe
+
+
+def reading_distance(total_km: float) -> str:
+    """
+    Distance à passer à `parse_race_time` pour lire « 1:45 » : en heures dès
+    18 km (semi, trail), en minutes en dessous. Sans ça, un GPX de semi lisait
+    « 1:45 » comme 105 secondes.
+    """
+    return "Semi-marathon" if total_km >= 18 else "10 km"
+
+
+def flat_equivalent_km(profile: pd.DataFrame) -> float:
+    """Distance « à plat » équivalente en effort (un km de côte en vaut plusieurs)."""
+    return float(sum(l / 1000 * effort_factor(g) for l, g in zip(profile["length_m"], profile["grade"])))
+
+
+def implausible_target(target_s: float | None, total_km: float,
+                       flat_km: float | None = None) -> str | None:
+    """
+    Message si le temps visé donne une allure absurde (format mal lu, champ
+    périmé). Jugée à l'allure À PLAT équivalente (`flat_km`) : un kilomètre
+    vertical à 17 min/km est une allure de coureur, pas une faute de frappe.
+    """
+    if not target_s or total_km <= 0:
+        return None
+    pace = target_s / total_km
+    flat_pace = target_s / flat_km if flat_km else pace
+    lo, hi = PLAUSIBLE_PACE_S
+    if lo <= flat_pace <= hi:
+        return None
+    return (f"Ce temps donne {fmt_pace(pace)}/km sur {total_km:.1f} km : vérifie le format "
+            "(h:mm:ss pour un semi ou plus, mm:ss en dessous).")
+
+
+def goal_distance_for(total_km: float, goal_distance: str | None,
+                      distances: dict[str, float]) -> str | None:
+    """
+    La distance d'objectif que ce GPX représente (±5 %), sinon None : le GPX
+    officiel de la course visée reprend alors le temps visé enregistré.
+    """
+    if goal_distance in distances and abs(total_km / distances[goal_distance] - 1) <= 0.05:
+        return goal_distance
+    return None
+
+
+def course_prediction(predictions: dict[float, float], total_km: float) -> float | None:
+    """Temps prédit sur `total_km` : la prédiction de la distance la plus proche, projetée par Riegel."""
+    if not predictions or total_km <= 0:
+        return None
+    km = min(predictions, key=lambda d: abs(math.log(d / total_km)))
+    return predictions[km] * (total_km / km) ** 1.06
 
 
 # ---------------------------------------------------------------------------

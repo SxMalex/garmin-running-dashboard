@@ -62,7 +62,7 @@ class SignalResult:
     z: float | None = None
     flagged: bool = False
     persistent: bool = False       # déjà en écart la nuit précédente
-    status: str = "ok"             # ok / flagged / missing / learning
+    status: str = "ok"             # ok / flagged / ignored / missing / learning
     note: str = ""
 
 
@@ -154,8 +154,13 @@ def health_watch(frame: pd.DataFrame, today: pd.Timestamp | None = None) -> Heal
     signals = [_deviation(sig, frame[sig.key], night) for sig in SIGNALS]
     measured = [s for s in signals if s.status in ("ok", "flagged")]
     flagged = [s for s in signals if s.flagged]
+    ignored = None
     if len(flagged) == 1 and not (flagged[0].persistent or flagged[0].z >= SINGLE_SIGNAL_Z):
-        flagged[0].note = "écart isolé d'une nuit : ignoré"
+        # Retiré du signal lui-même, pas seulement de la liste locale : sinon
+        # HealthWatch.flagged (carte, MCP) le rapportait sous un verdict « rien ».
+        ignored = flagged[0]
+        ignored.flagged, ignored.status = False, "ignored"
+        ignored.note = "écart isolé d'une nuit : ignoré"
         flagged = []
 
     if len(flagged) >= 2:
@@ -173,8 +178,13 @@ def health_watch(frame: pd.DataFrame, today: pd.Timestamp | None = None) -> Heal
                    "lève le pied.")
     elif measured:
         level, status, title = 0, "good", "Pas de signe de maladie"
-        message = (f"{len(measured)} signal(aux) de récupération dans ta norme des 30 derniers jours "
-                   f"({', '.join(s.label for s in measured)}).")
+        normal = [s for s in measured if s is not ignored]
+        message = " ".join(filter(None, [
+            (f"{len(normal)} signal(aux) de récupération dans ta norme des 30 derniers jours "
+             f"({', '.join(s.label for s in normal)}).") if normal else "",
+            (f"{ignored.label} : écart isolé d'une nuit, sans autre signe — ignoré."
+             if ignored else ""),
+        ]))
     else:
         level, status, title = 0, "info", "Veille santé en apprentissage"
         message = "Il faut une dizaine de nuits mesurées pour connaître ta norme."

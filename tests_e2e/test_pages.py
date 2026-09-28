@@ -64,3 +64,30 @@ def test_calendar_two_clicks_compare_the_runs(open_page):
     settle(page)
     expect(page.get_by_text("De A à B")).to_be_visible(timeout=15000)
     expect(page.get_by_text("Kilomètre par kilomètre")).to_be_visible()
+
+
+import re  # noqa: E402
+
+import pytest  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+CARDS = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "gpx"
+
+
+@pytest.mark.parametrize("card, target, expected", [
+    ("organizer_route_and_track.gpx", "50:00", re.compile(r"(9\.9\d|10\.0\d) km en")),  # pas 29 km
+    ("two_variants_10k_and_semi.gpx", "1:45", "parcours distincts"),     # variantes : la plus longue, dit
+    ("utf16_entity_bomb.gpx", None, "DOCTYPE/ENTITY"),                   # hostile : refus propre
+    ("degenerate_same_point.gpx", None, "trop court"),
+])
+def test_race_day_gpx_cards_in_the_browser(open_page, card, target, expected):
+    page = open_page("/jour-de-course")
+    page.locator('input[type="file"]').set_input_files(str(CARDS / card))
+    settle(page)
+    if target:
+        box = page.get_by_role("textbox", name="Temps visé")
+        box.fill(target)
+        page.keyboard.press("Enter")
+        settle(page)
+    expect(page.get_by_text(expected).first).to_be_visible(timeout=15000)
+    assert page.locator('[data-testid="stException"]').count() == 0

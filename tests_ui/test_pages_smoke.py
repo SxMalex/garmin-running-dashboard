@@ -135,3 +135,111 @@ def test_calendar_kind_filter(logged_in):
         assert not at.exception, (choice, [e.value for e in at.exception])
     at.button(key="cal_prev").click().run()
     assert not at.exception, [e.value for e in at.exception]
+
+
+def test_race_day_target_follows_the_distance(logged_in):
+    """Revue #2 : « 50:00 » restait en passant au semi → ~142 min/km."""
+    at = logged_in("10_Jour_de_course.py", rd_distance="10 km", rd_target="50:00").run()
+    assert not at.exception, [e.value for e in at.exception]
+    at.selectbox(key="rd_distance").set_value("Semi-marathon").run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert at.text_input(key="rd_target").value != "50:00"
+    pace = next(m.value for m in at.metric if m.label == "Allure moyenne")
+    assert 3 <= int(pace.split(":")[0]) <= 8, pace                    # une allure de coureur
+
+
+def test_race_day_refuses_an_absurd_target(logged_in):
+    at = logged_in("10_Jour_de_course.py", rd_distance="10 km", rd_target="1:40:00:00").run()
+    assert not at.exception
+    at = logged_in("10_Jour_de_course.py", rd_distance="Semi-marathon", rd_target="0:05").run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert any("vérifie le format" in w.value for w in at.warning)
+    assert not at.dataframe                                            # pas de bracelet absurde
+
+
+def test_home_green_health_card_does_not_push_out_real_alerts(logged_in, monkeypatch):
+    """Revue #2 : la carte « Pas de signe de maladie » passait en tête et chassait une alerte."""
+    import numpy as np
+    import pandas as pd
+    import illness_logic
+    idx = pd.date_range(end=pd.Timestamp.today().normalize(), periods=35, freq="D")
+    rng = np.random.default_rng(0)
+    calm = pd.DataFrame({"rhr": 48 + rng.normal(0, 1, 35), "hrv": 60 + rng.normal(0, 4, 35),
+                         "resp": 14.5 + rng.normal(0, 0.3, 35), "spo2": np.nan}, index=idx)
+    monkeypatch.setattr(illness_logic, "load_health_frame", lambda gc, today, days=34: calm)
+    import home_logic
+    alert = {"status": "serious", "level": "Alerte", "title": "Pegasus : 900 km", "body": "Change-les."}
+    monkeypatch.setattr(home_logic, "home_signals", lambda *a, **k: [alert, {**alert, "title": "ACWR"}])
+    at = logged_in("main.py").run()
+    assert not at.exception, [e.value for e in at.exception]
+    cards = [m.value for m in at.markdown if "gd-signal-title" in m.value]
+    assert "Pegasus" in cards[0]                                     # l'alerte d'abord…
+    assert "Pas de signe de maladie" in cards[-1]                    # …la carte verte en queue, pas perdue
+
+
+def test_transient_weather_failure_is_retried_not_cached(logged_in, fake_api):
+    """Revue #2 : un 429 sur la météo la masquait 24 h (st.cache_data gardait le {})."""
+    state = {"fail": True}
+    real = fake_api.get_activity_weather
+
+    def flaky(activity_id):
+        if state["fail"]:
+            fake_api.calls.append("get_activity_weather")
+            raise RuntimeError("API Error 429 - Too Many Requests")
+        return real(activity_id)
+
+    fake_api.get_activity_weather = flaky
+    at = logged_in("11_Calendrier.py", cmp_a=1000, cmp_b=1017).run()
+    assert not at.exception, [e.value for e in at.exception]
+    state["fail"] = False
+    at.run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert any("°C" in c.value for c in at.caption)                  # la météo est revenue
+
+
+def test_ai_coach_slot_carries_the_planned_session(logged_in, monkeypatch):
+    """Revue #2 : l'IA choisissait la séance sans connaître le plan de la montre."""
+    from datetime import date, time, timedelta
+    import ui_helpers
+    slot = date.today() + timedelta(days=2)
+    task = {"date": slot, "sport": "running", "name": "Seuil 3 × 8 min", "duration_min": 55,
+            "rest_day": False, "target": {"pace_sec": None, "hr_bpm": None, "reps": None},
+            "description": "3x8:00@4:30/km"}
+    monkeypatch.setattr(ui_helpers, "cached_coach_context",
+                        lambda athlete_id, cdate=None: {"tasks": [task], "week": [task]})
+    at = logged_in("7_AI_Coach.py", ai_slot_on=True, ai_slot_date=slot, ai_slot_time=time(18, 0)).run()
+    assert not at.exception, [e.value for e in at.exception]
+    prompt = at.code[0].value
+    assert "Séance prévue ce jour-là par le plan" in prompt and "Seuil 3 × 8 min" in prompt
+    assert "ne la remplace pas" in prompt
+
+
+def test_ai_coach_does_not_claim_a_planned_session_on_an_empty_day(logged_in, monkeypatch):
+    """Revue : « mon plan la prévoit, ne la remplace pas » alors que le bloc disait « rien ce jour-là »."""
+    from datetime import date, time, timedelta
+    import ui_helpers
+    today = date.today()
+    task = {"date": today + timedelta(days=1), "sport": "running", "name": "Footing", "duration_min": 40,
+            "rest_day": False, "target": {}, "description": ""}
+    monkeypatch.setattr(ui_helpers, "cached_coach_context",
+                        lambda athlete_id, cdate=None: {"tasks": [task], "week": [task]})
+    at = logged_in("7_AI_Coach.py", ai_slot_on=True, ai_slot_date=today + timedelta(days=10),
+                   ai_slot_time=time(7, 0)).run()
+    assert not at.exception, [e.value for e in at.exception]
+    prompt = at.code[0].value
+    assert "Au-delà de l'horizon connu" in prompt and "ne la remplace pas" not in prompt
+
+
+
+def test_ai_coach_rest_day_is_not_a_session_to_keep(logged_in, monkeypatch):
+    """Contre-revue : un jour de repos déclenchait « ne la remplace pas »."""
+    from datetime import date, time, timedelta
+    import ui_helpers
+    slot = date.today() + timedelta(days=1)
+    rest = {"date": slot, "sport": "running", "name": "Repos", "duration_min": 0, "rest_day": True,
+            "target": {}, "description": ""}
+    monkeypatch.setattr(ui_helpers, "cached_coach_context",
+                        lambda athlete_id, cdate=None: {"tasks": [rest], "week": [rest]})
+    at = logged_in("7_AI_Coach.py", ai_slot_on=True, ai_slot_date=slot, ai_slot_time=time(7, 0)).run()
+    prompt = at.code[0].value
+    assert "prévoit du repos" in prompt and "ne la remplace pas" not in prompt

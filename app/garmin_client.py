@@ -172,6 +172,7 @@ def athlete_id_of(api: Garmin) -> int:
 # propre dossier, un TTL long, et survivent au bouton « Actualiser » — sinon la
 # tendance de dérive re-téléchargerait N activités à chaque rafraîchissement.
 STREAMS_BUCKET = "streams"
+WEATHER_ABSENT_TTL = 86400      # une météo « absente » (404) est redemandée après un jour
 STREAMS_TTL = int(os.getenv("STREAMS_CACHE_TTL", str(30 * 86400)))
 
 
@@ -678,19 +679,33 @@ class GarminClient:
         time.sleep(API_COOLDOWN_S)
         return result
 
-    def get_activity_weather(self, activity_id: int) -> dict:
+    def get_activity_weather(self, activity_id: int, strict: bool = False) -> dict:
         """
         Météo relevée par Garmin pendant une activité (températures en °F).
         Immuable : cache long des streams. {} si l'activité n'en a pas (tapis,
         pas de GPS) — pas une erreur.
+
+        `strict=True` relève l'erreur API au lieu de renvoyer `{}` : un appelant
+        sous `st.cache_data` ne doit pas figer un échec passager (429) pour 24 h.
         """
         cache_key = f"weather_{activity_id}"
         cached = _cache_get(self.athlete_id, cache_key, ttl=STREAMS_TTL, bucket=STREAMS_BUCKET)
-        if cached is not None:
-            return cached
+        if cached is not None and not (isinstance(cached, dict) and "_absent_at" in cached
+                                       and time.time() - cached["_absent_at"] > WEATHER_ABSENT_TTL):
+            return {} if isinstance(cached, dict) and "_absent_at" in cached else cached
         try:
             data = self.api.get_activity_weather(str(activity_id)) or {}
         except Exception as e:
+            # 404 = pas de météo pour cette activité (tapis) : une réponse, pas
+            # une panne — mise en cache comme telle. Le reste remonte en strict.
+            if _http_status(e) == 404:
+                # Marqueur daté : Garmin calcule parfois la météo après la synchro,
+                # l'absence est donc revérifiée au bout d'un jour (pas 30).
+                _cache_set(self.athlete_id, cache_key, {"_absent_at": time.time()},
+                           bucket=STREAMS_BUCKET)
+                return {}
+            if strict:
+                raise
             logger.warning("Météo indisponible pour l'activité %s : %s", activity_id, e)
             return {}
         data = data if isinstance(data, dict) else {}
