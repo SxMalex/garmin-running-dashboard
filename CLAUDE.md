@@ -33,7 +33,10 @@ VO2max, efficacité aérobie et dérive via `physio_logic.py`), `5_Next_Session`
 `recommend_session(df, downgrade=n)` en **repli** — la source primaire est le
 plan Garmin Run Coach via `coach_logic.py`), `6_Heatmap`, `7_AI_Coach` (contexte
 enrichi forme/HRV/sommeil/records), `8_Comparatif` (années superposées sur un axe
-jour-de-l'année via `comparatif_logic.py`), `10_Jour_de_course` (GPX → allure au km, chaleur, ravitaillement), `9_Objectif` (course datée → plan
+jour-de-l'année via `comparatif_logic.py`), `11_Calendrier` (grille du mois
+cliquable, comparaison de deux sorties via `compare_logic.py`),
+`10_Jour_de_course` (GPX → allure au km, stratégie progressive, chaleur,
+ravitaillement), `9_Objectif` (course datée → plan
 course + renfo via `race_plan_logic.py`, envoi au calendrier Garmin). Le thème graphique central est
 `chart_theme.py` (palette validée par le validateur dataviz — ne pas réordonner
 les slots catégoriels ni réutiliser les couleurs status comme séries).
@@ -257,7 +260,26 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   ratio à la plus longue des 30 jours, > 1,10 à surveiller, > 1,30 élevé.
 - **Jour de course** (`raceday_logic`) : GPX refusé s'il contient DOCTYPE/ENTITY ou
   dépasse 5 Mo (XML fourni par l'utilisateur) ; allure = coût Minetti, gain en
-  descente plafonné (× 0,88) ; météo Garmin en °F convertie.
+  descente plafonné (× 0,88) ; météo Garmin en °F convertie. Stratégie
+  `progressive` par défaut sur la page (départ +1,5 à 2,5 %, accélération sur le
+  dernier cinquième, `progression_shape` selon la distance) : `even` seule donne
+  la même allure à chaque km d'un parcours plat — c'était le « bracelet figé ».
+  Le temps final vaut toujours le temps visé (renormalisé).
+- **Comparaison de sorties** (`compare_logic`) : A = la plus ancienne, partout
+  (grille, listes, cartes — la page réordonne la session). Allure corrigée =
+  pente (`effort_factor`, le même que le plan d'allure) puis chaleur ; Riegel
+  hors ±15 % de distance. Bloc d'avant = 6 semaines avant le jour (exclu),
+  CTL/TSB lus en fin de veille sur `compute_pmc_series` (le TSB unique), nuits
+  J−6…J. Une valeur absente d'un côté ne rend jamais une ligne « notable ». La
+  grille lit la sélection Plotly dans `session_state` AVANT de se dessiner (pas
+  de `st.rerun`, qui perdait un clic rapide) ; les traces de légende viennent
+  APRÈS les traces cliquables (intercalées, elles décalaient le point renvoyé).
+  Infobulle = `compare_logic.day_hover` (noms Garmin échappés : Plotly interprète
+  le HTML du survol).
+- **Coach IA — dates** : « Situation au » rejoue le contexte (sorties ≤ date,
+  CTL/TSB de la série PMC ce jour-là, HRV/sommeil d'alors) et omet records et
+  prédictions, qui n'existent qu'au présent ; aujourd'hui, `compute_tsb` comme
+  partout. « Prochaine séance » ajoute le créneau au contexte et à la question.
 - **Prompts MCP** (`garmin_mcp/prompts.py`) : builders purs (situation → texte) ;
   la situation lit le plan Run Coach en strict (panne → « inconnu », jamais « pas
   de plan ») et le prompt s'affiche même sans connexion Garmin.

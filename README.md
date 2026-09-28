@@ -33,8 +33,16 @@ l'API Garmin non officielle s'authentifie par identifiants, pas par OAuth multi-
   corrigés de la vitesse), **chaleur** (météo de chaque sortie et allure
   équivalente au frais)
 - **Jour de course** — importe le GPX du parcours : allure kilomètre par
-  kilomètre à effort égal (coût énergétique de la pente), objectif corrigé de la
-  chaleur prévue, ravitaillement placé au kilomètre, bracelet d'allure en CSV
+  kilomètre à effort égal (coût énergétique de la pente) avec une **stratégie
+  progressive** par défaut (départ retenu, fin plus rapide, temps final inchangé)
+  ou régulière, ta gestion habituelle lue sur tes 3 dernières courses, objectif
+  corrigé de la chaleur prévue (le bracelet peut s'y caler), ravitaillement placé
+  au kilomètre, bracelet d'allure en CSV
+- **Calendrier** — les sorties mois par mois (courses, entraînements ou les
+  deux) ; clique deux jours pour **comparer deux sorties** : allure corrigée de la
+  pente et de la chaleur (Riegel entre deux distances), gestion 2e / 1re moitié,
+  kilomètre par kilomètre, et le **bloc d'avant** (volume, sortie longue, part en
+  facile, CTL/TSB la veille, sommeil, HRV, FC de repos) avec ce qui a changé
 - **Navigation en 4 pôles** — Aujourd'hui / Entraînement / Progrès / Objectif,
   une question par pôle ; en-tête commun (Light/Pro, Actualiser, Compte,
   Prompt coach IA) et, sur téléphone, barre d'onglets en bas. Thème clair
@@ -78,7 +86,9 @@ l'API Garmin non officielle s'authentifie par identifiants, pas par OAuth multi-
 - **IA Coach** — deux prompts prêts à coller dans n'importe quel LLM :
   **analyse d'entraînement** (sorties, charge, HRV, sommeil, records, prédictions)
   et **idées de repas** (séances des prochains jours issues du plan Garmin,
-  dépense énergétique sur 7 jours, contraintes alimentaires saisies)
+  dépense énergétique sur 7 jours, contraintes alimentaires saisies). « Situation
+  au » rejoue le contexte d'une date passée ; « Prochaine séance » (jour + heure)
+  fait adapter la séance et l'horaire des repas
 - **Objectif** — une course datée (5 km → marathon, temps visé optionnel) →
   plan périodisé **course + renforcement** (base, développement, spécifique,
   affûtage), allures tirées de ta forme récente, chaque séance avec son
@@ -329,6 +339,7 @@ gar/
 │   ├── test_forme_logic.py       # Verdict de forme, rétrogradation de séance
 │   ├── test_progression_logic.py # Records, Riegel, historique prédictions
 │   ├── test_comparatif_logic.py  # Alignement des années, cumuls, instantanés
+│   ├── test_compare_logic.py     # Calendrier, allure corrigée, bloc d'avant, verdict
 │   ├── test_coach_logic.py       # Plan Garmin Run Coach, cibles, fusion reco
 │   ├── test_formatting.py        # decimate, map_zoom
 │   ├── test_next_session.py      # Logique TSB / recommandation / GPX / ACWR
@@ -351,6 +362,7 @@ gar/
     ├── forme_logic.py          # Logique pure : verdict forme, rétrogradation
     ├── progression_logic.py    # Logique pure : records, Riegel, prédictions
     ├── comparatif_logic.py     # Logique pure : alignement des années, cumuls
+    ├── compare_logic.py        # Logique pure : calendrier, comparaison de deux sorties
     ├── coach_logic.py          # Logique pure : plan Garmin Run Coach, cibles
     ├── physio_logic.py         # Logique pure : lock FC/cadence, dérive, efficacité
     ├── race_plan_logic.py      # Logique pure : plan vers un objectif (course + renfo)
@@ -366,6 +378,7 @@ gar/
     └── pages/
         ├── 0_Accueil.py        # Cockpit du jour (séance, fraîcheur, semaine, signaux)
         ├── 1_Activities.py     # Liste et détails des activités
+        ├── 11_Calendrier.py    # Calendrier cliquable, comparaison de deux sorties
         ├── 2_Stats.py          # Volume, allure, FC, cadence, régularité
         ├── 3_Forme.py          # Charge × récupération + verdict du jour
         ├── 4_Progression.py    # Records, prédictions, VO2max
@@ -466,7 +479,7 @@ dernier compte vraiment, car chaque activité retenue coûte un fetch de streams
 | Couche | Fichier(s) | Rôle |
 |---|---|---|
 | Données | `garmin_client.py` | Fetch API, cache disque, auth (tokens), transformations |
-| Logique métier | `next_session_logic.py`, `heatmap_logic.py`, `comparatif_logic.py`, `coach_logic.py`, `formatting.py` | Calculs purs, testables sans Streamlit |
+| Logique métier | `next_session_logic.py`, `heatmap_logic.py`, `comparatif_logic.py`, `compare_logic.py`, `coach_logic.py`, `formatting.py` | Calculs purs, testables sans Streamlit |
 | UI helpers | `ui_helpers.py` | `require_login()`, `get_garmin_client()`, rendu carte |
 | UI | `main.py` + `pages/` + `stats_tabs/` | Affichage uniquement |
 
