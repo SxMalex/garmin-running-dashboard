@@ -158,10 +158,23 @@ TERMS = {
         "light": "Courir à allure constante sur un parcours vallonné, c'est se mettre dans le rouge "
                  "dans les côtes. Le plan calcule, kilomètre par kilomètre, l'allure qui demande le "
                  "même effort d'après le coût énergétique de la pente. En descente on regagne moins "
-                 "qu'on ne perd en montée. Au-delà de 1 h 15 d'effort, les glucides pris régulièrement "
+                 "qu'on ne perd en montée. La stratégie progressive part un peu plus lentement, le "
+                 "temps que le cardio s'installe, et accélère sur la fin : c'est ainsi que se courent "
+                 "les records, et ce qui évite l'explosion du dernier tiers. Au-delà de 1 h 15 d'effort, les glucides pris régulièrement "
                  "(à tester à l'entraînement) évitent le coup de barre ; la chaleur et l'humidité "
                  "ralentissent tout le monde, mieux vaut ajuster l'objectif que subir.",
-        "source": "Minetti 2002 ; Jeukendrup 2014 ; règle de Hadley (chaleur)",
+        "source": "Minetti 2002 ; Jeukendrup 2014 ; Abbiss & Laursen 2008 ; règle de Hadley (chaleur)",
+    },
+    "comparaison": {
+        "label": "Comparer deux sorties",
+        "short": "À terrain et météo égaux, puis ce qui a changé dans les semaines d'avant.",
+        "light": "Un chrono brut ne se compare pas : une côte ou 28 °C coûtent vite 5 %. Chaque "
+                 "allure est donc ramenée au plat (coût énergétique de la pente) et au frais "
+                 "(chaleur et humidité) ; entre deux distances, on projette avec la formule de "
+                 "Riegel. Ensuite, on regarde le bloc des six semaines d'avant — volume, sortie "
+                 "longue, part en facile, forme et fraîcheur la veille, sommeil et HRV — pour voir "
+                 "ce qui a bougé. Deux sorties ne prouvent rien : ce sont des pistes, pas des causes.",
+        "source": "Minetti 2002 ; Riegel 1981 ; règle de Hadley (chaleur)",
     },
     "forecast": {
         "label": "Projection « si tu continues comme ça »",

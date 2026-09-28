@@ -75,3 +75,63 @@ def test_race_day_page_flat_course_by_default(logged_in):
     labels = {m.label: m.value for m in at.metric}
     assert labels["Allure moyenne"].startswith("5:13")
     assert any("gel" in m.value for m in at.markdown)
+
+
+def test_race_day_band_builds_up_progressively(logged_in):
+    """Bug d'origine : sur le plat, le bracelet donnait la même allure à chaque km."""
+    at = logged_in("10_Jour_de_course.py", rd_distance="10 km", rd_target="50:00").run()
+    assert not at.exception, [e.value for e in at.exception]
+    paces = at.dataframe[0].value["allure"].tolist()
+    assert paces[0] > paces[len(paces) // 2] > paces[-1]          # "5:04" > "5:00" > "4:55"
+    assert any("dernières courses" in m.value for m in at.markdown)   # courses passées relues
+    next(w for w in at.button_group if w.label == "Stratégie d'allure").set_value("even").run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert at.dataframe[0].value["allure"].nunique() == 1
+
+
+def test_race_day_heat_shifts_the_band(logged_in):
+    at = logged_in("10_Jour_de_course.py", rd_distance="10 km", rd_target="50:00",
+                   rd_temp=30.0, rd_dew=20.0).run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert not at.metric[0].value.startswith("5:00")              # bracelet calé sur l'objectif corrigé
+    at.checkbox(key="rd_heat_apply").uncheck().run()
+    assert at.metric[0].value.startswith("5:00")
+
+
+def test_ai_coach_replays_a_past_day_and_adds_the_session_slot(logged_in):
+    from datetime import date, time, timedelta
+    past = date.today() - timedelta(days=20)
+    slot = date.today() + timedelta(days=2)
+    at = logged_in("7_AI_Coach.py", ai_asof=past, ai_slot_on=True, ai_slot_date=slot,
+                   ai_slot_time=time(7, 30)).run()
+    assert not at.exception, [e.value for e in at.exception]
+    prompt = at.code[0].value
+    assert f"au {past:%d/%m/%Y}" in prompt
+    assert "Prédictions Garmin" not in prompt                      # rien du présent dans le passé
+    assert "Prochaine séance prévue" in prompt and "07 h 30" in prompt
+    listed = [line[2:12] for line in prompt.splitlines() if line.startswith("- ") and " | " in line]
+    assert listed and all(date(int(d[6:]), int(d[3:5]), int(d[:2])) <= past for d in listed)   # …jusqu'à la date
+
+
+def test_calendar_compares_two_runs(logged_in):
+    at = logged_in("11_Calendrier.py", cmp_a=1000, cmp_b=1017).run()
+    assert not at.exception, [e.value for e in at.exception]
+    text = " ".join(m.value for m in at.markdown)
+    assert "De A à B" in text and "conditions égales" in text
+    assert "Le bloc d'avant" in text
+    block = at.dataframe[0].value
+    assert "Fraîcheur (TSB) la veille" in block["Indicateur"].tolist()
+    # La plus ancienne devient A partout (listes comprises), quel que soit l'ordre des clics
+    assert at.session_state["cmp_a"] == 1017 and at.session_state["cmp_b"] == 1000
+    at.button(key="cal_clear").click().run()
+    assert not at.exception and not at.dataframe
+
+
+def test_calendar_kind_filter(logged_in):
+    at = logged_in("11_Calendrier.py").run()
+    assert not at.exception, [e.value for e in at.exception]
+    for choice in ("race", "training", "both"):
+        next(w for w in at.button_group if w.label == "Sorties").set_value(choice).run()
+        assert not at.exception, (choice, [e.value for e in at.exception])
+    at.button(key="cal_prev").click().run()
+    assert not at.exception, [e.value for e in at.exception]

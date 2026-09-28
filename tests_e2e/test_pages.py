@@ -51,3 +51,16 @@ def test_race_day_gpx_upload_builds_the_pace_band(open_page, tmp_path):
     settle(page)
     expect(page.get_by_text("Bracelet d'allure")).to_be_visible()
     expect(page.get_by_text("Dénivelé").first).to_be_visible()
+
+
+def test_calendar_two_clicks_compare_the_runs(open_page):
+    page = open_page("/calendrier")
+    points = page.locator(".st-key-card-cal-grid .scatterlayer .trace:not(:first-child) .point")
+    points.first.wait_for()
+    assert points.count() >= 2
+    points.nth(0).click(force=True)
+    settle(page)
+    page.locator(".st-key-card-cal-grid .scatterlayer .trace:not(:first-child) .point").nth(1).click(force=True)
+    settle(page)
+    expect(page.get_by_text("De A à B")).to_be_visible(timeout=15000)
+    expect(page.get_by_text("Kilomètre par kilomètre")).to_be_visible()
