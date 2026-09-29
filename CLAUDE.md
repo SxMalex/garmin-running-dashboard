@@ -323,7 +323,8 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   pré-passe **expat** (tout encodage, toute position — un filtre sur les octets
   se contournait en UTF-16 ; expat ≥ 2.4.1 bloque de toute façon l'explosion
   d'entités). La trace (`trk`) prime sur la route (`rte`) — les mettre bout à
-  bout triplait la distance ; traces contiguës (≤ 200 m) enchaînées SAUF si la
+  bout triplait la distance ; segments d'une même trace : écart compté jusqu'à 1 km
+  (coupure GPS), au-delà pièces séparées (`SEGMENT_GAP_M`) ; traces contiguës (≤ 200 m) enchaînées SAUF si la
   chaîne est déjà bouclée (variantes 10 km / semi partant de la même arche) —
   mais un tour de plus de la même boucle (±5 %, même tracé) s'enchaîne (marathon
   en deux tours) ; sinon la plus longue. La route sert si la trace manque, est
@@ -336,7 +337,7 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   Cartes de test réalistes : `tests/fixtures/gpx/make_cards.py` →
   `tests/test_gpx_cards.py` (et e2e). Temps visé : remis au défaut du parcours
   quand il change, lu en h:mm dès 18 km (`reading_distance`), refusé hors
-  2:30-15:00/km (`implausible_target`). Allure = coût Minetti, gain en
+  2:30-20:00/km à plat équivalent (`implausible_target`, `flat_equivalent_km`). Allure = coût Minetti, gain en
   descente plafonné (× 0,88) ; météo Garmin en °F convertie. Stratégie
   `progressive` par défaut sur la page (départ +1,5 à 2,5 %, accélération sur le
   dernier cinquième, `progression_shape` selon la distance) : `even` seule donne
