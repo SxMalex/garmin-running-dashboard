@@ -55,8 +55,13 @@ les slots catégoriels ni réutiliser les couleurs status comme séries).
   `ui_theme.py`. L'accent volt ne sert qu'en **aplat** (jamais du texte sur clair) ;
   états = pastilles `STATUS_TEXT`/`STATUS_BG` (≥ 4,5:1). Cartes =
   `st.container(key="card-…")`. Tout texte externe injecté en HTML passe par
-  `ui_theme.esc` (une ligne vide rouvrirait le Markdown). Contrastes gardés par
-  `tests_ui/test_theme_ui.py`.
+  `ui_theme.esc` (une ligne vide rouvrirait le Markdown) ; en Markdown, par
+  `formatting.md_escape`, qui met aussi « : » en entité `&#58;` (un backslash ne
+  neutralise pas les icônes `:material/x:` de Streamlit — vérifié au navigateur).
+  Contrastes gardés par `tests_ui/test_theme_ui.py` : `weak_colours` lit le code
+  (ast, f-strings comprises) et refuse toute couleur en dur hors tokens
+  `chart_theme` ou sous 3:1 — hex 3/4/6/8, `rgb/rgba/hsl` en toute casse, et
+  toute couleur calculée. Couleurs de séries : `ct.rgba(token, alpha)`.
 - **Tests UI** : `logged_in(name)` passe par le routeur (premier run puis
   `switch_page`) — `AppTest.from_file` sur une page seule ne connaîtrait pas les
   `st.page_link`.
@@ -109,6 +114,22 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   le profil et NE dumpe PAS les tokens → `login_with_credentials` /
   `complete_mfa` dans `garmin_client.py` gèrent le dump + rechargent une session
   propre via `resume_session()`. Ne pas "simplifier" ce flux.
+- **Session partagée par le process** (`shared_session` / `adopt_session` /
+  `end_session`) : UN objet Garmin pour tous les onglets (mono-utilisateur).
+  0.3.6 réécrit `garmin_tokens.json` à chaque rafraîchissement
+  (`client._tokenstore_path`) : un objet par onglet recréait le fichier après une
+  déconnexion. La déconnexion neutralise l'objet (chemin puis jetons à None, sous
+  le verrou de rafraîchissement, et à nouveau au retour d'un rafraîchissement en
+  vol) avant d'effacer le tokenstore. `_refresh_session` est enveloppé : un seul
+  à la fois, et un seul par expiration. Aucun appel réseau sous `_SESSION_LOCK` ;
+  reprise sous `_RESUME_LOCK`, pas rejouée avant `RESUME_RETRY_S` après un échec.
+  Les pages lisent la session à chaque run (`ui_helpers.get_session_api`).
+- **Identifiant d'athlète** : `resolve_athlete_id` → (id, fiable). 3 essais,
+  puis l'id déjà connu du compte (`DATA_DIR/athlete_ids.json`, écrit de façon
+  atomique, partagé avec le MCP), sinon md5 du display_name marqué NON fiable,
+  retenté en arrière-plan 1×/min. Sous un id non fiable : `9_Objectif` n'écrit
+  rien, les pages ne lisent pas le plan (`ui_helpers.validated_plan_sessions`,
+  avis affiché), le MCP reconstruit son client au plus 1×/min.
 - **Cadence** : Garmin envoie déjà des pas/min (`averageRunningCadenceInStepsPerMinute`,
   `averageRunCadence` des laps, stream `directDoubleCadence`) — **ne jamais doubler**
   (contrairement aux RPM Strava).
@@ -179,24 +200,30 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   L'allure seuil vient de `reference_threshold_sec()` : un seuil **unique** pour
   tout l'historique, sinon les TSS ne sont plus comparables d'une année à l'autre —
   et il ne lit que la course, même sur le DataFrame complet.
-  Le **TSB a une seule définition** : `tsb = ctl - atl` en fin de journée, posée
-  dans `compute_pmc_series()` et simplement relue par `compute_tsb()`. C'est ce
-  qui aligne la métrique du haut de `3_Forme`, celle de `tab_charge`, l'Accueil,
-  `5_Next_Session`, `7_AI_Coach` et la courbe du Comparatif — et qui fait que le
-  TSB tracé est bien l'écart vertical entre les courbes CTL et ATL. Une variante
-  « fraîcheur d'avant-séance » ferait réapparaître deux TSB sur la même page.
+  Le **TSB a une seule définition** : `tsb = round(ctl, 1) − round(atl, 1)` en fin
+  de journée (la soustraction des deux chiffres affichés), posée dans
+  `compute_pmc_series()` et simplement relue par `compute_tsb()`, `tab_charge`,
+  le Comparatif et le Calendrier — jamais recalculée ailleurs (sinon 40,04 /
+  30,05 donnait +9,9 en haut de `3_Forme` et 10,0 dans l'onglet Charge). L'écart
+  au `ctl − atl` brut reste ≤ 0,1 sur la courbe. Libellé de fraîcheur des
+  métriques : `forme_logic.tsb_metric_delta` (seuils `TSB_FRESH` / `TSB_FATIGUE`),
+  le même partout. Une variante « fraîcheur d'avant-séance » ferait réapparaître
+  deux TSB sur la même page. Test à la limite d'arrondi : `tests/pmc_edge.py`.
 - **Heatmap** : logique pure dans `heatmap_logic.py`, testée.
-- **Coach Garmin** : `coach_logic.py`, testé. Accueil et `5_Next_Session` passent
-  tous deux par `ui_helpers.cached_coach_context()` + `merge_coach_into_recommendation()`
-  — toute page qui annonce une séance doit suivre ce chemin, sinon elle affiche une
-  reco divergente de celle de la montre. `merge_coach_into_recommendation()`
+- **Coach Garmin** : `coach_logic.py`, testé. Toute page qui annonce une séance
+  passe par `ui_helpers.cached_coach_context()` puis
+  `next_session_logic.todays_session` (cf. « Séance du jour ») — sinon elle
+  affiche une reco divergente de celle de la montre. `merge_coach_into_recommendation()`,
+  appelée par `todays_session`,
   fait piloter la séance par le plan adaptatif tout en respectant le contrat de
   `recommend_session` — ne pas casser ce contrat, la page et le générateur ORS en
   dépendent. On **avertit** sans réécrire la séance quand la récup est dégradée :
   réécrire ferait diverger le dashboard de la montre.
 - **Comparatif annuel** : `comparatif_logic.py`, testé. `aligned_doy()` corrige les
   années bissextiles (le 1er mars vaut 60 partout) — c'est ce qui garantit que les
-  courbes des années se superposent sur le bon jour.
+  courbes des années se superposent sur le bon jour. Le face-à-face du jour
+  (`day_comparison(df, date)`) filtre sur le vrai (mois, jour) : le 29 février ne
+  retombe pas sur le 28.
 - **Tests** : `tests/` couvre la calibration (`cross_training_factor`), la
   décomposition (`daily_tss`) et la non-régression du PMC course-seule — un
   historique 100 % course doit donner exactement les mêmes CTL/ATL/TSB qu'avant.
@@ -217,12 +244,19 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   sans refaire la mesure sur de vrais streams (cache local, lecture seule).
 - **Streams** : bucket `streams/` du cache, TTL `STREAMS_CACHE_TTL` (30 j),
   conservé par « Actualiser » ; les boucles multi-activités sont bornées
-  (`DECOUPLING_TREND_MAX_RUNS`) et s'arrêtent au premier refus Garmin.
+  (`DECOUPLING_TREND_MAX_RUNS`) et s'arrêtent au premier refus Garmin : seuls
+  404/410 (activité supprimée) sautent une sortie
+  (`garmin_client.skippable_activity_error`), et deux d'affilée arrêtent
+  (`MAX_SKIPPED_IN_ROW` : c'est alors l'endpoint qui manque) ; 400, 401/403
+  (jetons révoqués, blocage), 429, 5xx et réseau arrêtent la boucle. Un refus
+  strict reste un appel réel : cooldown aussi sur le chemin d'erreur.
 - **Plan** (`race_plan_logic.py`) : déterministe ; semaines calendaires ; allures
   de prescription = course récente > prédiction Garmin × 1,03 > entraînements —
   JAMAIS `reference_threshold_sec` (réservé au TSS) ; volume annoncé = volume
-  prescrit (±10 %) ; renfo jamais la veille d'une séance clé ni le jour de la
-  sortie longue, arrêt J-9 (règles sourcées dans `SOURCES`).
+  prescrit (±10 %) — semaine 1 entamée comprise : elle annonce ce qui reste
+  prescrit et la progression démarre à la première semaine complète ; renfo
+  jamais la veille d'une séance clé ni le jour de la sortie longue, arrêt J-9
+  (règles sourcées dans `SOURCES`).
 - **Plan figé** : une fois validé, c'est `goal_store.validated.plan` qui
   s'affiche et s'envoie, pas un recalcul du jour.
 - **Écriture Garmin** (page Objectif uniquement, `GARMIN_WRITE_ENABLED`) : l'**envoi**
@@ -234,11 +268,28 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   verrou (`goal_store.locked`, réentrant), réconciliation par étiquette avec
   planification vérifiée, et `remove_workout(required_tag=)` avant toute
   suppression. Dédup par créneau (jour + course/renfo), pas par type.
+  Réconciliation d'une séance retrouvée (journal perdu) : par ÉTIQUETTE (un
+  créneau renommé reste le même), contenu relu (`get_workout`) et comparé
+  (`workout_export.workout_content`, nombres à 1e-3 près : Garmin relit en
+  float32) — différent → `UNVERIFIED_FINGERPRINT`,
+  compté périmé et non planifié ; copies étiquetées (« Copie de … ») : la copie
+  vérifiée est retenue, les autres signalées. Noms lus dans Garmin affichés
+  via `md_escape`. Planification cherchée à ±7 jours
+  (`find_schedule`, séance déplacée dans Garmin Connect : pas de doublon). Chaque
+  appel d'écriture ou de listing est suivi du cooldown (`_paced`, même sur
+  erreur). La garde Run Coach s'affiche sur une lecture fraîche de < 60 s mais
+  est RELUE en strict au clic « Envoyer ». Jetons garth hérités
+  (`oauth1/2_token.json`) purgés à la reprise, côté dashboard et MCP.
 - **Modes Light/Pro** (`ui_mode.py`) : état hors clés de widget ; les réglages
   Pro ne portent que sur les seuils physio, jamais sur CTL/ATL (un seul TSB).
 - **Intensité** (`activities_logic`) : IF = allure seuil du TSS
-  (`reference_threshold_sec`) ÷ allure, TSS = `next_session_logic.pace_tss` —
-  exactement la charge du PMC (testé). Zones : < 0,78 récup … > 1,03 VMA.
+  (`reference_threshold_sec`) ÷ allure. TSS = `next_session_logic.activity_tss`,
+  la formule par activité que `daily_tss` agrège — exactement la charge du PMC
+  (plafond, courses sans allure exclues, sport croisé). Sur une vue filtrée,
+  `enrich(filtered, seuil, history=df)` : le facteur du sport croisé se calibre
+  sur l'historique complet (calibré sur le filtre, un wing valait 50 au lieu de
+  200). Calcul par position : un index dupliqué ne mélange rien. Zones : < 0,78
+  récup … > 1,03 VMA.
 - **Projections** (`forecast_logic`) : tendance Theil-Sen sur 8 semaines, départ
   ancré sur la médiane des 7 derniers jours (sinon une saison en V projetait une
   régression alors que la forme remonte), gains amortis (τ 75 j), plafonds
@@ -252,7 +303,17 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   unique Accueil (`pages/0_Accueil.py`) / Prochaine sortie / MCP. Priorité : Run Coach actif (même sans
   séance à venir) > plan Objectif validé (celui que la page Objectif envoie) >
   logique interne. La séance du jour du plan est ignorée si une course est déjà
-  enregistrée aujourd'hui.
+  enregistrée aujourd'hui. Moins de `MIN_RUNS_FOR_SESSION` (3) courses datées :
+  pas de séance (None, jamais d'exception). État Run Coach inconnu (Garmin muet,
+  `coach_logic.COACH_UNKNOWN`, jamais mis en cache ; UNE lecture
+  `get_training_plans(strict=True, use_cache=True)` — la garde d'écriture, elle,
+  lit toujours frais) — seule une panne Garmin/réseau (`is_garmin_failure`)
+  devient « inconnu », un bug de lecture remonte : ni Run Coach ni le plan
+  Objectif ne sont annoncés à sa place — séance du dashboard avec un avis
+  (Accueil, Prochaine sortie, Coach IA, MCP `coach_plan.status = "unknown"`).
+  Semaine de l'Accueil : un renfo ne marque pas « fait » un jour où une course
+  est prévue ; allure et FC du mois = `home_logic.run_totals` (période seule,
+  allure = temps ÷ distance, FC pondérée par la durée).
 
 ## Serveur MCP (`garmin_mcp/`)
 
