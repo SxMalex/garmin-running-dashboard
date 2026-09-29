@@ -121,9 +121,12 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   `end_session`) : UN objet Garmin pour tous les onglets (mono-utilisateur).
   0.3.6 réécrit `garmin_tokens.json` à chaque rafraîchissement
   (`client._tokenstore_path`) : un objet par onglet recréait le fichier après une
-  déconnexion. La déconnexion neutralise l'objet (chemin puis jetons à None, sous
-  le verrou de rafraîchissement, et à nouveau au retour d'un rafraîchissement en
-  vol) avant d'effacer le tokenstore. `_refresh_session` est enveloppé : un seul
+  déconnexion. La déconnexion neutralise l'objet SANS attendre (chemin puis
+  jetons à None), puis efface le tokenstore ; un rafraîchissement en vol efface
+  à son retour ses jetons ET le fichier qu'il a pu réécrire (s'il porte un de
+  ses jetons — jamais celui d'une reconnexion faite entre-temps). Limite : le
+  jeton n'est pas révoqué côté Garmin (la bibliothèque ne l'expose pas), il
+  n'existe simplement plus nulle part côté dashboard. `_refresh_session` est enveloppé : un seul
   à la fois, et un seul par expiration. Aucun appel réseau sous `_SESSION_LOCK` ;
   reprise sous `_RESUME_LOCK`, pas rejouée avant `RESUME_RETRY_S` après un échec.
   Les pages lisent la session à chaque run (`ui_helpers.get_session_api`).
@@ -206,7 +209,9 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   Le **TSB a une seule définition** : `tsb = round(ctl, 1) − round(atl, 1)` en fin
   de journée (la soustraction des deux chiffres affichés), posée dans
   `compute_pmc_series()` et simplement relue par `compute_tsb()`, `tab_charge`,
-  le Comparatif et le Calendrier — jamais recalculée ailleurs (sinon 40,04 /
+  le Comparatif et le Calendrier — ailleurs, seulement recomposée à partir des
+  MÊMES CTL/ATL arrondis de la série (Calendrier, Coach IA « situation au »), ce
+  qui donne le même chiffre (sinon 40,04 /
   30,05 donnait +9,9 en haut de `3_Forme` et 10,0 dans l'onglet Charge). L'écart
   au `ctl − atl` brut reste ≤ 0,1 sur la courbe. Libellé de fraîcheur des
   métriques : `forme_logic.tsb_metric_delta` (seuils `TSB_FRESH` / `TSB_FATIGUE`),

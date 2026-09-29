@@ -137,6 +137,18 @@ def planned_from_goal(sessions: list[dict] | None) -> list[dict]:
     return out
 
 
+def planned_from_suggestion(rec: dict | None, today: date) -> list[dict]:
+    """
+    Sans plan (ni Run Coach ni Objectif) : la sortie que le dashboard propose
+    AUJOURD'HUI, pour que la semaine ne coche pas « fait » la journée sur un
+    renfo du matin alors que la carte séance annonce encore une course.
+    """
+    if not rec or rec.get("suggested_date") != today:
+        return []
+    label = (rec.get("session") or {}).get("label") or "Course"
+    return [{"date": today.isoformat(), "label": label, "run": True}]
+
+
 def planned_from_coach(coach: dict | None) -> list[dict]:
     """Séances à venir du plan Garmin Run Coach → entrées de `week_days`."""
     out = []

@@ -1483,6 +1483,90 @@ def test_is_garmin_failure(exc, failure):
     assert gcm.is_garmin_failure(exc) is failure
 
 
+def test_logout_during_the_librarys_own_dump_leaves_no_token_file(session_env, monkeypatch):
+    """Contre-validation : déconnexion pendant que garminconnect est DANS dump() (chemin déjà lu)
+    — le fichier était réécrit après l'effacement du tokenstore."""
+    import base64
+    import json
+    import threading
+    import time as _t
+    from garminconnect import Garmin
+    gcm, store = session_env
+    monkeypatch.setattr(gcm, "resolve_athlete_id", lambda api: (42, True))
+
+    def jwt(exp):
+        b = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")
+        return f"{b({'alg': 'none'})}.{b({'exp': exp, 'client_id': 'cid'})}.sig"
+
+    store.mkdir(parents=True, exist_ok=True)
+    (store / "garmin_tokens.json").write_text(json.dumps(
+        {"di_token": jwt(_t.time() - 10), "di_refresh_token": "r", "di_client_id": "cid"}))
+    api = Garmin()
+    api.client.load(str(store))
+    api.client._refresh_di_token = lambda: setattr(api.client, "di_token", jwt(_t.time() + 3600))
+    real_dump = type(api.client).dump
+
+    def slow_dump(path):                      # élargit la fenêtre entre lecture du chemin et écriture
+        _t.sleep(0.3)
+        real_dump(api.client, path)
+    api.client.dump = slow_dump
+    gcm.adopt_session(api)
+    tab = threading.Thread(target=api.client._refresh_session)
+    tab.start()
+    _t.sleep(0.1)
+    gcm.end_session()
+    tab.join()
+    assert not (store / "garmin_tokens.json").exists()
+
+
+def test_a_new_login_during_a_stale_refresh_is_not_wiped(session_env, monkeypatch):
+    """Le nettoyage au retour ne supprime que le fichier de l'ANCIENNE session : déconnexion
+    puis reconnexion pendant qu'un vieux rafraîchissement est en vol."""
+    import json
+    import threading
+    import time as _t
+    gcm, store = session_env
+
+    class Slow(_StubClient):
+        def _refresh_session(self):
+            _t.sleep(0.3)
+            self.di_refresh_token = "OLD-FRESH"
+
+    old = _StubApi(Slow(store))
+    gcm.adopt_session(old)
+    tab = threading.Thread(target=old.client._refresh_session)
+    tab.start()
+    _t.sleep(0.05)
+    gcm.end_session()
+    store.mkdir(parents=True, exist_ok=True)
+    (store / "garmin_tokens.json").write_text(json.dumps({"di_refresh_token": "NEW-LOGIN"}))
+    tab.join()
+    assert json.loads((store / "garmin_tokens.json").read_text()) == {"di_refresh_token": "NEW-LOGIN"}
+    # Et si c'est bien l'ancien jeton qui a été écrit, il disparaît
+    (store / "garmin_tokens.json").write_text(json.dumps({"di_refresh_token": "refresh"}))
+    gcm._remove_tokens_of(str(store), {"refresh"})
+    assert not (store / "garmin_tokens.json").exists()
+
+
+def test_remove_tokens_of_edge_cases(session_env, monkeypatch, caplog):
+    import json
+    gcm, store = session_env
+    gcm._remove_tokens_of(None, {"x"})                          # pas de chemin : rien
+    gcm._remove_tokens_of(str(store), {"x"})                    # pas de fichier : rien, sans erreur
+    store.mkdir(parents=True, exist_ok=True)
+    f = store / "garmin_tokens.json"
+    f.write_text("{pas du json")
+    gcm._remove_tokens_of(str(store), {"x"})
+    assert f.exists()                                           # illisible : on ne supprime pas à l'aveugle
+    f.write_text(json.dumps({"di_refresh_token": "x"}))
+    gcm._remove_tokens_of(str(f), {"x"})                        # chemin du fichier lui-même
+    assert not f.exists()
+    f.write_text(json.dumps({"di_refresh_token": None}))
+    monkeypatch.setattr(type(f), "unlink", lambda self, **k: (_ for _ in ()).throw(OSError("verrouillé")))
+    gcm._remove_tokens_of(str(store), {"x"})                    # suppression impossible : journalisé
+    assert "non supprimés" in caplog.text
+
+
 def test_activity_weather_is_cached_and_tolerant(tmp_path, monkeypatch):
     import garmin_client as gcm
     monkeypatch.setattr(gcm, "CACHE_DIR", tmp_path)

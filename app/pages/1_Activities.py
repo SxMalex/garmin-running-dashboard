@@ -345,7 +345,7 @@ filtered = filtered[
 
 if search_name:
     filtered = filtered[
-        filtered["activityName"].str.contains(search_name, case=False, na=False)
+        filtered["activityName"].str.contains(search_name, case=False, na=False, regex=False)
     ]
 
 filtered = filtered.sort_values("startTimeLocal", ascending=False)

@@ -11,7 +11,7 @@ import re
 from datetime import date, timedelta
 
 from formatting import seconds_to_pace_str
-from next_session_logic import SESSION_TYPES
+from next_session_logic import SESSION_TYPES, format_date_fr
 
 # Statut Garmin d'un plan en cours (les plans terminés sont « Completed »).
 _ACTIVE_STATUS = "scheduled"
@@ -357,6 +357,7 @@ def merge_coach_into_recommendation(rec: dict, context: dict | None) -> dict:
     merged["target_pace_str"] = seconds_to_pace_str(merged["target_pace_sec"])
     merged["session"] = SESSION_TYPES[task["session_key"]]
     merged["suggested_date"] = task["date"]
+    merged["suggested_date_str"] = format_date_fr(task["date"])   # le texte suit la date
     # Une séance imposée n'est pas une séance rétrogradée : on efface le signal
     # de la logique interne pour ne pas afficher deux messages contradictoires.
     merged["downgraded_from"] = None

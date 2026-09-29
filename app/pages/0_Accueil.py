@@ -23,6 +23,7 @@ from home_logic import (
     spike_signal,
     planned_from_coach,
     planned_from_goal,
+    planned_from_suggestion,
     run_totals,
     week_days,
 )
@@ -249,6 +250,7 @@ _week = run_totals(df, TODAY - timedelta(days=TODAY.weekday()))
 _month = run_totals(df, TODAY.replace(day=1))
 with col_week, st.container(key="card-week"):
     _planned = planned_from_coach(_coach) if _coach else planned_from_goal(_goal_plan)
+    _planned = _planned or planned_from_suggestion(_today_session["rec"], TODAY)
     html_block(
         '<div class="gd-session-top"><div class="gd-kicker">Cette semaine</div>'
         f'<div><strong class="gd-big" style="font-size:1.6rem">{_week["km"]:g}</strong> km · '
