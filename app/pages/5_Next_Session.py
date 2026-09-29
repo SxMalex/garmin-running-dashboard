@@ -19,6 +19,7 @@ from coach_logic import (
 from formatting import map_zoom, md_escape, seconds_to_pace_str, weekday_fr
 from forme_logic import hrv_label, parse_recovery, tsb_metric_delta
 from next_session_logic import (
+    MIN_RUNS_FOR_SESSION,
     SESSION_TYPES,
     parse_ors_route as _parse_ors_route,
     build_gpx as _build_gpx,
@@ -178,8 +179,8 @@ if df.empty:
     st.stop()
 
 running_df = df[df["activityType"] == "running"].copy()
-if len(running_df) < 3:
-    st.warning("Il faut au moins 3 sorties pour générer une recommandation.")
+if len(running_df) < MIN_RUNS_FOR_SESSION:
+    st.warning(f"Il faut au moins {MIN_RUNS_FOR_SESSION} courses pour générer une recommandation.")
     st.stop()
 
 # Clé ORS
@@ -208,9 +209,20 @@ _coach = cached_coach_context(_athlete_id, _today.isoformat())
 _today_session = todays_session(df, _hrv_status, _sleep_score, _coach,
                                 validated_plan_sessions())
 rec = _today_session["rec"]
-s = SESSION_TYPES[rec["session_key"]]
-rec["session"] = s
+if rec is None:
+    # Même règle que todays_session : des courses DATÉES (une sortie sans heure de
+    # départ ne compte pas) — la garde du nombre ci-dessus ne suffit pas.
+    st.warning(f"Il faut au moins {MIN_RUNS_FOR_SESSION} courses datées pour générer une "
+               "recommandation.")
+    st.stop()
+s = rec["session"]                     # posée par recommend_session / les fusions de plan
 _coach_task = rec.get("coach_task")
+if _today_session["coach_unknown"]:
+    # Même avis que l'Accueil : pendant une panne, ni Run Coach ni le plan
+    # Objectif ne sont annoncés à la place de ce que la montre suit.
+    st.info("Garmin n'a pas répondu sur ton plan Run Coach : séance calculée par le "
+            "dashboard. Si un plan Run Coach est en cours, c'est ta montre qui fait foi.",
+            icon=":material/cloud_off:")
 
 # Sidebar — paramètres
 with st.sidebar:

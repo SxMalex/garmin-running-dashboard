@@ -39,7 +39,7 @@ SESSION_TYPES = {
     "endurance": {
         "label": "Endurance fondamentale",
         "icon": "🏃",
-        "color": "#199e70",
+        "color": "#189a6d",          # chart_theme.AQUA
         "description": "Séance clé du coureur. Allure confortable, conversation possible. Développe le moteur aérobie.",
         "dist_factor": 1.00,
         "pace_factor": 1.05,
@@ -57,7 +57,7 @@ SESSION_TYPES = {
     "sortie_longue": {
         "label": "Sortie longue",
         "icon": "🏔️",
-        "color": "#9085e9",
+        "color": "#867ae7",          # chart_theme.VIOLET
         "description": "Excellente fraîcheur. C'est le moment idéal pour une longue sortie et construire ton endurance.",
         "dist_factor": 1.40,
         "pace_factor": 1.10,
@@ -660,6 +660,7 @@ def merge_goal_plan_into_recommendation(rec: dict, sessions: list[dict] | None,
     merged = dict(rec)
     merged.update(
         session_key=_GOAL_KIND_TO_SESSION[s["kind"]],
+        session=SESSION_TYPES[_GOAL_KIND_TO_SESSION[s["kind"]]],
         goal_session=s,
         target_dist_km=s.get("distance_km") or rec.get("target_dist_km"),
         duration_min=s.get("duration_min") or rec.get("duration_min"),
@@ -672,27 +673,44 @@ def merge_goal_plan_into_recommendation(rec: dict, sessions: list[dict] | None,
     return merged
 
 
-def todays_session(activities_df: pd.DataFrame, hrv_status, sleep_score,
+# Sous ce nombre de courses datées, les moyennes récentes (distance, allure)
+# qui dimensionnent la séance ne veulent rien dire : aucune séance annoncée.
+MIN_RUNS_FOR_SESSION = 3
+
+
+def todays_session(activities_df: pd.DataFrame | None, hrv_status, sleep_score,
                    coach_context: dict | None, goal_sessions: list[dict] | None = None) -> dict:
     """
     Séance du jour telle que l'annonce toute l'app : plan Garmin Run Coach s'il
     est actif (même sans séance de course à venir : la montre le suit), sinon
     le plan Objectif validé du dashboard, sinon la logique interne, modulée par
-    la récupération (HRV, sommeil). Retourne {"rec", "downgrade", "alert"}.
-    Accueil, Prochaine sortie et serveur MCP passent tous par ici — une page
-    qui recomposerait ces appels risquerait d'annoncer une autre séance.
+    la récupération (HRV, sommeil). Retourne {"rec", "downgrade", "alert",
+    "coach_unknown"}. Accueil, Prochaine sortie et serveur MCP passent tous par
+    ici — une page qui recomposerait ces appels risquerait d'annoncer une autre
+    séance.
+
+    `rec` vaut None sous `MIN_RUNS_FOR_SESSION` courses datées (historique vide
+    ou None, sport croisé seul). `coach_context` = `coach_logic.COACH_UNKNOWN`
+    (Garmin n'a pas répondu) : `coach_unknown` est vrai et le plan Objectif
+    n'est PAS annoncé — un Run Coach peut être actif, la séance reste celle de
+    la logique interne en attendant que Garmin réponde.
     """
-    from coach_logic import hard_session_alert, merge_coach_into_recommendation
+    from coach_logic import coach_unknown, hard_session_alert, merge_coach_into_recommendation
 
     downgrade = forme_downgrade(hrv_status, sleep_score)
-    has_data = activities_df is not None and not activities_df.empty
-    running = activities_df[activities_df["activityType"] == RUNNING_TYPE] if has_data else pd.DataFrame()
+    unknown = coach_unknown(coach_context)
+    out = {"rec": None, "downgrade": downgrade, "alert": None, "coach_unknown": unknown}
+    if activities_df is None or activities_df.empty or "activityType" not in activities_df:
+        return out
+    running = activities_df[activities_df["activityType"] == RUNNING_TYPE]
+    running = running[pd.to_datetime(running["startTimeLocal"], errors="coerce").notna()]
+    if len(running) < MIN_RUNS_FOR_SESSION:
+        return out
     base = recommend_session(running, downgrade=downgrade, load_df=activities_df)
     rec = merge_coach_into_recommendation(base, coach_context)
     alert = hard_session_alert(coach_context, downgrade)
     if coach_context is None and goal_sessions:
-        ran_today = bool(not running.empty and (
-            pd.to_datetime(running["startTimeLocal"]).dt.date == date.today()).any())
+        ran_today = bool((pd.to_datetime(running["startTimeLocal"]).dt.date == date.today()).any())
         rec = merge_goal_plan_into_recommendation(base, goal_sessions, ran_today=ran_today)
         rec["coach"] = rec["coach_task"] = None
         goal = rec.get("goal_session")
@@ -703,4 +721,4 @@ def todays_session(activities_df: pd.DataFrame, hrv_status, sleep_score,
         elif goal and downgrade and goal["kind"] in _GOAL_KEY_KINDS:
             alert = ("Récupération dégradée (HRV ou sommeil) et séance clé au programme de "
                      "ton plan Objectif : écoute tes sensations, quitte à la décaler d'un jour.")
-    return {"rec": rec, "downgrade": downgrade, "alert": alert}
+    return dict(out, rec=rec, alert=alert)

@@ -123,8 +123,8 @@ def _render_streams(streams: dict, max_hr: int = 190) -> None:
             fig.add_trace(go.Scatter(
                 x=dist_km, y=alt,
                 fill="tozeroy",
-                fillcolor="rgba(144,133,233,0.16)",
-                line=dict(color="rgba(144,133,233,0.9)", width=1.5),
+                fillcolor=ct.rgba(ct.ALTITUDE, 0.16),
+                line=dict(color=ct.rgba(ct.ALTITUDE, 0.9), width=1.5),
                 name="Altitude",
                 customdata=customdata,
                 hovertemplate=(
@@ -151,7 +151,7 @@ def _render_streams(streams: dict, max_hr: int = 190) -> None:
             fig.add_trace(go.Scatter(
                 x=dist_km, y=clipped,
                 mode="lines",
-                line=dict(color="rgba(57,135,229,0.95)", width=1.5),
+                line=dict(color=ct.rgba(ct.PACE, 0.95), width=1.5),
                 name="Allure",
                 customdata=hover,
                 hovertemplate="%{x:.2f} km · %{customdata}<extra></extra>",
@@ -176,11 +176,11 @@ def _render_streams(streams: dict, max_hr: int = 190) -> None:
             hr = streams["heartrate"]
             # Bandes de zones FC en arrière-plan
             zone_bands = [
-                (0,              0.60 * max_hr, "rgba(57,135,229,0.07)"),
-                (0.60 * max_hr,  0.70 * max_hr, "rgba(25,158,112,0.08)"),
-                (0.70 * max_hr,  0.80 * max_hr, "rgba(201,133,0,0.10)"),
-                (0.80 * max_hr,  0.90 * max_hr, "rgba(217,89,38,0.10)"),
-                (0.90 * max_hr,  max_hr * 1.1,  "rgba(230,103,103,0.12)"),
+                (0,              0.60 * max_hr, ct.rgba(ct.ZONE_HEAT[0], 0.07)),
+                (0.60 * max_hr,  0.70 * max_hr, ct.rgba(ct.ZONE_HEAT[1], 0.08)),
+                (0.70 * max_hr,  0.80 * max_hr, ct.rgba(ct.ZONE_HEAT[2], 0.10)),
+                (0.80 * max_hr,  0.90 * max_hr, ct.rgba(ct.ZONE_HEAT[3], 0.10)),
+                (0.90 * max_hr,  max_hr * 1.1,  ct.rgba(ct.ZONE_HEAT[4], 0.12)),
             ]
             for y0, y1, color in zone_bands:
                 fig.add_hrect(y0=y0, y1=y1, fillcolor=color, line_width=0, row=row_idx, col=1)
@@ -188,9 +188,9 @@ def _render_streams(streams: dict, max_hr: int = 190) -> None:
             fig.add_trace(go.Scatter(
                 x=dist_km, y=hr,
                 mode="lines",
-                line=dict(color="rgba(230,103,103,0.9)", width=1.5),
+                line=dict(color=ct.rgba(ct.HR, 0.9), width=1.5),
                 fill="tozeroy",
-                fillcolor="rgba(230,103,103,0.08)",
+                fillcolor=ct.rgba(ct.HR, 0.08),
                 name="FC",
                 hovertemplate="%{x:.2f} km · %{y:.0f} bpm<extra></extra>",
             ), row=row_idx, col=1)
@@ -599,8 +599,8 @@ if _picked_id is not None and (filtered["activityId"] == _picked_id).any():
                 y=splits_df["pace_sec"].apply(lambda s: s / 60 if s > 0 else None),
                 name="Allure (min/km)",
                 marker_color=[
-                    "rgba(12,163,12,0.9)" if p > 0 and p < avg_split_pace
-                    else "rgba(57,135,229,0.85)"
+                    ct.rgba(ct.GOOD, 0.9) if p > 0 and p < avg_split_pace
+                    else ct.rgba(ct.PACE, 0.85)
                     for p in splits_df["pace_sec"]
                 ],
                 hovertemplate="<b>Lap %{x}</b><br>Allure : %{customdata}<extra></extra>",

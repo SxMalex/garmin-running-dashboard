@@ -4,14 +4,14 @@ nuit, la semaine et les signaux tirés des données. Le détail complet des
 activités vit sur la page Activités ; la forme sur Forme & récup.
 """
 
-from datetime import date, datetime
+from datetime import date, timedelta
 
 import pandas as pd
 import streamlit as st
 
 import goal_store
 from coach_logic import target_label
-from formatting import md_escape, weekday_fr
+from formatting import md_escape, seconds_to_pace_str, weekday_fr
 from forme_logic import compute_forme_verdict, hrv_label, parse_recovery
 from home_logic import (
     HOME_HEADLINES,
@@ -20,9 +20,11 @@ from home_logic import (
     home_signals,
     planned_from_coach,
     planned_from_goal,
+    run_totals,
     week_days,
 )
 from next_session_logic import (
+    MIN_RUNS_FOR_SESSION,
     SESSION_TYPES,
     compute_pmc_series,
     compute_tsb,
@@ -94,7 +96,6 @@ if df.empty:
     st.stop()
 
 running_df = df[df["activityType"] == "running"]
-client = get_garmin_client()
 TODAY = date.today()
 
 today = load_today(_athlete_id, TODAY.isoformat(), cache_nonce())
@@ -111,13 +112,15 @@ verdict = compute_forme_verdict(tsb, hrv_status, sleep_score)
 _why = " · ".join(verdict["reasons"]) or verdict["headline"]
 
 goal_sessions = validated_plan_sessions()
-rec = _coach = _today_session = None
-if len(running_df) >= 3:
-    # Même chaîne que Prochaine sortie et le MCP : Run Coach > plan Objectif
-    # validé > logique interne, modulée par la récupération du jour.
-    _coach = cached_coach_context(_athlete_id)
-    _today_session = todays_session(df, hrv_status, sleep_score, _coach, goal_sessions)
-    rec = _today_session["rec"]
+# Même chaîne que Prochaine sortie et le MCP : Run Coach > plan Objectif
+# validé > logique interne, modulée par la récupération du jour (rec = None
+# sous MIN_RUNS_FOR_SESSION courses).
+_coach = cached_coach_context(_athlete_id)
+_today_session = todays_session(df, hrv_status, sleep_score, _coach, goal_sessions)
+rec = _today_session["rec"]
+# Garmin muet sur Run Coach : le plan Objectif n'est annoncé nulle part (ni
+# séance, ni pastille, ni semaine) — un Run Coach peut être actif.
+_goal_plan = None if _today_session["coach_unknown"] else goal_sessions
 
 # ---------------------------------------------------------------------------
 # En-tête : la date, le verdict en une phrase, les pastilles
@@ -127,7 +130,7 @@ _MONTHS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "ao
 _date_txt = f"{weekday_fr(TODAY).capitalize()} {TODAY.day} {_MONTHS[TODAY.month - 1]}"
 _chips = [verdict_chip(verdict)]
 # Même priorité que la séance : Run Coach actif d'abord, sinon plan Objectif.
-_goal = goal_store.load(_athlete_id).get("goal") if goal_sessions and not _coach else None
+_goal = goal_store.load(_athlete_id).get("goal") if _goal_plan and not _coach else None
 if _coach:
     if _coach.get("days_to_event") is not None:
         _chips.append(chip(f"{_coach['plan']['name']} · J−{_coach['days_to_event']}"))
@@ -148,7 +151,8 @@ with col_session, st.container(key="card-session"):
     if rec is None:
         html_block(session_card(
             kicker="Séance du jour", number="—", unit="", title="Pas encore de séance suggérée",
-            why="Il faut au moins 3 courses dans l'historique pour proposer une séance."))
+            why=f"Il faut au moins {MIN_RUNS_FOR_SESSION} courses dans l'historique pour "
+                "proposer une séance."))
     else:
         s = SESSION_TYPES[rec["session_key"]]
         _task = rec.get("coach_task")
@@ -180,6 +184,10 @@ with col_session, st.container(key="card-session"):
                 title=s["label"], target=f"à {rec['target_pace_str']}",
                 when=rec["suggested_date_str"], why=_why)
         html_block(card)
+        if _today_session["coach_unknown"]:
+            st.info("Garmin n'a pas répondu sur ton plan Run Coach : séance calculée par le "
+                    "dashboard. Si un plan Run Coach est en cours, c'est ta montre qui fait foi.",
+                    icon=":material/cloud_off:")
         if _today_session["alert"]:
             st.warning(_today_session["alert"], icon=":material/health_and_safety:")
         with st.container(horizontal=True):
@@ -226,24 +234,26 @@ with col_rec, st.container(key="card-recovery"):
     rhr = daily.get("restingHeartRate")
     r4.metric("FC repos", f"{int(rhr)} bpm" if rhr else "—")
 
-metrics = client.get_summary_metrics(df)
+_week = run_totals(df, TODAY - timedelta(days=TODAY.weekday()))
+_month = run_totals(df, TODAY.replace(day=1))
 with col_week, st.container(key="card-week"):
-    _planned = planned_from_coach(_coach) if _coach else planned_from_goal(goal_sessions)
+    _planned = planned_from_coach(_coach) if _coach else planned_from_goal(_goal_plan)
     html_block(
         '<div class="gd-session-top"><div class="gd-kicker">Cette semaine</div>'
-        f'<div><strong class="gd-big" style="font-size:1.6rem">{metrics["km_semaine"]}</strong> km · '
-        f'{metrics["nb_sorties_semaine"]} sortie(s)</div></div>'
+        f'<div><strong class="gd-big" style="font-size:1.6rem">{_week["km"]:g}</strong> km · '
+        f'{_week["runs"]} sortie(s)</div></div>'
         + week_strip(week_days(df, TODAY, _planned))
     )
-    _month_mask = running_df["startTimeLocal"] >= datetime.now().replace(
-        day=1, hour=0, minute=0, second=0, microsecond=0)
     p1, p2, p3, p4 = st.columns(4)
-    p1.metric("Ce mois", f"{metrics['km_mois']} km",
-              delta=f"{metrics['nb_sorties_mois']} sortie(s)", delta_color="off", delta_arrow="off")
-    p2.metric("Allure moyenne", f"{metrics['pace_moyen']}")
-    p3.metric("D+ du mois", f"{int(running_df.loc[_month_mask, 'elevationGain'].fillna(0).sum())} m")
+    p1.metric("Ce mois", f"{_month['km']:g} km",
+              delta=f"{_month['runs']} sortie(s)", delta_color="off", delta_arrow="off")
+    p2.metric("Allure du mois", seconds_to_pace_str(_month["pace_sec"]),
+              help="Temps total ÷ distance totale des courses du mois.")
+    p3.metric("D+ du mois", f"{_month['elevation']:.0f} m")
     if is_pro():
-        p4.metric("FC moyenne", f"{metrics['hr_moyen']}")
+        p4.metric("FC moy. du mois",
+                  f"{_month['hr']:.0f} bpm" if _month["hr"] is not None else "—",
+                  help="Moyenne des FC moyennes des courses du mois, pondérée par leur durée.")
 
 # ---------------------------------------------------------------------------
 # Ce que tes données disent

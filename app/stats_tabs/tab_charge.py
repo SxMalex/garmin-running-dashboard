@@ -150,12 +150,12 @@ def render(activities_df: pd.DataFrame, cutoff: datetime) -> None:
         ))
     fig.add_trace(go.Scatter(
         x=pmc_view["date"], y=pmc_view["tsb"].clip(lower=0),
-        fill="tozeroy", fillcolor="rgba(12,163,12,0.10)",
+        fill="tozeroy", fillcolor=ct.rgba(ct.GOOD, 0.10),
         line=dict(width=0), showlegend=False, hoverinfo="skip",
     ))
     fig.add_trace(go.Scatter(
         x=pmc_view["date"], y=pmc_view["tsb"].clip(upper=0),
-        fill="tozeroy", fillcolor="rgba(208,59,59,0.10)",
+        fill="tozeroy", fillcolor=ct.rgba(ct.CRITICAL, 0.10),
         line=dict(width=0), showlegend=False, hoverinfo="skip",
     ))
     fig.add_trace(go.Scatter(
@@ -191,8 +191,8 @@ def render(activities_df: pd.DataFrame, cutoff: datetime) -> None:
         yaxis2=dict(
             title="TSS journalier", overlaying="y", side="right",
             showgrid=False, range=[0, max(tss_max * 4, 100)],
-            tickfont=dict(color="rgba(57,135,229,0.5)"),
-            titlefont=dict(color="rgba(57,135,229,0.5)"),
+            tickfont=dict(color=ct.INK_MUTED),
+            titlefont=dict(color=ct.INK_MUTED),
         ),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         margin=dict(l=0, r=60, t=40, b=0),

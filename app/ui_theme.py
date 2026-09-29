@@ -35,24 +35,6 @@ VERDICT_STATUS = {2: "good", 1: "neutral", 0: "serious"}
 
 
 
-def _luminance(hex_color: str) -> float:
-    h = hex_color.lstrip("#")
-    rgb = [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)]
-    rgb = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
-    return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
-
-
-def contrast(a: str, b: str) -> float:
-    """Rapport de contraste WCAG entre deux couleurs hex."""
-    la, lb = sorted((_luminance(a), _luminance(b)), reverse=True)
-    return (la + 0.05) / (lb + 0.05)
-
-
-def ink_on(background: str) -> str:
-    """Encre la plus lisible (blanc ou encre) sur un fond donné."""
-    return max(("#ffffff", ct.INK), key=lambda ink: contrast(background, ink))
-
-
 def _one_line(value) -> str:
     return " ".join(str(value).split())
 

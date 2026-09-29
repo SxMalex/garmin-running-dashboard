@@ -10,6 +10,9 @@ réponses brutes de l'API et rend des structures normalisées.
 import re
 from datetime import date, timedelta
 
+from formatting import seconds_to_pace_str
+from next_session_logic import SESSION_TYPES
+
 # Statut Garmin d'un plan en cours (les plans terminés sont « Completed »).
 _ACTIVE_STATUS = "scheduled"
 
@@ -349,6 +352,10 @@ def merge_coach_into_recommendation(rec: dict, context: dict | None) -> dict:
     # L'allure affichée reste celle à laquelle il courra le parcours : la cible
     # Garmin ne vaut que pour les répétitions, pas pour la séance entière.
     merged["target_pace_sec"] = reference_pace or rec.get("target_pace_sec")
+    # Chaîne et fiche de séance suivent (sinon l'allure et le type de la logique
+    # interne restaient affichés : en-tête du GPX, MCP).
+    merged["target_pace_str"] = seconds_to_pace_str(merged["target_pace_sec"])
+    merged["session"] = SESSION_TYPES[task["session_key"]]
     merged["suggested_date"] = task["date"]
     # Une séance imposée n'est pas une séance rétrogradée : on efface le signal
     # de la logique interne pour ne pas afficher deux messages contradictoires.
@@ -420,14 +427,38 @@ def hard_session_alert(context: dict | None, downgrade: int) -> str | None:
     )
 
 
+class CoachUnknown(dict):
+    """
+    État du plan Run Coach INCONNU : Garmin n'a pas répondu. Vide, donc faux
+    comme None pour l'affichage (« pas de plan à montrer »), mais distinct de
+    « aucun plan » pour `next_session_logic.todays_session` : pendant une
+    panne, le plan Objectif ne doit pas remplacer un Run Coach peut-être actif.
+    """
+
+
+COACH_UNKNOWN = CoachUnknown()
+
+
+def coach_unknown(context) -> bool:
+    """Vrai si l'état du plan Run Coach est inconnu (cf. `CoachUnknown`)."""
+    return isinstance(context, CoachUnknown)
+
+
 def load_coach_context(client, day: date) -> dict | None:
     """
-    Contexte du plan Garmin Run Coach actif pour `day`, ou None. `client` est
-    un GarminClient (ou tout objet exposant get_training_plans /
-    get_adaptive_plan) : c'est l'unique chemin de lecture du plan, partagé par
-    les pages (via ui_helpers.cached_coach_context) et le serveur MCP.
+    Contexte du plan Garmin Run Coach actif pour `day`, ou None s'il n'y en a
+    pas. `client` est un GarminClient (ou tout objet exposant
+    get_training_plans / get_adaptive_plan) : c'est l'unique chemin de lecture
+    du plan, partagé par les pages (via ui_helpers.cached_coach_context) et le
+    serveur MCP.
+
+    Relève l'erreur Garmin quand l'état est inconnu (la lecture tolérante
+    renvoyait {} aussi bien pour « aucun plan » que pour une panne) : une seule
+    lecture stricte, servie par le cache disque quand Garmin a vraiment
+    répondu. À l'appelant de traduire l'erreur en `COACH_UNKNOWN`, sans la
+    mettre en cache.
     """
-    plans = client.get_training_plans()
+    plans = client.get_training_plans(strict=True, use_cache=True)
     plan = active_plan(plans)
     if plan is None:
         return None

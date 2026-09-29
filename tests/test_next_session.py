@@ -1047,3 +1047,73 @@ def test_validated_sessions_only_when_current(tmp_path, monkeypatch):
     assert goal_store.validated_sessions(1) is None                    # préférences changées
     goal_store.save_goal(1, dict(goal, race_date="2020-01-01"), prefs)
     assert goal_store.validated_sessions(1) is None                    # course passée
+
+
+# ---------------------------------------------------------------------------
+# Revue PR 1 (lot L) : todays_session sans course, Run Coach inconnu, contrat
+# de la reco fusionnée (allure affichée et fiche de séance).
+# ---------------------------------------------------------------------------
+
+def _cross(n=5):
+    now = pd.Timestamp.now().normalize()
+    return pd.DataFrame([{"startTimeLocal": now - pd.Timedelta(days=2 * i), "activityType": "cycling",
+                          "distance_km": 30.0, "duration_min": 60.0, "avgPace_sec": 0.0,
+                          "avgHR": 130.0, "elevationGain": 100.0, "trainingLoad": 80.0}
+                         for i in range(n)])
+
+
+@pytest.mark.parametrize("df", [None, pd.DataFrame()], ids=["none", "vide"])
+def test_todays_session_sans_historique_ne_plante_pas(df):
+    from next_session_logic import todays_session
+    out = todays_session(df, "LOW", 50, None, _goal_sessions())
+    assert out["rec"] is None and out["alert"] is None and out["downgrade"] > 0
+    assert out["coach_unknown"] is False
+
+
+def test_todays_session_sport_croise_seul_ne_plante_pas():
+    """Repro revue : vélo seul → TypeError sur une date NaT."""
+    from next_session_logic import todays_session
+    assert todays_session(_cross(), "BALANCED", 80, None, _goal_sessions())["rec"] is None
+
+
+def test_todays_session_sous_le_minimum_de_courses(make_running_df):
+    from next_session_logic import MIN_RUNS_FOR_SESSION, todays_session
+    runs = make_running_df(n=MIN_RUNS_FOR_SESSION)
+    assert todays_session(pd.concat([runs.iloc[:-1], _cross()]), None, None, None)["rec"] is None
+    assert todays_session(pd.concat([runs, _cross()]), None, None, None)["rec"] is not None
+
+
+def test_todays_session_courses_sans_date_ignorees(make_running_df):
+    """3 courses dont une sans date : 2 courses datées → pas de séance (et pas d'erreur)."""
+    from next_session_logic import todays_session
+    df = make_running_df(n=3)
+    df.loc[df.index[0], "startTimeLocal"] = pd.NaT
+    assert todays_session(df, None, None, None)["rec"] is None
+    df = pd.concat([make_running_df(n=3), df.iloc[[0]]], ignore_index=True)
+    assert todays_session(df, None, None, None)["rec"]["days_since"] == 0
+
+
+def test_todays_session_coach_inconnu_n_annonce_pas_le_plan_objectif(sample_running_df):
+    """
+    Revue : un échec passager de get_training_plans (contexte None, mis en cache
+    1 h) faisait annoncer le plan Objectif à la place de Run Coach.
+    """
+    from coach_logic import COACH_UNKNOWN
+    from next_session_logic import recommend_session, todays_session
+    out = todays_session(sample_running_df, "BALANCED", 80, COACH_UNKNOWN, _goal_sessions())
+    assert out["coach_unknown"] is True
+    assert out["rec"].get("goal_session") is None and out["rec"]["coach"] is None
+    assert out["rec"]["session_key"] == recommend_session(
+        sample_running_df, load_df=sample_running_df)["session_key"]
+    # « aucun plan » (None) : le plan Objectif reprend la main, comme avant.
+    known = todays_session(sample_running_df, "BALANCED", 80, None, _goal_sessions())
+    assert known["coach_unknown"] is False and known["rec"]["goal_session"]["title"] == "Seuil"
+
+
+def test_todays_session_goal_plan_met_a_jour_la_fiche_de_seance(sample_running_df):
+    """Revue : rec["session"] restait celle de la logique interne (seule la page la recalculait)."""
+    from next_session_logic import SESSION_TYPES, todays_session
+    rec = todays_session(sample_running_df, "BALANCED", 80, None,
+                         _goal_sessions(first_kind="long"))["rec"]
+    assert rec["session_key"] == "sortie_longue"
+    assert rec["session"] is SESSION_TYPES["sortie_longue"]

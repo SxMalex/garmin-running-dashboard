@@ -1,5 +1,6 @@
 """Identité « Piste claire » : contrastes, carte séance (échappement), jauge, navigation."""
 
+import ast
 import re
 from datetime import date
 from pathlib import Path
@@ -8,7 +9,21 @@ import pytest
 
 import chart_theme as ct
 from nav import POLES
-from ui_theme import _CSS, contrast, freshness_bar, ink_on, session_card, tsb_status
+from ui_theme import _CSS, freshness_bar, session_card, tsb_status
+
+
+# Contraste WCAG : seuls les tests en ont besoin (plus aucun appelant dans app/).
+def _luminance(hex_color: str) -> float:
+    h = hex_color.lstrip("#")
+    rgb = [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+    rgb = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+    return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+
+
+def contrast(a: str, b: str) -> float:
+    """Rapport de contraste WCAG entre deux couleurs hex."""
+    la, lb = sorted((_luminance(a), _luminance(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
 
 
 _SERIES = [*ct.CAT, *ct.ZONE_RAMP, *ct.ZONE_HEAT, *ct.WORKOUT_COLORS.values(),
@@ -31,7 +46,8 @@ def test_status_chips_are_readable(status):
 def test_accent_is_a_fill_with_ink_on_top():
     """L'accent volt ne se lit pas sur clair : il ne sert qu'en aplat, encre dessus."""
     assert contrast(ct.ACCENT, ct.SURFACE) < 3.0
-    assert ink_on(ct.ACCENT) == ct.INK and contrast(ct.ACCENT, ct.INK) >= 4.5
+    assert contrast(ct.ACCENT, ct.INK) >= 4.5
+    assert contrast(ct.ACCENT, ct.INK) > contrast(ct.ACCENT, "#ffffff")   # encre, pas blanc
     assert contrast(ct.INK_MUTED, ct.SURFACE) >= 4.5
 
 
@@ -121,7 +137,6 @@ def test_refresh_bumps_the_nonce_and_reloads(logged_in, fake_api):
 
 def test_logout_clears_tokens_and_shows_login(logged_in, monkeypatch):
     import garmin_client
-    import ui_helpers
     cleared = []
     # main.py importe clear_tokens depuis garmin_client à chaque run.
     monkeypatch.setattr(garmin_client, "clear_tokens", lambda: cleared.append(True))
@@ -149,18 +164,157 @@ def test_refresh_reloads_recovery_on_every_page(logged_in, fake_api, name):
 _APP = Path(__file__).resolve().parent.parent / "app"
 
 
+_DRAWN = [*(_APP / "pages").glob("*.py"), *(_APP / "stats_tabs").glob("*.py"),
+          _APP / "main.py", _APP / "ui_helpers.py", _APP / "physio_ui.py"]
+
+# Couleur littérale : #rgb, #rgba, #rrggbb, #rrggbbaa (pas une entité &#123;),
+# ou une fonction CSS rgb()/rgba()/hsl()/hsla(), quelle que soit la casse.
+_HEX = re.compile(r"(?<![\w&#])#([0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})(?![\w-])")
+_FUNC = re.compile(r"\b(rgba?|hsla?)\s*\(([^()]*)\)", re.IGNORECASE)
+# Déclarations CSS de surface (fond de carte, filet) : pas des marques graphiques.
+_SURFACE_DECL = re.compile(r"\b(?:background|border|outline|box-shadow)[\w-]*\s*:[^;{}]*",
+                           re.IGNORECASE)
+
+
+def _theme_hexes(value) -> set[str]:
+    """Toutes les teintes #rrggbb déclarées par chart_theme (listes, dicts compris)."""
+    if isinstance(value, str):
+        return {value.lower()} if re.fullmatch(r"#[0-9a-fA-F]{6}", value) else set()
+    if isinstance(value, dict):
+        value = [v for k, v in value.items() if not str(k).startswith("__")]
+    if isinstance(value, (list, tuple)):
+        return set().union(*map(_theme_hexes, value)) if value else set()
+    return set()
+
+
+_THEME = _theme_hexes(vars(ct))
+
+
+def _judge(hexa: str, found: str, weak: list[str]) -> None:
+    ratio = contrast(hexa, ct.SURFACE)
+    if hexa.lower() not in _THEME or ratio < 3.0:
+        where = "hors thème, " if hexa.lower() not in _THEME else ""
+        weak.append(f"{found} ({where}{ratio:.2f}:1 sur le papier)")
+
+
+def _num(token: str, scale: float) -> float:
+    return float(token[:-1]) * scale / 100 if token.endswith("%") else float(token)
+
+
+def weak_colours(source: str) -> list[str]:
+    """Couleurs écrites en dur dans `source` hors du thème ou sous 3:1 sur le papier.
+
+    On juge la teinte de base (sans l'alpha) : elle doit être un token de
+    chart_theme ET tenir 3:1. Un aplat translucide d'une teinte hors thème (ex.
+    rgba(144,133,233,.16), l'ancien #9085e9 à 2,84:1) reste un reste de l'ancien
+    thème, et une teinte voisine d'un token (#0ca30c pour GOOD) une dérive. Une
+    couleur calculée (f-string, .format, %) ne peut pas être vérifiée : elle est
+    signalée, il faut passer par ct.rgba(token, a).
+    Ignorés : le transparent (alpha nul) et les fonds/filets CSS."""
+    tree = ast.parse(source)
+    inner = {id(v) for node in ast.walk(tree) if isinstance(node, ast.JoinedStr)
+             for v in node.values}
+    texts = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in inner:
+            texts.append(node.value)
+        elif isinstance(node, ast.JoinedStr):
+            texts.append("".join(v.value if isinstance(v, ast.Constant) else "{}"
+                                 for v in node.values))
+    weak = []
+    for text in texts:
+        skipped = [m.span() for m in _SURFACE_DECL.finditer(text)]
+        def surface(pos):
+            return any(a <= pos < b for a, b in skipped)
+        for m in _HEX.finditer(text):
+            h = m.group(1)
+            if surface(m.start()):
+                continue
+            if len(h) in (3, 4):
+                h = "".join(c * 2 for c in h)
+            if len(h) == 8 and h[6:] == "00":
+                continue                                   # transparent
+            _judge("#" + h[:6], m.group(0), weak)
+        for m in _FUNC.finditer(text):
+            if surface(m.start()):
+                continue
+            parts = [t for t in re.split(r"[\s,/]+", m.group(2).strip()) if t]
+            try:
+                if m.group(1).lower().startswith("hsl") or len(parts) not in (3, 4):
+                    raise ValueError
+                r, g, b = (round(_num(t, 255)) for t in parts[:3])
+                alpha = _num(parts[3], 1) if len(parts) == 4 else 1.0
+            except ValueError:
+                weak.append(f"{m.group(0)} (couleur calculée : passer par ct.rgba)")
+                continue
+            if alpha == 0:
+                continue                                   # transparent
+            _judge(f"#{r:02x}{g:02x}{b:02x}", m.group(0), weak)
+    return weak
+
+
 def test_no_dark_theme_colour_left_in_drawn_code():
     """Audit : les onglets traçaient encore les teintes de l'ancien thème sombre
-    (#e66767, #6da7ec…) alors que seul ct.CAT était testé. Toute couleur écrite en
-    dur dans une page ou un onglet doit tenir 3:1 sur le papier."""
-    files = [*(_APP / "pages").glob("*.py"), *(_APP / "stats_tabs").glob("*.py"),
-             _APP / "ui_helpers.py", _APP / "physio_ui.py"]
-    weak = []
-    for f in files:
-        for hexa in re.findall(r'"(#[0-9a-fA-F]{6})"', f.read_text()):
-            if contrast(hexa, ct.SURFACE) < 3.0:
-                weak.append(f"{f.name}: {hexa}")
+    (#e66767, #6da7ec…) alors que seul ct.CAT était testé ; revue PR 1 : le test
+    ne voyait que "#rrggbb" et laissait passer les rgba() en dur (2,84:1). Toute
+    couleur écrite en dur dans une page ou un onglet doit être un token du thème
+    tenant 3:1 sur le papier."""
+    weak = [f"{f.name}: {c}" for f in _DRAWN for c in weak_colours(f.read_text())]
     assert not weak, weak
+
+
+_WEAK_SNIPPETS = [
+    'c = "rgba(144,133,233,0.9)"',                 # l'ancien violet du profil altimétrique
+    'c = "rgba( 144 , 133 , 233 , 0.9 )"',         # espaces
+    'c = "RGBA(144,133,233,.9)"',                  # majuscules, alpha sans zéro
+    'c = "rgba(144,133,233,0.16)"',                # aplat translucide d'une teinte hors thème
+    'c = "rgb(144,133,233)"',
+    'c = "rgb(144 133 233 / 90%)"',                # syntaxe CSS 4
+    'c = "rgba(56%, 52%, 91%, 1)"',                # composantes en pourcentage
+    'c = "#9085e9"',
+    'c = "#9085E9"',                               # majuscules
+    'c = "#ccc"',                                  # hex court
+    'c = "#ccc8"',                                 # hex court + alpha
+    'c = "#9085e9cc"',                             # hex + alpha
+    'c = f"rgba({i}, 156, 252, 0.8)"',             # couleur calculée (ancien tab_volume)
+    'c = "rgba({}, 156, 252, 0.8)".format(i)',
+    'c = "rgba(%d, 156, 252, 0.8)" % i',
+    'c = "hsl(250, 70%, 72%)"',                    # non vérifiable
+    'c = f"color: #9085e9; {x}"',                  # dans une f-string CSS
+    'st.markdown(\'<span style="color: rgba(144,133,233,0.9)">x</span>\')',
+    'z = [(0, 1, "rgba(201,133,0,0.10)")]',         # tuple de bandes de zones
+    'f(line=dict(color="rgba(230,103,103,0.9)"))',  # ancien rouge FC (2,93:1)
+    'c = "rgba(12,163,12,0.85)"',                  # ancien GOOD (#0ca30c) : 3:1 mais hors thème
+    'c = "rgba(25,158,112,0.5)"',                  # ancien aqua (#199e70)
+    'c = "#ECE9E1"',                               # token GRID, mais 1,1:1 : pas une marque
+]
+
+_OK_SNIPPETS = [
+    'c = ct.rgba(ct.VIOLET, 0.16)',
+    'c = "rgba(0,0,0,0)"',
+    'c = "rgba(0, 0, 0, 0.0)"',
+    'c = "#00000000"',
+    'c = "#3987e5"',
+    'c = "rgba(57,135,229,0.15)"',                 # teinte du thème, même très translucide
+    'c = "RGBA(208, 59, 59, .1)"',                 # CRITICAL, casse et espaces libres
+    'c = "#62666F"',                               # INK_MUTED
+    'c = f"{x:.1f} km"',
+    'c = f"color: {ct.INK}"',
+    'css = "background: #F5F4EF; border: 1px solid #E4E1D8; color: #3D4048"',
+    'md = "#### Titre"',
+    'md = "Lap #1 — &#123;"',
+    'md = "Voir #readme-install"',
+]
+
+
+@pytest.mark.parametrize("snippet", _WEAK_SNIPPETS)
+def test_colour_scan_flags_weak_or_computed_colours(snippet):
+    assert weak_colours(snippet), snippet
+
+
+@pytest.mark.parametrize("snippet", _OK_SNIPPETS)
+def test_colour_scan_accepts_theme_tokens(snippet):
+    assert weak_colours(snippet) == [], snippet
 
 
 

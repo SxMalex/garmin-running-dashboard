@@ -908,7 +908,6 @@ class _SlowProfileClient(_StubClient):
 
 def test_an_existing_session_never_waits_for_the_network(session_env, monkeypatch):
     """Contre-revue : le recontrôle d'id tenait le verrou global (tous les onglets figés)."""
-    import threading
     import time as _t
     gcm, store = session_env
     monkeypatch.setattr(gcm, "ATHLETE_ID_RECHECK_S", 0)
@@ -930,12 +929,14 @@ def test_background_recheck_upgrades_the_id_and_ignores_a_replaced_session(sessi
     monkeypatch.setattr(gcm, "ATHLETE_ID_RECHECK_S", 0)
     api = _StubApi(_StubClient(store, fail=99), display_name="uuid-9")
     gcm.adopt_session(api)
-    assert gcm.shared_athlete_id() == (gcm.shared_athlete_id()[0], False)
+    assert gcm._SESSION["reliable"] is False                  # id de repli
     api.client.fail = 0
     gcm._SESSION["checked_at"] = -1
-    gcm.shared_athlete_id()
-    gcm._SESSION["recheck"] and gcm._SESSION["recheck"].join(5)
-    assert gcm.shared_athlete_id() == (777, True)
+    gcm.shared_athlete_id()                                   # déclenche LE recontrôle
+    worker = gcm._SESSION["recheck"]
+    assert worker is not None
+    worker.join(5)                                            # attendre CE fil (pas un précédent)
+    assert (gcm._SESSION["athlete_id"], gcm._SESSION["reliable"]) == (777, True)
     # Recontrôle d'une session remplacée entre-temps : son résultat est jeté
     old = _StubApi(_StubClient(store, fail=99), display_name="uuid-10")
     gcm.adopt_session(old)
@@ -1170,3 +1171,346 @@ def test_a_finished_recheck_does_not_forget_a_newer_one(session_env):
     gcm._SESSION["recheck"] = newer
     gcm._recheck_athlete_id(_StubApi(_StubClient(store)))   # un ancien fil se termine
     assert gcm._SESSION["recheck"] is newer
+
+
+# ---------------------------------------------------------------------------
+# Revue PR #1, lot G — jetons garth hérités, planification déplacée, cooldown
+# ---------------------------------------------------------------------------
+class _LegacyGarmin:
+    """Imite garminconnect 0.3.6 : ne lit QUE garmin_tokens.json du tokenstore."""
+
+    def __init__(self, email=None, password=None, return_on_mfa=False):
+        self.client = self
+
+    def login(self, tokenstore=None):
+        if tokenstore is None:                                # connexion par identifiants
+            return "ok", None
+        if not (Path(tokenstore).expanduser() / "garmin_tokens.json").exists():
+            raise gc.GarminConnectConnectionError("Token path not loading cleanly")
+        return None, None
+
+    def dump(self, path):
+        (Path(path) / "garmin_tokens.json").write_text("{}")
+
+
+@pytest.fixture
+def legacy_store(tmp_path, monkeypatch):
+    store = tmp_path / "garmin"
+    store.mkdir()
+    for name in gc.LEGACY_TOKEN_FILES:
+        (store / name).write_text('{"oauth_token_secret": "longue-duree"}')
+    monkeypatch.setenv("GARMIN_TOKENSTORE", str(store))
+    monkeypatch.setattr(gc, "Garmin", _LegacyGarmin)
+    return store
+
+
+def test_upgrade_with_only_garth_tokens_purges_them_and_asks_to_log_in(legacy_store):
+    """Cas réel de la mise à jour : seuls oauth1/oauth2 existent, illisibles par 0.3.6."""
+    (legacy_store / "notes.txt").write_text("à garder")
+    assert gc.resume_session() is None                        # reconnexion obligatoire
+    assert sorted(p.name for p in legacy_store.iterdir()) == ["notes.txt"]
+
+
+def test_login_after_upgrade_leaves_only_the_new_token_file(legacy_store):
+    status, api = gc.login_with_credentials("a@b.c", "pw")
+    assert status == "ok" and api is not None
+    assert sorted(p.name for p in legacy_store.iterdir()) == ["garmin_tokens.json"]
+
+
+def test_resume_with_both_formats_keeps_the_session_and_drops_garth(legacy_store):
+    (legacy_store / "garmin_tokens.json").write_text("{}")
+    assert gc.resume_session() is not None
+    assert sorted(p.name for p in legacy_store.iterdir()) == ["garmin_tokens.json"]
+
+
+@pytest.mark.parametrize("layout", ["absent", "file"])
+def test_purge_ignores_a_missing_or_file_tokenstore(tmp_path, monkeypatch, caplog, layout):
+    target = tmp_path / ("absent" if layout == "absent" else "garmin_tokens.json")
+    if layout == "file":
+        target.write_text("{}")
+    monkeypatch.setenv("GARMIN_TOKENSTORE", str(target))
+    gc._purge_legacy_tokens()
+    assert target.exists() is (layout == "file")              # ni créé, ni supprimé
+    assert "Jeton hérité" not in caplog.text                  # pas d'alerte à chaque reprise
+
+
+def test_undeletable_legacy_token_never_blocks_the_resume(legacy_store):
+    (legacy_store / "oauth1_token.json").unlink()
+    (legacy_store / "oauth1_token.json").mkdir()               # unlink → IsADirectoryError
+    (legacy_store / "garmin_tokens.json").write_text("{}")
+    assert gc.resume_session() is not None
+    assert not (legacy_store / "oauth2_token.json").exists()  # l'autre est bien purgé
+
+
+class CalendarApi(WriteApi):
+    """`get_scheduled_workouts(year, month)` : un calendrier par mois, erreurs par mois."""
+
+    def __init__(self, calendar=None, errors=None, **kw):
+        super().__init__(**kw)
+        self.calendar, self.errors, self.months, self.scheduled_on = calendar or {}, errors or {}, [], []
+
+    def get_scheduled_workouts(self, year, month):
+        self.months.append((year, month))
+        if (year, month) in self.errors:
+            raise self.errors[(year, month)]
+        return self.calendar.get((year, month))
+
+    def schedule_workout(self, workout_id, date_str):
+        self.scheduled_on.append(date_str)
+        return super().schedule_workout(workout_id, date_str)
+
+
+def _items(*entries):
+    """Forme réelle du calendar-service : items à plat (id = schedule, workoutId, date)."""
+    return {"calendarItems": [{"id": sid, "itemType": "workout", "workoutId": wid, "date": day}
+                              for sid, wid, day in entries]}
+
+
+class TestFindSchedule:
+    def test_not_moved_costs_one_month_read(self):
+        api = CalendarApi({(2026, 9): _items((71, 5, "2026-09-15"))})
+        assert GarminClient(api=api, athlete_id=1).ensure_scheduled(5, "2026-09-15") == 71
+        assert api.months == [(2026, 9)] and api.scheduled_on == []
+
+    def test_moved_one_day_across_the_month_is_not_rescheduled(self):
+        """Cas de la revue : journal perdu, séance du 30/09 décalée au 01/10 dans Garmin."""
+        api = CalendarApi({(2026, 9): _items((70, 8, "2026-09-30")),     # autre séance ce jour-là
+                           (2026, 10): _items((72, 5, "2026-10-01"))})
+        assert GarminClient(api=api, athlete_id=1).ensure_scheduled(5, "2026-09-30") == 72
+        assert api.months == [(2026, 9), (2026, 10)] and api.scheduled_on == []
+
+    def test_moved_back_across_the_year(self):
+        api = CalendarApi({(2025, 12): _items((73, 5, "2025-12-31"))})
+        assert GarminClient(api=api, athlete_id=1).find_schedule(5, "2026-01-01") == 73
+        assert api.months == [(2026, 1), (2025, 12)]
+
+    def test_moved_far_within_the_same_month(self):
+        api = CalendarApi({(2026, 9): _items((74, 5, "2026-09-28"))})
+        assert GarminClient(api=api, athlete_id=1).find_schedule(5, "2026-09-02") == 74
+
+    @pytest.mark.parametrize("day,months", [
+        ("2026-09-24", [(2026, 9), (2026, 10)]),   # +7 j = 01/10 : octobre lu
+        ("2026-09-23", [(2026, 9)]),               # +7 j = 30/09 : octobre hors fenêtre
+        ("2026-10-08", [(2026, 10)]),              # -7 j = 01/10 : septembre hors fenêtre
+        ("2026-10-07", [(2026, 10), (2026, 9)]),   # -7 j = 30/09 : septembre lu
+    ])
+    def test_search_window_bounds(self, day, months):
+        api = CalendarApi()
+        assert GarminClient(api=api, athlete_id=1).find_schedule(5, day) is None
+        assert api.months == months
+
+    def test_duplicate_schedules_the_closest_wins(self):
+        api = CalendarApi({(2026, 9): _items((80, 5, "2026-09-02"), (81, 5, "2026-09-16"),
+                                             (82, 5, "2026-09-29"))})
+        assert GarminClient(api=api, athlete_id=1).find_schedule(5, "2026-09-15") == 81
+
+    def test_entries_without_date_or_id_or_for_another_workout_do_not_count(self):
+        cal = {"calendarItems": [
+            {"id": 90, "workoutId": 5},                                  # pas de date
+            {"id": 91, "workoutId": 5, "date": "bientôt"},              # date illisible
+            {"workoutId": 5, "date": "2026-09-15"},                      # pas d'id de planif.
+            {"id": 92, "workoutId": 6, "date": "2026-09-15"},            # autre séance
+        ]}
+        api = CalendarApi({(2026, 9): cal})
+        client = GarminClient(api=api, athlete_id=1)
+        assert client.ensure_scheduled(5, "2026-09-15") == 905                # créée par schedule_workout
+        assert api.scheduled_on == ["2026-09-15"]
+
+    def test_nested_workout_form_is_recognised(self):
+        cal = {"calendarItems": [{"workoutScheduleId": 93, "date": "2026-09-16",
+                                  "workout": {"workoutId": 5}}]}
+        assert GarminClient(api=CalendarApi({(2026, 9): cal}), athlete_id=1).find_schedule(5, "2026-09-15") == 93
+
+    @pytest.mark.parametrize("payload", [None, {}, [], {"calendarItems": None}])
+    def test_empty_calendar_schedules_once(self, payload):
+        api = CalendarApi({(2026, 9): payload})
+        assert GarminClient(api=api, athlete_id=1).ensure_scheduled(5, "2026-09-15") == 905
+        assert api.scheduled_on == ["2026-09-15"]
+
+    @pytest.mark.parametrize("status", [429, 500])
+    def test_error_on_the_neighbour_month_is_never_read_as_absent(self, status):
+        api = CalendarApi(errors={(2026, 10): RuntimeError(f"API Error {status}")})
+        with pytest.raises(RuntimeError):
+            GarminClient(api=api, athlete_id=1).ensure_scheduled(5, "2026-09-30")
+        assert api.scheduled_on == []
+
+
+class TestWriteCooldown:
+    """Chaque appel de séance (lecture comprise) est suivi du cooldown, même en échec."""
+
+    @pytest.fixture
+    def events(self, monkeypatch):
+        log = []
+        monkeypatch.setattr(gc, "API_COOLDOWN_S", 0.25)
+        monkeypatch.setattr(gc.time, "sleep", lambda s: log.append(("sleep", s)))
+        return log
+
+    @staticmethod
+    def _spy(api, log, *names):
+        for name in names:
+            original = getattr(api, name)
+
+            def call(*a, _o=original, _n=name):
+                log.append(("call", _n))
+                return _o(*a)
+            setattr(api, name, call)
+        return api
+
+    @staticmethod
+    def _paced(log, n_calls):
+        """n appels, chacun immédiatement suivi d'une pause de API_COOLDOWN_S."""
+        assert [e[0] for e in log] == ["call", "sleep"] * n_calls
+        assert all(e == ("sleep", 0.25) for e in log[1::2])
+
+    WRITE = ("upload_workout", "schedule_workout", "unschedule_workout", "delete_workout",
+             "get_workout_by_id", "get_scheduled_workout_by_id", "get_workouts",
+             "get_scheduled_workouts")
+
+    def test_remove_paces_its_four_calls(self, events):
+        api = self._spy(WriteApi(library={5: {"workoutName": "a [GD-p-]"}},
+                                 schedules={9: {"workoutId": 5}}), events, *self.WRITE[:6])
+        assert GarminClient(api=api, athlete_id=1).remove_workout(5, 9, required_tag="[GD-p-") is True
+        self._paced(events, 4)
+
+    def test_refused_remove_sends_nothing_and_still_pauses(self, events):
+        api = self._spy(WriteApi(library={5: {"workoutName": "Séance du club"}}), events, *self.WRITE[:6])
+        assert GarminClient(api=api, athlete_id=1).remove_workout(5, 9, required_tag="[GD-p-") is False
+        assert events == [("call", "get_workout_by_id"), ("sleep", 0.25)]
+
+    def test_429_in_the_middle_of_a_remove_still_pauses(self, events):
+        api = WriteApi(library={5: {"workoutName": "a [GD-p-]"}}, schedules={9: {"workoutId": 5}})
+
+        def refuse(schedule_id):
+            raise RuntimeError("API Error 429 - Too Many Requests")
+        api.unschedule_workout = refuse
+        self._spy(api, events, "get_workout_by_id", "get_scheduled_workout_by_id", "unschedule_workout")
+        with pytest.raises(RuntimeError):
+            GarminClient(api=api, athlete_id=1).remove_workout(5, 9, required_tag="[GD-p-")
+        self._paced(events, 3)
+        assert api.deleted == []
+
+    def test_push_and_its_rollback_are_paced(self, events):
+        api = self._spy(WriteApi(), events, *self.WRITE[:4])
+        GarminClient(api=api, athlete_id=1).push_workout({"workoutName": "x"}, "2026-10-01")
+        self._paced(events, 2)
+        events.clear()
+        api.schedule_error = RuntimeError("API Error 503")
+        with pytest.raises(RuntimeError):
+            GarminClient(api=api, athlete_id=1).push_workout({"workoutName": "y"}, "2026-10-01")
+        self._paced(events, 3)                                       # upload, schedule, delete
+
+    def test_reconciliation_calls_are_paced(self, events):
+        api = self._spy(CalendarApi(library={5: {"workoutName": "a [GD-p-]"}}), events, *self.WRITE)
+        GarminClient(api=api, athlete_id=1).ensure_scheduled(5, "2026-09-30")
+        self._paced(events, 3)                                       # 2 mois lus + planification
+        events.clear()
+        GarminClient(api=api, athlete_id=1).get_workout(5)
+        self._paced(events, 1)
+
+    @pytest.mark.parametrize("n,pages", [(0, 1), (100, 2), (230, 3)])
+    def test_list_workouts_paces_every_page(self, events, n, pages):
+        api = self._spy(WriteApi(library={i: {"workoutName": f"w{i}"} for i in range(n)}),
+                        events, "get_workouts")
+        assert len(GarminClient(api=api, athlete_id=1).list_workouts(page_size=100)) == n
+        self._paced(events, pages)
+
+
+
+def test_mcp_tokenstore_is_purged_of_garth_tokens_too(tmp_path, monkeypatch):
+    """Lot G : le tokenstore du MCP gardait le secret OAuth1 longue durée de garth."""
+    import garmin_client as gcm
+    store = tmp_path / "mcp-tokens"
+    store.mkdir()
+    for name in ("oauth1_token.json", "oauth2_token.json", "garmin_tokens.json"):
+        (store / name).write_text("{}")
+    monkeypatch.setenv("GARMIN_TOKENSTORE", str(tmp_path / "dashboard"))   # autre dossier
+    gcm._purge_legacy_tokens(str(store))
+    assert sorted(p.name for p in store.iterdir()) == ["garmin_tokens.json"]
+
+
+def test_strict_stream_failure_still_pauses(tmp_path, monkeypatch):
+    """Revue : en strict, l'erreur remontait avant toute pause — des refus en rafale."""
+    import garmin_client as gcm
+    monkeypatch.setattr(gcm, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(gcm, "API_COOLDOWN_S", 0.4)
+    sleeps = []
+    monkeypatch.setattr(gcm.time, "sleep", lambda s: sleeps.append(s))
+
+    class Api:
+        def get_activity_details(self, *a, **k):
+            raise RuntimeError("API Error 401 - Unauthorized")
+
+    with pytest.raises(RuntimeError):
+        gcm.GarminClient(api=Api(), athlete_id=1).get_streams(5, strict=True)
+    assert sleeps == [0.4]
+
+
+@pytest.mark.parametrize("status,skip", [(400, False), (404, True), (410, True), (401, False), (403, False),
+                                         (408, False), (429, False), (500, False), (None, False)])
+def test_skippable_activity_error(status, skip):
+    import garmin_client as gcm
+    exc = RuntimeError(f"API Error {status}") if status else ConnectionError("réseau")
+    assert gcm.skippable_activity_error(exc) is skip
+
+
+def test_training_plans_strict_with_cache(tmp_path, monkeypatch):
+    """strict relève l'erreur ; use_cache=True sert quand même une vraie réponse en cache."""
+    import garmin_client as gcm
+    monkeypatch.setattr(gcm, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(gcm, "API_COOLDOWN_S", 0)
+
+    class Api:
+        calls, fail = 0, False
+        def get_training_plans(self):
+            Api.calls += 1
+            if Api.fail:
+                raise RuntimeError("API Error 503")
+            return {"trainingPlanList": []}
+
+    c = gcm.GarminClient(api=Api(), athlete_id=1)
+    assert c.get_training_plans(strict=True, use_cache=True) == {"trainingPlanList": []}
+    assert c.get_training_plans(strict=True, use_cache=True) == {"trainingPlanList": []}
+    assert Api.calls == 1                                    # servi par le cache
+
+
+def test_training_plans_guard_is_always_fresh_and_raises(tmp_path, monkeypatch):
+    import garmin_client as gcm
+    monkeypatch.setattr(gcm, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(gcm, "API_COOLDOWN_S", 0)
+
+    class Api:
+        calls = 0
+        def get_training_plans(self):
+            Api.calls += 1
+            if Api.calls > 1:
+                raise RuntimeError("API Error 503")
+            return {"trainingPlanList": []}
+
+    c = gcm.GarminClient(api=Api(), athlete_id=1)
+    c.get_training_plans()
+    with pytest.raises(RuntimeError):
+        c.get_training_plans(strict=True)                    # pas de cache pour la garde d'écriture
+    assert Api.calls == 2
+
+
+def _gc_errors():
+    from garminconnect import GarminConnectAuthenticationError, GarminConnectConnectionError
+    import requests
+    return [
+        # La panne la plus courante en vrai : garminconnect enveloppe la coupure, sans code HTTP
+        (GarminConnectConnectionError("Connection error: HTTPSConnectionPool(host='connect.garmin.com')"), True),
+        (GarminConnectAuthenticationError("Not authenticated"), True),
+        (requests.exceptions.ConnectionError("x"), True),
+    ]
+
+
+@pytest.mark.parametrize("exc,failure", _gc_errors() + [
+    (RuntimeError("API Error 503 - Service Unavailable"), True),
+    (ConnectionError("réseau coupé"), True),
+    (TimeoutError("délai"), True),
+    (KeyError("taskList"), False),                          # bug de lecture : doit remonter
+    (TypeError("NoneType"), False),
+])
+def test_is_garmin_failure(exc, failure):
+    import garmin_client as gcm
+    assert gcm.is_garmin_failure(exc) is failure

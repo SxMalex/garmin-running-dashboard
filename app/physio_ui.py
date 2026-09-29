@@ -11,6 +11,7 @@ import streamlit as st
 from garminconnect import GarminConnectTooManyRequestsError
 
 import chart_theme as ct
+from garmin_client import MAX_SKIPPED_IN_ROW, _http_status, skippable_activity_error
 from physio_logic import (
     DECOUPLING_LEVELS,
     DECOUPLING_TREND_MAX_RUNS,
@@ -134,18 +135,28 @@ def _load_streams_strict(athlete_id: int, activity_id: int) -> dict:
 def _load_candidate_streams(athlete_id: int, activity_ids: tuple) -> tuple[dict, str | None]:
     """
     Streams des sorties candidates. S'arrête au premier refus de Garmin (429,
-    panne, session expirée) au lieu d'enchaîner les échecs ; les streams
+    5xx, panne réseau) au lieu d'enchaîner les échecs ; une sortie refusée
+    seule (autre 4xx : supprimée dans Garmin mais encore dans la liste en
+    cache) est sautée, sans priver les plus anciennes d'analyse. Les streams
     obtenus restent en cache disque 30 jours. Retourne (streams, cause).
     """
     streams_by_id = {}
+    skipped_in_row = 0
     with st.spinner("Analyse de la dérive des sorties longues…"):
         for activity_id in activity_ids:
             try:
                 streams_by_id[activity_id] = _load_streams_strict(athlete_id, activity_id)
-            except GarminConnectTooManyRequestsError:
-                logger.warning("Garmin 429 sur les streams de %s", activity_id)
-                return streams_by_id, "Garmin limite le nombre d'appels"
-            except Exception:
+                skipped_in_row = 0
+            except Exception as exc:
+                if isinstance(exc, GarminConnectTooManyRequestsError) or _http_status(exc) == 429:
+                    logger.warning("Garmin 429 sur les streams de %s", activity_id)
+                    return streams_by_id, "Garmin limite le nombre d'appels"
+                if skippable_activity_error(exc):
+                    skipped_in_row += 1
+                    if skipped_in_row < MAX_SKIPPED_IN_ROW:
+                        logger.info("Streams de %s refusés (%s) : sortie sautée", activity_id,
+                                    _http_status(exc))
+                        continue
                 logger.warning("Streams de %s indisponibles", activity_id, exc_info=True)
                 return streams_by_id, "Garmin n'a pas répondu"
     return streams_by_id, None

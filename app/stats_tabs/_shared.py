@@ -23,9 +23,9 @@ def add_trend_line(
     z = np.polyfit(x_num, y, 1)
     slope = z[0]
     color = (
-        "rgba(12,163,12,0.85)"
+        ct.rgba(ct.GOOD, 0.85)
         if (slope > 0) == ascending_better
-        else "rgba(208,59,59,0.8)"
+        else ct.rgba(ct.CRITICAL, 0.8)
     )
     fig.add_trace(go.Scatter(
         x=x,

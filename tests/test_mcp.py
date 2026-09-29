@@ -4,6 +4,7 @@ Aucun appel réseau : GarminClient autour du faux client de tests_ui/.
 """
 
 import json
+import shutil
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -241,3 +242,120 @@ def test_client_built_with_an_id_carries_the_given_reliability():
     from fake_garmin import FakeGarmin as _Fake
     assert GarminClient(_Fake(), athlete_id=7).athlete_id_reliable is True
     assert GarminClient(_Fake(), athlete_id=7, athlete_id_reliable=False).athlete_id_reliable is False
+
+
+# ---------------------------------------------------------------------------
+# Revue PR 1 (lot L)
+# ---------------------------------------------------------------------------
+
+def _goal_run_tomorrow():
+    day = (date.today() + timedelta(days=1)).isoformat()
+    return [{"date": day, "kind": "tempo", "title": "Seuil du plan", "distance_km": 9.0,
+             "duration_min": 50, "target": "3 × 8′", "pace_sec": 300.0, "steps": []}]
+
+
+def test_briefing_run_coach_inconnu_n_annonce_pas_le_plan_objectif(client, monkeypatch):
+    """Revue : pendant une panne de get_training_plans, le plan Objectif prenait la place de Run Coach."""
+    monkeypatch.setattr(insights, "_validated_sessions", lambda gc: _goal_run_tomorrow())
+    assert insights.daily_briefing(client)["session"]["source"] == "plan_objectif"   # aucun plan
+    shutil.rmtree(gc.CACHE_DIR, ignore_errors=True)      # réponse « aucun plan » expirée…
+    client.api.plans_error = RuntimeError("API Error 503")   # … et Garmin en panne
+    b = _json_ok(insights.daily_briefing(client))
+    assert b["session"]["source"] == "dashboard" and b["session"]["name"] is None
+    assert b["coach_plan"]["status"] == "unknown"
+
+
+def test_briefing_run_coach_expose_l_allure_du_parcours(client, monkeypatch):
+    """Revue : target_pace (MCP) gardait l'allure de la logique interne quand Run Coach pilotait."""
+    from formatting import seconds_to_pace_str
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    client.api.plans = [{"trainingPlanId": 7, "name": "Semi Run Coach",
+                         "trainingStatus": {"statusKey": "Scheduled"}}]
+    detail = {"taskList": [{"calendarDate": tomorrow, "taskWorkout": {
+        "sportType": {"sportTypeKey": "running"}, "workoutName": "Seuil",
+        "workoutDescription": "3x6:00@5:05/km", "estimatedDurationInSecs": 2520,
+        "trainingEffectLabel": "LACTATE_THRESHOLD", "adaptiveCoachingWorkoutStatus": "NOT_COMPLETE"}}]}
+    monkeypatch.setattr(client, "get_adaptive_plan", lambda plan_id: detail)
+    df = client.get_activities(limit=gc.ACTIVITY_HISTORY_LIMIT)
+    runs = df[df["activityType"] == "running"].sort_values("startTimeLocal", ascending=False).head(20)
+    avg_pace = runs.loc[runs["avgPace_sec"] > 0, "avgPace_sec"].mean()
+    s = insights.daily_briefing(client)["session"]
+    assert s["source"] == "garmin_run_coach" and s["name"] == "Seuil"
+    assert s["target_pace"] == seconds_to_pace_str(avg_pace)
+    assert s["type"] == "Tempo / Seuil"
+
+
+def test_briefing_sous_le_minimum_de_courses(tmp_path, monkeypatch):
+    monkeypatch.setattr(gc, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(gc, "API_COOLDOWN_S", 0)
+    b = _json_ok(insights.daily_briefing(GarminClient(FakeGarmin(n_runs=2), athlete_id=44)))
+    assert "Moins de 3 courses" in b["session"]["note"]
+
+
+class _HttpError(Exception):
+    def __init__(self, status):
+        super().__init__(f"API Error {status}")
+        self.status_code = status
+
+
+@pytest.mark.parametrize("status,skipped", [(404, True), (400, False), (410, True),
+                                            (401, False), (403, False),   # jetons révoqués / blocage : arrêt
+                                            (429, False), (500, False), (503, False)])
+def test_aerobic_trend_saute_un_4xx_et_s_arrete_sur_429_5xx(client, monkeypatch, status, skipped):
+    """Revue : un 404 sur la sortie la plus récente (supprimée) privait toutes les autres d'analyse."""
+    base = insights.aerobic_trend(client)["runs_analysed"]
+    assert base >= 2
+    from physio_logic import decoupling_candidates
+    first = int(decoupling_candidates(client.get_activities(limit=gc.ACTIVITY_HISTORY_LIMIT),
+                                      max_runs=insights.MAX_TREND_RUNS)[0]["activityId"])
+    real = client.api.get_activity_details
+
+    def details(activity_id, *a, **k):
+        if int(activity_id) == first:
+            raise _HttpError(status)
+        return real(activity_id, *a, **k)
+    shutil.rmtree(gc.CACHE_DIR, ignore_errors=True)          # streams relus, pas servis du cache
+    monkeypatch.setattr(client.api, "get_activity_details", details)
+    got = insights.aerobic_trend(client)["runs_analysed"]
+    assert got == (base - 1 if skipped else 0)
+
+
+def test_mcp_login_purges_garth_tokens_of_its_own_tokenstore(monkeypatch, tmp_path):
+    store = tmp_path / "mcp"
+    store.mkdir()
+    (store / "oauth1_token.json").write_text("{}")
+    monkeypatch.setenv("GARMIN_TOKENSTORE_MCP", str(store))
+    monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_client", None)
+
+    class G:
+        def login(self, tokenstore):
+            assert not (store / "oauth1_token.json").exists()       # purgé AVANT la reprise
+    monkeypatch.setattr(server, "Garmin", G)
+    server._get_client()
+
+
+def test_mcp_briefing_does_not_disguise_a_reading_bug_as_an_outage(client, monkeypatch):
+    """Revue : toute exception de load_coach_context devenait « Garmin n'a pas répondu »."""
+    def broken(*a, **k):
+        raise KeyError("taskList")
+    monkeypatch.setattr(insights, "load_coach_context", broken)
+    with pytest.raises(KeyError):
+        insights.daily_briefing(client)
+
+    def down(*a, **k):
+        raise RuntimeError("API Error 503")
+    monkeypatch.setattr(insights, "load_coach_context", down)
+    assert insights.daily_briefing(client)["coach_plan"]["status"] == "unknown"
+
+
+def test_aerobic_trend_stops_after_two_skipped_refusals_in_a_row(client, monkeypatch):
+    """Contre-revue : un 404 GÉNÉRAL (endpoint déplacé) faisait 8 refus d'affilée."""
+    calls = []
+
+    def details(activity_id, *a, **k):
+        calls.append(activity_id)
+        raise _HttpError(404)
+    monkeypatch.setattr(client.api, "get_activity_details", details)
+    insights.aerobic_trend(client)
+    assert len(calls) == 2

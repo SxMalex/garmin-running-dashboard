@@ -73,6 +73,10 @@ RESTING_HR_WINDOW_DAYS = 28
 HRV_WINDOW_DAYS = 365
 VO2MAX_WINDOW_DAYS = 365
 
+# Réconciliation : une séance déplacée d'au plus une semaine dans Garmin Connect
+# est encore retrouvée au calendrier (cf. GarminClient.find_schedule).
+SCHEDULE_SEARCH_DAYS = 7
+
 
 def default_tokenstore() -> str:
     """Tokenstore garth : /app/.garmin dans Docker, ~/.garminconnect sinon."""
@@ -87,11 +91,35 @@ def default_tokenstore() -> str:
 # Authentification (pattern officiel python-garminconnect, compatible MFA web)
 # ---------------------------------------------------------------------------
 
+# Jetons de garth (garminconnect < 0.3) : 0.3.6 ne lit plus que
+# `garmin_tokens.json`. Restés sur le disque, ils ne servent plus à rien mais
+# gardent le secret OAuth1 longue durée du compte.
+LEGACY_TOKEN_FILES = ("oauth1_token.json", "oauth2_token.json")
+
+
+def _purge_legacy_tokens(tokenstore: Optional[str] = None) -> None:
+    """Supprime les jetons garth hérités d'un tokenstore (le dashboard par défaut,
+    celui du MCP sinon) ; jamais bloquant."""
+    folder = Path(tokenstore or default_tokenstore()).expanduser()
+    if not folder.is_dir():
+        return
+    for name in LEGACY_TOKEN_FILES:
+        try:
+            (folder / name).unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("Jeton hérité %s non supprimé : %s", name, e)
+
+
 def resume_session() -> Optional[Garmin]:
     """
     Reprend une session depuis le tokenstore, sans identifiants.
     Retourne None si aucun token valide n'est disponible.
+
+    Toute reprise (démarrage, fin de connexion ou de MFA) purge d'abord les
+    jetons garth hérités : illisibles par cette version, la mise à jour
+    impose de toute façon une reconnexion (cf. README).
     """
+    _purge_legacy_tokens()
     try:
         api = Garmin()
         api.login(default_tokenstore())
@@ -102,8 +130,8 @@ def resume_session() -> Optional[Garmin]:
 
 
 def _dump_tokens(api: Garmin) -> None:
-    """Persiste les tokens garth dans le tokenstore (le mode return_on_mfa
-    de garminconnect ne le fait pas lui-même)."""
+    """Persiste les jetons dans le tokenstore (`garmin_tokens.json`) : le mode
+    return_on_mfa de garminconnect ne le fait pas lui-même."""
     path = Path(default_tokenstore()).expanduser()
     path.mkdir(parents=True, exist_ok=True)
     api.client.dump(str(path))
@@ -880,6 +908,7 @@ class GarminClient:
             )
         except Exception as e:
             if strict:
+                time.sleep(API_COOLDOWN_S)      # un refus reste un appel réel : pas de rafale
                 raise
             logger.warning("Streams indisponibles pour l'activité %s : %s", activity_id, e)
             time.sleep(1.0)
@@ -990,49 +1019,6 @@ class GarminClient:
 
         return pd.DataFrame(rows)
 
-    def get_summary_metrics(self, df: pd.DataFrame) -> dict:
-        """Retourne les métriques résumées pour la semaine et le mois courants."""
-        if df.empty:
-            return {
-                "km_semaine": 0, "km_mois": 0,
-                "pace_moyen": "—", "hr_moyen": "—",
-                "nb_sorties_semaine": 0, "nb_sorties_mois": 0,
-            }
-
-        running = df[df["activityType"] == "running"].copy()
-        from datetime import datetime, timedelta
-        now = datetime.now()
-        start_of_week = now - timedelta(days=now.weekday())
-        start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
-        start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-        week_mask = running["startTimeLocal"] >= start_of_week
-        month_mask = running["startTimeLocal"] >= start_of_month
-
-        km_semaine = running.loc[week_mask, "distance_km"].sum()
-        km_mois = running.loc[month_mask, "distance_km"].sum()
-        nb_semaine = week_mask.sum()
-        nb_mois = month_mask.sum()
-
-        pace_vals = running.loc[running["avgPace_sec"] > 0, "avgPace_sec"]
-        pace_moyen = seconds_to_pace_str(pace_vals.mean()) if not pace_vals.empty else "—"
-
-        hr_vals = running["avgHR"].dropna()
-        hr_moyen = f"{int(hr_vals.mean())} bpm" if not hr_vals.empty else "—"
-
-        return {
-            "km_semaine": round(km_semaine, 1),
-            "km_mois": round(km_mois, 1),
-            "pace_moyen": pace_moyen,
-            "hr_moyen": hr_moyen,
-            "nb_sorties_semaine": int(nb_semaine),
-            "nb_sorties_mois": int(nb_mois),
-        }
-
-    # ------------------------------------------------------------------
-    # Profil, zones FC, matériel, prédictions
-    # ------------------------------------------------------------------
-
     def get_full_name(self) -> str:
         try:
             return self.api.get_full_name() or ""
@@ -1136,17 +1122,22 @@ class GarminClient:
             logger.warning("Prédictions de course indisponibles : %s", e)
             return {}
 
-    def get_training_plans(self, strict: bool = False) -> dict:
+    def get_training_plans(self, strict: bool = False, use_cache: Optional[bool] = None) -> dict:
         """
         Plans d'entraînement Garmin du compte (Garmin Run Coach compris), bruts.
         Retourne {} si l'endpoint n'est pas disponible — sauf `strict=True`
         qui relève l'erreur : une garde « pas de plan Garmin actif » ne doit
         pas confondre « aucun plan » et « Garmin n'a pas répondu ».
+
+        `use_cache` (défaut : pas en strict) : la garde avant une ÉCRITURE lit
+        frais (un plan Run Coach démarré depuis moins d'une heure doit être vu) ;
+        le contexte coach des pages lit en strict AVEC cache — une vraie réponse
+        sert une heure, une panne relève sans double appel.
         """
         cache_key = "training_plans"
-        # strict = garde avant une ÉCRITURE : lecture fraîche, un plan Run Coach
-        # démarré depuis moins d'une heure doit être vu.
-        cached = None if strict else _cache_get(self.athlete_id, cache_key)
+        if use_cache is None:
+            use_cache = not strict
+        cached = _cache_get(self.athlete_id, cache_key) if use_cache else None
         if cached is not None:
             return cached
         try:
@@ -1155,6 +1146,7 @@ class GarminClient:
             time.sleep(API_COOLDOWN_S)
             return data
         except Exception as e:
+            time.sleep(API_COOLDOWN_S)          # un refus reste un appel réel
             if strict:
                 raise
             logger.warning("Plans d'entraînement indisponibles : %s", e)
@@ -1340,6 +1332,16 @@ class GarminClient:
     # ------------------------------------------------------------------
     # Écriture : séances du plan dans le calendrier Garmin
     # ------------------------------------------------------------------
+    # Chaque appel (lecture de la bibliothèque comprise) passe par `_paced` :
+    # retirer 10 séances, c'est ~40 requêtes, dont des POST/DELETE — sans pause
+    # entre elles, c'est la rafale que le cooldown de get_activities évite.
+
+    def _paced(self, call: Callable, *args):
+        """Un appel Garmin réel suivi du cooldown, y compris s'il échoue (429)."""
+        try:
+            return call(*args)
+        finally:
+            time.sleep(API_COOLDOWN_S)
 
     def push_workout(self, payload: dict, date_str: str) -> dict:
         """
@@ -1347,22 +1349,21 @@ class GarminClient:
         créée est supprimée (pas d'orpheline dans la bibliothèque) et l'erreur
         est relevée. Retourne {"workout_id", "schedule_id"}.
         """
-        created = self.api.upload_workout(payload) or {}
+        created = self._paced(self.api.upload_workout, payload) or {}
         workout_id = created.get("workoutId")
         if not workout_id:
             raise RuntimeError(f"Garmin n'a pas renvoyé d'identifiant de séance : {created}")
         try:
-            scheduled = self.api.schedule_workout(workout_id, date_str) or {}
+            scheduled = self._paced(self.api.schedule_workout, workout_id, date_str) or {}
         except Exception:
             try:
-                self.api.delete_workout(workout_id)
+                self._paced(self.api.delete_workout, workout_id)
             except Exception as cleanup:
                 logger.warning("Séance %s orpheline (suppression impossible) : %s",
                                workout_id, cleanup)
             raise
         schedule_id = (scheduled.get("workoutScheduleId") or scheduled.get("scheduleId")
                        or scheduled.get("id"))
-        time.sleep(API_COOLDOWN_S)
         return {"workout_id": int(workout_id),
                 "schedule_id": int(schedule_id) if schedule_id else None}
 
@@ -1385,7 +1386,7 @@ class GarminClient:
         current = None
         if required_tag:
             try:
-                current = self.api.get_workout_by_id(workout_id) or {}
+                current = self._paced(self.api.get_workout_by_id, workout_id) or {}
             except Exception as e:
                 if _http_status(e) != 404:
                     raise
@@ -1396,7 +1397,7 @@ class GarminClient:
 
         if schedule_id:
             try:
-                scheduled = self.api.get_scheduled_workout_by_id(schedule_id) or {}
+                scheduled = self._paced(self.api.get_scheduled_workout_by_id, schedule_id) or {}
             except Exception as e:
                 if _http_status(e) != 404:
                     raise
@@ -1431,65 +1432,80 @@ class GarminClient:
             if not arg:
                 continue
             try:
-                call(arg)
+                self._paced(call, arg)
             except Exception as e:
                 if _http_status(e) != 404:
                     raise
-        time.sleep(API_COOLDOWN_S)
         return True
 
     def find_schedule(self, workout_id: int, date_str: str) -> Optional[int]:
         """
-        Identifiant de planification de `workout_id` au `date_str`, ou None s'il
-        n'est pas au calendrier. Le format de `get_scheduled_workouts` n'est pas
-        documenté : on cherche récursivement une entrée qui porte ce workoutId
-        et cette date.
+        Identifiant de planification de `workout_id`, ou None s'il n'est pas au
+        calendrier. Cherché d'abord dans le mois de `date_str`, puis dans les
+        mois voisins qu'atteint un déplacement d'au plus SCHEDULE_SEARCH_DAYS
+        jours : une séance que l'utilisateur a décalée d'un jour dans Garmin
+        Connect (du 30 au 1er compris) reste la nôtre — la replanifier la
+        mettrait deux fois sur la montre. Chaque séance du dashboard ne sert
+        qu'un créneau : toute planification trouvée compte ; s'il y en a
+        plusieurs, la plus proche de `date_str` dans le premier mois lu qui en
+        contient. Une erreur Garmin remonte (jamais lue comme « absente »).
+        Le format de `get_scheduled_workouts` n'est pas documenté : on cherche
+        récursivement les entrées qui portent ce workoutId et une date.
         """
-        y, m, _ = date_str.split("-")
-        data = self.api.get_scheduled_workouts(int(y), int(m)) or {}
+        target = date.fromisoformat(date_str)
+        around = [target + timedelta(days=d) for d in (-SCHEDULE_SEARCH_DAYS, SCHEDULE_SEARCH_DAYS)]
+        months = [(target.year, target.month)]
+        months += sorted({(d.year, d.month) for d in around} - set(months))
+        found: list[tuple[int, int]] = []           # (écart en jours, schedule_id)
 
         def walk(node):
             if isinstance(node, dict):
                 wid = node.get("workoutId") or (node.get("workout") or {}).get("workoutId")
+                sid = node.get("workoutScheduleId") or node.get("scheduleId") or node.get("id")
                 day = str(node.get("date") or node.get("calendarDate")
                           or node.get("scheduledDate") or "")[:10]
-                if wid and int(wid) == int(workout_id) and day == date_str:
-                    return node.get("workoutScheduleId") or node.get("scheduleId") or node.get("id")
+                if wid and sid and int(wid) == int(workout_id):
+                    try:
+                        found.append((abs((date.fromisoformat(day) - target).days), int(sid)))
+                    except ValueError:
+                        pass                        # sans date lisible : pas une planification
                 for value in node.values():
-                    found = walk(value)
-                    if found:
-                        return found
+                    walk(value)
             elif isinstance(node, list):
                 for value in node:
-                    found = walk(value)
-                    if found:
-                        return found
-            return None
+                    walk(value)
 
-        found = walk(data)
-        return int(found) if found else None
+        for year, month in months:
+            walk(self._paced(self.api.get_scheduled_workouts, year, month) or {})
+            if found:
+                return min(found)[1]
+        return None
 
     def ensure_scheduled(self, workout_id: int, date_str: str) -> Optional[int]:
         """
         Réconciliation : une séance retrouvée dans la bibliothèque n'est pas
         forcément au calendrier (création réussie mais réponse perdue, puis
-        planification jamais faite). La planifie si besoin, retourne l'id.
+        planification jamais faite). La planifie si elle n'y est nulle part
+        (cf. find_schedule : déplacée, elle n'est pas replanifiée), retourne l'id.
         """
         existing = self.find_schedule(workout_id, date_str)
         if existing:
             return existing
-        scheduled = self.api.schedule_workout(workout_id, date_str) or {}
-        time.sleep(API_COOLDOWN_S)
+        scheduled = self._paced(self.api.schedule_workout, workout_id, date_str) or {}
         sid = (scheduled.get("workoutScheduleId") or scheduled.get("scheduleId")
                or scheduled.get("id"))
         return int(sid) if sid else None
+
+    def get_workout(self, workout_id: int) -> dict:
+        """Séance complète (étapes et cibles), non cachée : la réconciliation compare son contenu."""
+        return self._paced(self.api.get_workout_by_id, workout_id) or {}
 
     def list_workouts(self, page_size: int = 100, max_items: int = 2000) -> list[dict]:
         """Bibliothèque de séances complète, paginée (non cachée : réconciliation)."""
         out: list[dict] = []
         start = 0
         while start < max_items:
-            page = self.api.get_workouts(start, page_size) or []
+            page = self._paced(self.api.get_workouts, start, page_size) or []
             if not isinstance(page, list) or not page:
                 break
             out.extend(page)
@@ -1536,6 +1552,33 @@ def _http_status(exc: BaseException) -> Optional[int]:
     import re
     match = re.search(r"\b(?:API Error|HTTP)\s+(\d{3})\b", str(exc))
     return int(match.group(1)) if match else None
+
+
+# Refus propres à UNE activité (supprimée) : on la saute et la boucle continue.
+# Tout le reste arrête une boucle multi-activités au premier refus — 400 (porte
+# sur la requête, pas l'activité), 401/403 (jetons révoqués, blocage), 429, 5xx,
+# réseau. Et deux refus « sautables » d'affilée arrêtent aussi : c'est alors
+# l'endpoint qui manque, pas une activité (sinon 12 refus à chaque rendu).
+SKIPPABLE_ACTIVITY_STATUSES = frozenset({404, 410})
+MAX_SKIPPED_IN_ROW = 2
+
+
+def is_garmin_failure(exc: BaseException) -> bool:
+    """
+    Panne Garmin ou réseau (réponse HTTP en erreur, exception garminconnect,
+    coupure, délai) — par opposition à un bug de lecture (KeyError, TypeError…),
+    qui doit remonter plutôt que de se déguiser en « Garmin n'a pas répondu ».
+    """
+    if isinstance(exc, (GarminConnectConnectionError, GarminConnectAuthenticationError,
+                        GarminConnectTooManyRequestsError, ConnectionError, TimeoutError)):
+        return True
+    if _http_status(exc) is not None:
+        return True
+    return type(exc).__module__.split(".")[0] in ("requests", "urllib3", "curl_cffi")
+
+
+def skippable_activity_error(exc: BaseException) -> bool:
+    return _http_status(exc) in SKIPPABLE_ACTIVITY_STATUSES
 
 
 def _sweep_streams(folder: Path) -> None:

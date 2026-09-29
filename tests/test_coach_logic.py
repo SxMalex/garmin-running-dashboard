@@ -447,7 +447,7 @@ class _PlansClient:
     def __init__(self, plans, detail=None):
         self.plans, self.detail, self.detail_calls = plans, detail or {}, 0
 
-    def get_training_plans(self):
+    def get_training_plans(self, strict=False, use_cache=None):
         return self.plans
 
     def get_adaptive_plan(self, plan_id):
@@ -475,3 +475,98 @@ def test_todays_session_matches_legacy_composition(sample_running_df):
             recommend_session(sample_running_df, downgrade=n, load_df=sample_running_df), None)
         assert got["rec"] == legacy and got["downgrade"] == n
         assert got["alert"] == hard_session_alert(None, n)
+
+
+# ---------------------------------------------------------------------------
+# Revue PR 1 (lot L) : « aucun plan » ≠ « Garmin n'a pas répondu », et la reco
+# fusionnée affiche l'allure et la fiche de séance de Run Coach.
+# ---------------------------------------------------------------------------
+
+class _FlakyPlansClient:
+    """Une seule lecture, stricte avec cache (cf. load_coach_context) → `answer` (valeur ou exception)."""
+
+    def __init__(self, answer, detail=None):
+        self.answer, self.detail, self.calls = answer, detail or {}, []
+
+    def get_training_plans(self, strict=False, use_cache=None):
+        self.calls.append((strict, use_cache))
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+    def get_adaptive_plan(self, plan_id):
+        return self.detail
+
+
+@pytest.mark.parametrize("error", [RuntimeError("API Error 429"), RuntimeError("API Error 503"),
+                                   ConnectionError("réseau coupé")], ids=["429", "503", "reseau"])
+def test_load_coach_context_panne_releve_au_lieu_de_dire_aucun_plan(error):
+    """Revue : l'échec tolérant ({}) donnait None = « pas de plan », mis en cache 1 h."""
+    from coach_logic import load_coach_context
+    client = _FlakyPlansClient(error)
+    with pytest.raises(type(error)):
+        load_coach_context(client, TODAY)
+    assert client.calls == [(True, True)]              # une lecture, pas deux délais d'attente
+
+
+def test_load_coach_context_vide_confirme_en_strict():
+    """Garmin répond vraiment « rien » : aucun plan (None), comme avant."""
+    from coach_logic import load_coach_context
+    assert load_coach_context(_FlakyPlansClient({}), TODAY) is None
+    assert load_coach_context(_FlakyPlansClient({"trainingPlanList": []}), TODAY) is None
+
+
+def test_load_coach_context_plan_actif(plans_raw, plan_detail):
+    from coach_logic import load_coach_context
+    ctx = load_coach_context(_FlakyPlansClient(plans_raw, plan_detail), TODAY)
+    assert ctx["plan"]["name"] == "Programme test"
+
+
+def test_coach_unknown_est_faux_mais_distinct_de_none():
+    from coach_logic import COACH_UNKNOWN, coach_unknown, hard_session_alert
+    assert not COACH_UNKNOWN and coach_unknown(COACH_UNKNOWN)
+    assert not coach_unknown(None) and not coach_unknown({})
+    assert merge_coach_into_recommendation(_rec(), COACH_UNKNOWN)["coach"] is None
+    assert hard_session_alert(COACH_UNKNOWN, 2) is None
+
+
+def test_merge_coach_met_a_jour_allure_affichee_et_fiche(plans_raw, plan_detail):
+    """Revue : target_pace_str gardait l'allure de la logique interne (MCP, GPX)."""
+    from next_session_logic import SESSION_TYPES
+    merged = merge_coach_into_recommendation(_rec(), coach_plan_context(plans_raw, plan_detail, TODAY))
+    assert merged["target_pace_sec"] == 379.0
+    assert merged["target_pace_str"] == "6:19/km"          # et non « 6:38/km »
+    assert merged["session"] is SESSION_TYPES["tempo"]
+
+
+def test_merge_coach_sans_allure_de_reference(plans_raw, plan_detail):
+    """Aucune allure connue : « — », jamais une allure inventée."""
+    rec = dict(_rec(), avg_pace_sec=None, target_pace_sec=None)
+    merged = merge_coach_into_recommendation(rec, coach_plan_context(plans_raw, plan_detail, TODAY))
+    assert merged["target_pace_str"] == "—"
+
+
+# --- Revue : une seule lecture, et seule une panne Garmin devient « inconnu » ---------
+class _StrictPlansClient:
+    def __init__(self, outcomes):
+        self.outcomes, self.calls = list(outcomes), []
+
+    def get_training_plans(self, strict=False, use_cache=False):
+        self.calls.append((strict, use_cache))
+        out = self.outcomes.pop(0)
+        if isinstance(out, Exception):
+            raise out
+        return out
+
+
+def test_coach_context_reads_plans_once_even_during_an_outage():
+    """Revue : lecture tolérante PUIS stricte = deux délais d'attente pendant une panne."""
+    from datetime import date
+    from coach_logic import load_coach_context
+    client = _StrictPlansClient([RuntimeError("API Error 503")])
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError):
+        load_coach_context(client, date(2026, 9, 29))
+    assert client.calls == [(True, True)]                     # strict ET cache autorisé : un appel
+    no_plan = _StrictPlansClient([{"trainingPlanList": []}])
+    assert load_coach_context(no_plan, date(2026, 9, 29)) is None and len(no_plan.calls) == 1

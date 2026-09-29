@@ -53,13 +53,20 @@ def week_days(activities_df: pd.DataFrame, today: date,
     Lundi → dimanche de la semaine de `today`. Chaque case :
     {"date", "name", "what", "short", "state", "is_today"} avec state ∈
     done / today / plan / rest.
-    `planned` : [{"date": "YYYY-MM-DD", "label": str}] (plan Objectif ou Run
-    Coach) ; une séance faite l'emporte sur la séance prévue du même jour.
+    `planned` : [{"date": "YYYY-MM-DD", "label": str, "run": bool}] (plan
+    Objectif ou Run Coach ; `run` absent = course) ; une séance faite
+    l'emporte sur la séance prévue du même jour. Sauf aujourd'hui : tant
+    qu'aucune COURSE n'est enregistrée, une course prévue reste « à faire »
+    même après un renfo ou du vélo le matin — comme la carte séance
+    (`todays_session` ne tient compte que des courses).
     """
     monday = today - timedelta(days=today.weekday())
-    plan_by_day = {}
+    plan_by_day, run_by_day = {}, {}
     for p in planned or []:
-        plan_by_day.setdefault(str(p["date"])[:10], p["label"])
+        day = str(p["date"])[:10]
+        plan_by_day.setdefault(day, p["label"])
+        if p.get("run", True):
+            run_by_day.setdefault(day, p["label"])
     df = activities_df
     if df is not None and not df.empty:
         days = pd.to_datetime(df["startTimeLocal"]).dt.date
@@ -68,10 +75,14 @@ def week_days(activities_df: pd.DataFrame, today: date,
         d = monday + timedelta(days=i)
         name = weekday_fr(d)[:3].capitalize()
         acts = df[days == d] if df is not None and not df.empty else None
-        if acts is not None and not acts.empty:
+        done = acts is not None and not acts.empty
+        if done and d == today and d.isoformat() in run_by_day:
+            done = (acts["activityType"] == "running").any()
+        if done:
             state, what = "done", _done_label(acts)
         elif d == today:
-            state, what = "today", plan_by_day.get(d.isoformat(), "Repos")
+            # La course du jour d'abord : c'est elle que la carte séance annonce.
+            state, what = "today", run_by_day.get(d.isoformat(), plan_by_day.get(d.isoformat(), "Repos"))
         elif d > today and d.isoformat() in plan_by_day:
             state, what = "plan", plan_by_day[d.isoformat()]
         else:
@@ -79,6 +90,37 @@ def week_days(activities_df: pd.DataFrame, today: date,
         days_out.append({"date": d, "name": name, "what": what, "short": short_label(what),
                          "state": state, "is_today": d == today})
     return days_out
+
+
+def run_totals(activities_df: pd.DataFrame | None, since: date) -> dict:
+    """
+    Courses depuis `since` (inclus, date locale) : {"km", "runs", "elevation",
+    "pace_sec", "hr"}. Allure = temps total ÷ distance totale (moyenne des
+    allures pondérée par la distance), FC = moyenne pondérée par la durée —
+    une sortie de 3 km ne pèse pas autant qu'une de 20. Sans course : 0 km,
+    allure et FC None (« — » à l'affichage, jamais la moyenne de tout
+    l'historique).
+    """
+    out = {"km": 0.0, "runs": 0, "elevation": 0.0, "pace_sec": None, "hr": None}
+    if activities_df is None or activities_df.empty:
+        return out
+    df = activities_df[activities_df["activityType"] == "running"]
+    df = df[pd.to_datetime(df["startTimeLocal"]).dt.date >= since]
+    if df.empty:
+        return out
+    km = pd.to_numeric(df["distance_km"], errors="coerce")
+    pace = pd.to_numeric(df["avgPace_sec"], errors="coerce")
+    minutes = pd.to_numeric(df["duration_min"], errors="coerce")
+    hr = pd.to_numeric(df["avgHR"], errors="coerce")
+    paced = (pace > 0) & (km > 0)
+    timed = hr.notna() & (minutes > 0)
+    out.update(
+        km=round(float(km.fillna(0).sum()), 1), runs=int(len(df)),
+        elevation=float(pd.to_numeric(df["elevationGain"], errors="coerce").fillna(0).sum()),
+        pace_sec=(float((pace[paced] * km[paced]).sum() / km[paced].sum()) if paced.any() else None),
+        hr=(float((hr[timed] * minutes[timed]).sum() / minutes[timed].sum()) if timed.any() else None),
+    )
+    return out
 
 
 def planned_from_goal(sessions: list[dict] | None) -> list[dict]:
@@ -91,7 +133,7 @@ def planned_from_goal(sessions: list[dict] | None) -> list[dict]:
             label = "Course !"
         else:
             label = f"{s.get('title', 'Course')} {s.get('distance_km', 0):g} km"
-        out.append({"date": s["date"], "label": label})
+        out.append({"date": s["date"], "label": label, "run": s.get("kind") != "strength"})
     return out
 
 
@@ -100,7 +142,8 @@ def planned_from_coach(coach: dict | None) -> list[dict]:
     out = []
     for t in (coach or {}).get("tasks") or []:
         if t.get("date") is not None and not t.get("rest_day"):
-            out.append({"date": str(t["date"]), "label": t.get("name") or "Séance"})
+            out.append({"date": str(t["date"]), "label": t.get("name") or "Séance",
+                        "run": t.get("sport") == "running"})
     return out
 
 

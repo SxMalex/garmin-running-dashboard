@@ -1,5 +1,6 @@
 """Helpers d'affichage Streamlit partagés entre pages."""
 
+import logging
 from datetime import date
 from typing import Sequence
 
@@ -8,16 +9,19 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import chart_theme as ct  # active le template Plotly gar
-from coach_logic import load_coach_context
+from coach_logic import COACH_UNKNOWN, load_coach_context
 from formatting import map_zoom
 from garmin_client import (
     ACTIVITY_HISTORY_LIMIT,
     GarminClient,
     adopt_session,
+    is_garmin_failure,
     shared_athlete_id,
     shared_session,
     safe_load_activities,
 )
+
+logger = logging.getLogger(__name__)
 
 OSM_ATTRIBUTION = ("Fond de carte © [OpenStreetMap](https://www.openstreetmap.org/copyright) "
                    "contributors")
@@ -169,14 +173,22 @@ def _cached_coach_context_impl(athlete_id: int, cdate: str, nonce: int):
 
 def cached_coach_context(athlete_id: int, cdate: str | None = None):
     """
-    Contexte du plan Garmin Run Coach (séances à venir, phase, objectif), ou None
-    si aucun plan n'est actif.
+    Contexte du plan Garmin Run Coach (séances à venir, phase, objectif), None
+    si aucun plan n'est actif, `coach_logic.COACH_UNKNOWN` si Garmin n'a pas
+    répondu — un échec n'est pas mis en cache (st.cache_data ne garde pas une
+    exception) : il est retenté au prochain rendu, pas dans une heure.
 
     Partagé par l'accueil et la page Prochaine sortie : les deux doivent annoncer
     la même séance, donc lire le plan par le même chemin.
     """
     day = cdate or date.today().isoformat()
-    return _cached_coach_context_impl(athlete_id, day, cache_nonce())
+    try:
+        return _cached_coach_context_impl(athlete_id, day, cache_nonce())
+    except Exception as exc:
+        if not is_garmin_failure(exc):
+            raise                  # bug de lecture : visible, pas une fausse « panne » permanente
+        logger.warning("Garmin n'a pas répondu sur le plan Run Coach : état inconnu", exc_info=True)
+        return COACH_UNKNOWN
 
 
 def refresh_data() -> None:

@@ -9,7 +9,7 @@ from datetime import date, timedelta
 import streamlit as st
 import pandas as pd
 
-from coach_logic import nutrition_focus, target_label
+from coach_logic import coach_unknown, nutrition_focus, target_label
 from forme_logic import hrv_label, parse_recovery
 from formatting import seconds_to_pace_str, weekday_fr
 from next_session_logic import compute_tsb
@@ -243,7 +243,12 @@ def _format_nutrition_context(client, coach, goal_sessions=None, days: int = 4) 
     today = date.today()
     lines = ["=== Séances des prochains jours ==="]
 
-    if coach and coach.get("week"):
+    if coach_unknown(coach):
+        # Panne Garmin : ne pas retomber sur le plan Objectif, qui n'est peut-être
+        # pas celui que la montre suit (même règle que la séance du jour).
+        lines.append("- État du plan Garmin Run Coach inconnu (Garmin n'a pas répondu) : "
+                     "séances des prochains jours non connues.")
+    elif coach and coach.get("week"):
         upcoming = [t for t in coach["week"] if t["date"] < today + timedelta(days=days)]
         for task in upcoming:
             when = "aujourd'hui" if task["date"] == today else weekday_fr(task["date"])

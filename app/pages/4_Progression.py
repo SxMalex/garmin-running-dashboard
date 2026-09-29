@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from formatting import md_escape
 from forecast_logic import race_projection, trend_word, vo2max_projection
 from physio_ui import render_aerobic_progress, render_physio_settings
 from ui_mode import explain
@@ -284,7 +285,7 @@ else:
                 st.metric(pr["label"], pr["value_str"],
                           delta=pr["date_str"] or None, delta_color="off", delta_arrow="off")
                 if pr["activity_name"]:
-                    st.caption(pr["activity_name"])
+                    st.caption(md_escape(pr["activity_name"]))
 
 # En fin de page : peut demander jusqu'à DECOUPLING_TREND_MAX_RUNS appels API
 # au premier chargement, sans retarder les records et prédictions.

@@ -41,7 +41,7 @@ from garminconnect import Garmin  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 import insights  # noqa: E402
-from garmin_client import GarminClient  # noqa: E402
+from garmin_client import GarminClient, _purge_legacy_tokens  # noqa: E402
 
 DEFAULT_TOKENSTORE = "~/.garminconnect-mcp"  # ≠ dashboard hors Docker (~/.garminconnect)
 
@@ -94,6 +94,8 @@ def _get_client() -> Garmin:
         "`python test_connection.py` une fois pour créer le tokenstore."
     )
 
+    # Mise à jour depuis garth : anciens jetons (secret OAuth1 longue durée) inutiles.
+    _purge_legacy_tokens(tokenstore)
     try:
         client = Garmin()
         client.login(tokenstore)
