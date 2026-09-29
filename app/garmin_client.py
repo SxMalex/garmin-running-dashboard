@@ -231,13 +231,40 @@ def _serialize_refresh(api) -> None:
                 return None
             if before is not None and getattr(client, "di_token", None) != before:
                 return None                     # un autre fil vient de le faire
+            path = getattr(client, "_tokenstore_path", None)
+            refresh_tokens = {getattr(client, "di_refresh_token", None)}
             result = original(*args, **kwargs)
             if getattr(client, "_gd_neutralized", False):
-                _wipe_tokens(client)            # déconnexion survenue pendant l'appel
+                # Déconnexion survenue PENDANT l'appel : la bibliothèque a pu lire le
+                # chemin avant qu'on l'efface et réécrire le fichier après le rmtree.
+                refresh_tokens.add(getattr(client, "di_refresh_token", None))
+                _wipe_tokens(client)
+                _remove_tokens_of(path, refresh_tokens)
             return result
 
     client._refresh_session = _locked
     client._gd_refresh_lock = lock
+
+
+def _remove_tokens_of(path: Optional[str], refresh_tokens: set) -> None:
+    """
+    Supprime le fichier de jetons s'il appartient à la session abandonnée (jeton
+    vide ou l'un des siens) — jamais celui d'une reconnexion faite entre-temps.
+    """
+    if not path:
+        return
+    p = Path(path).expanduser()
+    if p.is_dir() or not p.name.endswith(".json"):
+        p = p / "garmin_tokens.json"
+    try:
+        written = json.loads(p.read_text()).get("di_refresh_token")
+    except (OSError, ValueError, AttributeError):
+        return
+    if written is None or written in refresh_tokens:
+        try:
+            p.unlink()
+        except OSError as e:
+            logger.warning("Jetons de la session fermée non supprimés : %s", e)
 
 
 def _neutralize(api) -> None:

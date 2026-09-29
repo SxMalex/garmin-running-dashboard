@@ -570,3 +570,12 @@ def test_coach_context_reads_plans_once_even_during_an_outage():
     assert client.calls == [(True, True)]                     # strict ET cache autorisé : un appel
     no_plan = _StrictPlansClient([{"trainingPlanList": []}])
     assert load_coach_context(no_plan, date(2026, 9, 29)) is None and len(no_plan.calls) == 1
+
+
+def test_merged_recommendation_date_text_follows_the_coach_task(sample_running_df, plans_raw, plan_detail):
+    """Contre-validation : suggested_date suivait Run Coach, suggested_date_str restait « Demain »."""
+    from coach_logic import load_coach_context, merge_coach_into_recommendation
+    from next_session_logic import format_date_fr, recommend_session
+    ctx = load_coach_context(_FlakyPlansClient(plans_raw, plan_detail), TODAY)
+    rec = merge_coach_into_recommendation(recommend_session(sample_running_df), ctx)
+    assert rec["suggested_date_str"] == format_date_fr(rec["suggested_date"])

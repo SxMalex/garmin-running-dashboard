@@ -190,3 +190,14 @@ def test_run_totals_sans_course_ni_donnee():
     df = _runs(("2026-09-24 08:00", "running", 0.0, 0.0, 0.0, float("nan")))
     got = run_totals(df, THU)
     assert got["runs"] == 1 and got["pace_sec"] is None and got["hr"] is None
+
+
+def test_planned_from_suggestion_only_for_a_run_suggested_today():
+    from datetime import date, timedelta
+    from home_logic import planned_from_suggestion
+    today = date(2026, 9, 29)
+    rec = {"suggested_date": today, "session": {"label": "Endurance fondamentale"}}
+    assert planned_from_suggestion(rec, today) == [{"date": "2026-09-29", "label": "Endurance fondamentale",
+                                                   "run": True}]
+    assert planned_from_suggestion({**rec, "suggested_date": today + timedelta(days=1)}, today) == []
+    assert planned_from_suggestion(None, today) == []

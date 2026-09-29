@@ -110,3 +110,32 @@ def test_next_session_with_too_few_runs_says_so(logged_in, fake_api):
     at = logged_in("5_Next_Session.py").run()
     assert not at.exception, [e.value for e in at.exception]
     assert any("au moins 3 courses" in w.value for w in at.warning)
+
+
+def test_strength_this_morning_does_not_tick_the_day_when_the_dashboard_suggests_a_run(logged_in, fake_api):
+    """Contre-validation : sans plan, la case du jour passait « fait » sur un renfo alors que la
+    carte annonçait encore une sortie pour aujourd'hui."""
+    import re
+    from datetime import date, datetime, timedelta
+    from fake_garmin import _run
+    today = date.today().isoformat()
+    fake_api.activities = [a for a in fake_api.activities if not a["startTimeLocal"].startswith(today)]
+    fake_api.activities.insert(0, _run(950, datetime.combine(date.today(), datetime.min.time())
+                                       + timedelta(hours=7), "strength_training"))
+    at = logged_in("main.py").run()
+    assert not at.exception, [e.value for e in at.exception]
+    card = next(m.value for m in at.markdown if "gd-session-title" in m.value and "Séance" in m.value)
+    strip = next(m.value for m in at.markdown if "gd-week" in m.value)
+    state, what = re.search(r'<div class="gd-day gd-day-(\w+) gd-day-istoday">.*?'
+                            r'<span class="gd-day-full">(.*?)</span>', strip).groups()
+    assert "Aujourd" in card                                  # précondition : sortie proposée aujourd'hui
+    assert state == "today" and what != "Renfo", (state, what)
+
+
+def test_activity_name_search_with_regex_characters_does_not_crash(logged_in):
+    """Contre-validation (antérieur à la branche) : « 10km (trail » levait une erreur de regex."""
+    at = logged_in("1_Activities.py").run()
+    box = next(t for t in at.text_input if "Rechercher" in t.label)
+    for query in ("10km (trail", "[", "a+*b", "Course 1"):
+        box.set_value(query).run()
+        assert not at.exception, (query, [e.value for e in at.exception])

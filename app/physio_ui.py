@@ -134,10 +134,11 @@ def _load_streams_strict(athlete_id: int, activity_id: int) -> dict:
 
 def _load_candidate_streams(athlete_id: int, activity_ids: tuple) -> tuple[dict, str | None]:
     """
-    Streams des sorties candidates. S'arrête au premier refus de Garmin (429,
-    5xx, panne réseau) au lieu d'enchaîner les échecs ; une sortie refusée
-    seule (autre 4xx : supprimée dans Garmin mais encore dans la liste en
-    cache) est sautée, sans priver les plus anciennes d'analyse. Les streams
+    Streams des sorties candidates. S'arrête au premier refus de Garmin (400,
+    401/403, 429, 5xx, panne réseau) au lieu d'enchaîner les échecs ; une
+    sortie refusée seule (404/410 : supprimée dans Garmin mais encore dans la
+    liste en cache) est sautée, sans priver les plus anciennes d'analyse — deux
+    d'affilée arrêtent (`MAX_SKIPPED_IN_ROW`). Les streams
     obtenus restent en cache disque 30 jours. Retourne (streams, cause).
     """
     streams_by_id = {}
