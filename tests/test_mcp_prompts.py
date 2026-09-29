@@ -59,6 +59,10 @@ def test_every_prompt_forbids_invented_numbers_and_diagnosis(build):
 
 def test_situation_survives_a_garmin_outage(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    import garmin_client as gcm
+    # Cache vierge : sinon une réponse laissée par un test précédent (même athlète 42)
+    # serait servie à la place de la panne (la lecture passe par le cache).
+    monkeypatch.setattr(gcm, "CACHE_DIR", tmp_path / "cache")
     from fake_garmin import FakeGarmin
     from garmin_client import GarminClient
     api = FakeGarmin()
@@ -92,3 +96,19 @@ def test_past_race_plan_is_not_announced_as_what_the_watch_follows(tmp_path, mon
     assert sit["goal"]["validated"] is False and sit["goal"]["past"] is True
     text = prompts.ajuste_plan(sit, "voyage")
     assert "la montre reçoit" not in text and "terminé" in text
+
+
+def test_situation_reads_the_plans_once(tmp_path, monkeypatch):
+    """Contre-validation : un appel strict frais PUIS load_coach_context — deux lectures."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    from fake_garmin import FakeGarmin
+    from garmin_client import GarminClient
+    import garmin_client as gcm
+    monkeypatch.setattr(gcm, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(gcm, "API_COOLDOWN_S", 0)
+    calls = []
+    real = GarminClient.get_training_plans
+    monkeypatch.setattr(GarminClient, "get_training_plans",
+                        lambda self, *a, **k: calls.append(k) or real(self, *a, **k))
+    prompts.situation(GarminClient(FakeGarmin(), athlete_id=42))
+    assert calls == [{"strict": True, "use_cache": True}]

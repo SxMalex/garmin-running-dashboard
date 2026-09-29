@@ -37,6 +37,7 @@ from raceday_logic import (
     reading_distance,
 )
 from ui_helpers import (
+    athlete_id_is_reliable,
     cache_nonce,
     cached_load_activities,
     get_athlete_id,
@@ -89,7 +90,8 @@ st.caption("Ton allure kilomètre par kilomètre à effort égal, la correction 
            "ravitaillement placé au bon endroit. Importe le GPX du parcours (site de "
            "l'organisateur, Strava, Garmin) ; sans GPX, le calcul suppose un parcours plat.")
 
-goal = goal_store.load(_athlete_id).get("goal") or {}
+# Sous un id de repli, l'objectif serait lu dans un autre dossier : pas de pré-remplissage.
+goal = (goal_store.load(_athlete_id).get("goal") or {}) if athlete_id_is_reliable() else {}
 default_distance = goal.get("distance") if goal.get("distance") in DISTANCES else "10 km"
 
 @st.cache_data(max_entries=4, show_spinner="Lecture du parcours…")

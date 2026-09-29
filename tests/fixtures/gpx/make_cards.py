@@ -138,6 +138,10 @@ def build(target: Path = HERE) -> None:
     # Un bout de trace (150 m) à côté du parcours complet en route : la route, et dit.
     card("short_track_long_route.gpx", gpx(trk(trkpts(loop(10)[:4])) + rte(loop(10, step_m=25))),
          km=10.0, note="bien plus courte")
+    # Une seule trace, deux segments très éloignés (deux parcours collés dans un trk) :
+    # le saut de 33 km n'est pas une coupure GPS en courant.
+    card("one_track_two_far_segments.gpx",
+         gpx(trk(trkpts(loop(10)), trkpts(loop(10, lat0=LAT0 + 0.3)))), km=10.0, note="parcours distincts")
     card("empty_track_with_route.gpx", gpx("<trk><name>vide</name><trkseg></trkseg></trk>" +
                                            rte(loop(10, step_m=25))), km=10.0, note="route")
 

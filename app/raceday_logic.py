@@ -114,6 +114,7 @@ def _haversine_m(lat1, lon1, lat2, lon2):
 
 _DTD_REFUSED = "GPX refusé : les déclarations DOCTYPE/ENTITY ne sont pas acceptées."
 JOIN_M = 200.0          # deux traces à moins de 200 m l'une de l'autre se suivent
+SEGMENT_GAP_M = 1000.0  # au-delà, deux segments d'une même trace ne sont plus une coupure GPS
 MIN_TRACK_M = 100.0
 
 
@@ -242,11 +243,18 @@ def parse_gpx(data: bytes) -> pd.DataFrame:
     for el in root.iter():
         tag = _local(el.tag)
         if tag == "trk":
-            # Les segments d'une trace se suivent (GPS coupé en courant) : écart compté.
+            # Les segments d'une trace se suivent (GPS coupé en courant) : écart
+            # compté — jusqu'à SEGMENT_GAP_M. Au-delà, ce n'est plus une coupure
+            # mais un autre parcours collé dans la même trace : pièce à part
+            # (enchaînée ou non par les règles des traces), jamais le saut compté.
             pts = []
             for seg in (c for c in el if _local(c.tag) == "trkseg"):
                 seg_pts, n_bad = _points(seg, "trkpt")
                 bad += n_bad
+                if pts and seg_pts and float(_haversine_m(pts[-1][0], pts[-1][1], seg_pts[0][0],
+                                                          seg_pts[0][1])) > SEGMENT_GAP_M:
+                    tracks.append(np.array(pts, dtype=float).reshape(-1, 3))
+                    pts = []
                 pts += seg_pts
             tracks.append(np.array(pts, dtype=float).reshape(-1, 3))
         elif tag == "rte":

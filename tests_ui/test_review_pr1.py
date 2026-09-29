@@ -127,3 +127,18 @@ def test_ai_coach_slot_during_a_run_coach_outage(logged_in, monkeypatch):
     assert not at.exception, [e.value for e in at.exception]
     prompt = at.code[0].value
     assert "inconnu" in prompt and "plan Objectif validé" not in prompt and "ne la remplace pas" not in prompt
+
+
+def test_race_day_does_not_read_the_goal_under_a_fallback_id(logged_in, monkeypatch):
+    """Contre-validation : 10_Jour_de_course lisait goal_store sous un id de repli."""
+    import garmin_client
+    import goal_store
+    reads = []
+    monkeypatch.setattr(goal_store, "load", lambda athlete_id, **k: reads.append(athlete_id) or {})
+    at = logged_in("10_Jour_de_course.py")
+    garmin_client._SESSION.update(athlete_id=123456, reliable=False, checked_at=10**12)
+    at.session_state["garmin_athlete_id_reliable"] = False
+    reads.clear()
+    at.run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert 123456 not in reads

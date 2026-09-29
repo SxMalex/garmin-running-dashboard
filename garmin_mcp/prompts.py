@@ -45,10 +45,9 @@ def situation(gc, today: date | None = None) -> dict:
     today = today or date.today()
     out = {"coach": None, "goal": None, "health": None}
     try:
-        # Lecture stricte d'abord (comme la garde d'écriture de la page Objectif) :
-        # load_coach_context avale les erreurs et répondrait « pas de plan » pendant
-        # une panne — le prompt proposerait alors de réécrire les séances de Run Coach.
-        gc.get_training_plans(strict=True)
+        # load_coach_context relève l'erreur Garmin (une seule lecture stricte) :
+        # une panne donne « inconnu », jamais « pas de plan » — sinon le prompt
+        # proposerait de réécrire les séances de Run Coach.
         ctx = load_coach_context(gc, today)
         if ctx:
             out["coach"] = {"name": ctx["plan"]["name"], "days_to_event": ctx.get("days_to_event")}

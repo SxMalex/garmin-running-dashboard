@@ -1527,3 +1527,22 @@ def test_weather_404_means_no_weather_and_is_cached(tmp_path, monkeypatch):
     monkeypatch.setattr(gcm, "WEATHER_ABSENT_TTL", -1)
     client.get_activity_weather(5, strict=True)
     assert Api.calls == 2
+
+
+def test_weather_refusal_still_pauses(tmp_path, monkeypatch):
+    """Contre-validation : aucun cooldown sur le 404 ni en strict — un refus reste un appel réel."""
+    import garmin_client as gcm
+    monkeypatch.setattr(gcm, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(gcm, "API_COOLDOWN_S", 0.4)
+    sleeps = []
+    monkeypatch.setattr(gcm.time, "sleep", lambda s: sleeps.append(s))
+
+    class Api:
+        def get_activity_weather(self, activity_id):
+            raise RuntimeError("API Error 404 - Not Found" if activity_id == "1" else "API Error 503")
+
+    c = gcm.GarminClient(api=Api(), athlete_id=1)
+    c.get_activity_weather(1, strict=True)
+    with pytest.raises(RuntimeError):
+        c.get_activity_weather(2, strict=True)
+    assert sleeps == [0.4, 0.4]

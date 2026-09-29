@@ -968,6 +968,7 @@ class GarminClient:
         try:
             data = self.api.get_activity_weather(str(activity_id)) or {}
         except Exception as e:
+            time.sleep(API_COOLDOWN_S)          # un refus reste un appel réel
             # 404 = pas de météo pour cette activité (tapis) : une réponse, pas
             # une panne — mise en cache comme telle. Le reste remonte en strict.
             if _http_status(e) == 404:

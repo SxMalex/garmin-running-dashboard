@@ -2,8 +2,21 @@
 Fixtures partagées et stubs pour éviter les imports Streamlit/Plotly.
 """
 
+import atexit
+import os
+import shutil
 import sys
+import tempfile
 from unittest.mock import MagicMock
+
+# Dossiers jetables AVANT tout import de garmin_client (CACHE_DIR est lu à
+# l'import) : sans ça, les tests écrivaient dans le vrai ~/.cache/garmin-dashboard
+# (athlètes factices 42, 99…) et relisaient au test suivant ce qu'un autre y avait
+# laissé — un test de panne voyait une vieille réponse en cache au lieu de la panne.
+_TMP = tempfile.mkdtemp(prefix="gdash-unit-")
+atexit.register(shutil.rmtree, _TMP, ignore_errors=True)
+for _var, _sub in (("CACHE_DIR", "cache"), ("DATA_DIR", "data"), ("GARMIN_TOKENSTORE", "tokens")):
+    os.environ[_var] = os.path.join(_TMP, _sub)
 
 # Stub streamlit et plotly avant tout import de page ou de module UI
 for mod in [
