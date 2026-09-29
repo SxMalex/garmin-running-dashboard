@@ -51,7 +51,13 @@ def _isolated_caches(monkeypatch):
     shutil.rmtree(garmin_client.CACHE_DIR, ignore_errors=True)
     shutil.rmtree(os.environ["DATA_DIR"], ignore_errors=True)
     monkeypatch.setattr(garmin_client, "API_COOLDOWN_S", 0)
+    monkeypatch.setattr(garmin_client, "ATHLETE_ID_RETRY_S", 0)
+    # Session partagée par le process : repartir sans session à chaque test
+    # (et ne jamais reprendre un vrai tokenstore).
+    monkeypatch.setattr(garmin_client, "resume_session", lambda: None)
+    garmin_client.reset_session_state()
     yield
+    garmin_client.reset_session_state()
     st.cache_data.clear()
 
 
@@ -69,8 +75,8 @@ def logged_in(fake_api):
     """
     def _make(name: str, **state) -> AppTest:
         at = AppTest.from_file(page_path("main.py"), default_timeout=60)
-        at.session_state["garmin_api"] = fake_api
-        at.session_state["garmin_athlete_id"] = 42
+        garmin_client.adopt_session(fake_api)              # la session du process
+        assert garmin_client.shared_athlete_id() == (42, True)
         for key, value in state.items():
             at.session_state[key] = value
         if name not in ("main.py", "0_Accueil.py"):   # Accueil = page par défaut

@@ -77,7 +77,9 @@ def project(dates, values, horizons_days, *, lookback_days: int = 56,
     s = s[np.isfinite(s.to_numpy())]
     if s.empty:
         return None
-    s = s.groupby(level=0).mean()                       # une valeur par jour
+    # Une valeur par JOUR (pas par horodatage) : deux courses le même jour ne
+    # doivent pas compter deux points vers MIN_POINTS.
+    s = s.groupby(s.index.normalize()).mean()
     last_date = s.index.max()
     s = s[s.index >= last_date - pd.Timedelta(days=lookback_days)]
     span = (s.index.max() - s.index.min()).days

@@ -29,8 +29,8 @@ def render(running_filtered: pd.DataFrame, client, hr_zones: list) -> None:
             y=hr_data["avgHR"],
             mode="markers+lines",
             name="FC moyenne",
-            line=dict(color="rgba(230,103,103,0.5)", width=1),
-            marker=dict(color="rgba(230,103,103,0.9)", size=6),
+            line=dict(color=ct.rgba(ct.HR, 0.5), width=1),
+            marker=dict(color=ct.rgba(ct.HR, 0.9), size=6),
             hovertemplate="<b>%{x|%d/%m/%Y}</b><br>FC : %{y:.0f} bpm<extra></extra>",
         ))
         if hr_data["maxHR"].notna().any():
@@ -40,7 +40,7 @@ def render(running_filtered: pd.DataFrame, client, hr_zones: list) -> None:
                 y=max_hr_data["maxHR"],
                 mode="markers",
                 name="FC max",
-                marker=dict(color="rgba(217,89,38,0.75)", size=5, symbol="triangle-up"),
+                marker=dict(color=ct.rgba(ct.HR_MAX, 0.75), size=5, symbol="triangle-up"),
                 hovertemplate="<b>%{x|%d/%m/%Y}</b><br>FC max : %{y:.0f} bpm<extra></extra>",
             ))
         fig_hr, _ = add_trend_line(
@@ -103,7 +103,7 @@ def render(running_filtered: pd.DataFrame, client, hr_zones: list) -> None:
             x="avgPace_sec",
             y="avgHR",
             color="distance_km",
-            color_continuous_scale=[ct.ZONE_RAMP[0], ct.ZONE_RAMP[2], "#104281"],
+            color_continuous_scale=[ct.ZONE_RAMP[0], ct.ZONE_RAMP[2], ct.SEQ_COLORSCALE[-1][1]],
             labels={
                 "avgPace_sec": "Allure (sec/km)",
                 "avgHR": "FC moyenne (bpm)",

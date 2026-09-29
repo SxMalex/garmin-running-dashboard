@@ -13,8 +13,7 @@ from datetime import date, datetime, time, timedelta
 import streamlit as st
 import pandas as pd
 
-import goal_store
-from coach_logic import nutrition_focus, target_label
+from coach_logic import coach_unknown, nutrition_focus, target_label
 from forme_logic import hrv_label, parse_recovery
 from formatting import seconds_to_pace_str, weekday_fr
 from next_session_logic import compute_pmc_series, compute_tsb, reference_threshold_sec
@@ -26,6 +25,7 @@ from ui_helpers import (
     render_garmin_attribution,
     get_athlete_id,
     require_login,
+    validated_plan_sessions,
 )
 
 st.set_page_config(
@@ -284,7 +284,12 @@ def _format_nutrition_context(client, coach, goal_sessions=None, days: int = 4) 
     today = date.today()
     lines = ["=== Séances des prochains jours ==="]
 
-    if coach and coach.get("week"):
+    if coach_unknown(coach):
+        # Panne Garmin : ne pas retomber sur le plan Objectif, qui n'est peut-être
+        # pas celui que la montre suit (même règle que la séance du jour).
+        lines.append("- État du plan Garmin Run Coach inconnu (Garmin n'a pas répondu) : "
+                     "séances des prochains jours non connues.")
+    elif coach and coach.get("week"):
         upcoming = [t for t in coach["week"] if t["date"] < today + timedelta(days=days)]
         for task in upcoming:
             when = "aujourd'hui" if task["date"] == today else weekday_fr(task["date"])
@@ -365,6 +370,10 @@ def _planned_on(day: date, coach, goal_sessions) -> tuple[str, str | None]:
     le booléen évite de lui dire « ne la remplace pas » un jour où rien n'est prévu.
     """
     lines = ["=== Séance prévue ce jour-là par le plan ==="]
+    if coach_unknown(coach):
+        # Panne Garmin : ni Run Coach ni, à sa place, le plan Objectif (règle de la séance du jour)
+        return "\n".join(lines + ["- État du plan Garmin Run Coach inconnu (Garmin n'a pas répondu) : "
+                                   "séance de ce jour-là non connue."]), None
     if coach and coach.get("tasks") is not None:
         tasks = [t for t in coach["tasks"] if t["date"] == day]
         known = max((t["date"] for t in coach["tasks"]), default=None)
@@ -521,7 +530,7 @@ if _is_nutrition:
     with st.spinner("Préparation du contexte alimentaire…"):
         _coach = cached_coach_context(_athlete_id)
         context = _format_nutrition_context(get_garmin_client(), _coach,
-                                        goal_store.validated_sessions(_athlete_id))
+                                        validated_plan_sessions())
     if _diet_notes.strip():
         context += f"\n\n=== Mes contraintes ===\n{_diet_notes.strip()}"
     system_prompt, request = _NUTRITION_SYSTEM_PROMPT, _NUTRITION_REQUEST
@@ -540,7 +549,7 @@ if _slot:
     _has_plan = False
     if not _is_nutrition:           # (le prompt repas liste déjà les séances du plan)
         _coach_ctx = cached_coach_context(_athlete_id)
-        _goal = goal_store.validated_sessions(_athlete_id)
+        _goal = validated_plan_sessions()
         _block, _has_plan = _planned_on(_slot.date(), _coach_ctx, _goal)
         context += "\n\n" + _block
     request += _slot_request(_slot, _is_nutrition, planned=_has_plan)

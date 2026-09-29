@@ -1,7 +1,7 @@
 """Chaque page se rend sans exception avec un compte Garmin factice."""
 
-import pytest
 
+import pytest
 from conftest import PAGES
 
 
@@ -15,7 +15,6 @@ def test_page_renders(logged_in, fake_api, name):
     # (st.error sert aussi de tuile de légende, ex. « TSB < −20 » sur Forme.)
     errors = [e.value for e in at.error if "Erreur" in e.value or "Garmin" in e.value]
     assert not errors, errors
-
 
 
 def test_activities_explorer_every_metric(logged_in):
@@ -37,6 +36,29 @@ def test_progress_page_shows_projections(logged_in, fake_api):
     assert any(m.label.startswith("Dans 3 mois") for m in at.metric)
     next(w for w in at.button_group if w.label == "Vue").set_value("ensemble").run()
     assert not at.exception, [e.value for e in at.exception]
+
+
+def test_forme_page_shows_a_single_tsb(logged_in, monkeypatch):
+    """
+    Revue #1 : le haut de page et l'onglet Charge affichaient deux TSB. La charge
+    est construite pour tomber sur une limite d'arrondi (sinon les deux chiffres
+    coïncidaient déjà avec l'ancien code, et le test ne prouvait rien).
+    """
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests"))
+    import pandas as pd
+    import next_session_logic
+    from pmc_edge import rounding_edge_daily
+    daily, c, a = rounding_edge_daily(pd.Timestamp.now())
+    monkeypatch.setattr(next_session_logic, "daily_tss", lambda df, thr: daily.copy())
+    at = logged_in("3_Forme.py").run()
+    assert not at.exception, [e.value for e in at.exception]
+    values = {m.label: m.value for m in at.metric if "TSB" in m.label}
+    assert len(values) >= 2, values
+    shown = {float(v.replace("+", "")) for v in values.values()}
+    assert shown == {round(round(c, 1) - round(a, 1), 1)}, values
+    assert round(c - a, 1) not in shown                     # l'ancienne définition aurait différé
 
 
 def test_home_shows_the_health_alert_first(logged_in, monkeypatch):
@@ -63,8 +85,6 @@ def test_progress_shows_running_form(logged_in):
     assert "Contact au sol" in kickers and "Puissance" in kickers
     next(w for w in at.button_group if w.label == "Métrique").set_value("avgStride_cm").run()
     assert not at.exception, [e.value for e in at.exception]
-
-
 
 
 def test_race_day_page_flat_course_by_default(logged_in):
@@ -228,7 +248,6 @@ def test_ai_coach_does_not_claim_a_planned_session_on_an_empty_day(logged_in, mo
     assert not at.exception, [e.value for e in at.exception]
     prompt = at.code[0].value
     assert "Au-delà de l'horizon connu" in prompt and "ne la remplace pas" not in prompt
-
 
 
 def test_ai_coach_rest_day_is_not_a_session_to_keep(logged_in, monkeypatch):

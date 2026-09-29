@@ -138,9 +138,12 @@ def planned_runs(coach: dict | None, goal_sessions: list[dict] | None,
     l'objectif Run Coach n'est pas une séance d'entraînement : écarté (comme
     `kind == "race"` pour le plan Objectif).
     """
+    from coach_logic import coach_unknown, estimated_distance_km
+
+    if coach_unknown(coach):
+        return []            # panne Garmin : ni Run Coach ni, à sa place, le plan Objectif
     if not coach:
         return list(goal_sessions or [])
-    from coach_logic import estimated_distance_km
 
     pace = None
     if activities is not None and not activities.empty and "activityType" in activities:

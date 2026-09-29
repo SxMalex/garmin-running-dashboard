@@ -12,6 +12,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from formatting import md_escape
 from forecast_logic import race_projection, trend_word, vo2max_projection
 from running_form_logic import form_report
 from ui_theme import chip, esc, html_block
@@ -338,7 +339,7 @@ else:
                 st.metric(pr["label"], pr["value_str"],
                           delta=pr["date_str"] or None, delta_color="off", delta_arrow="off")
                 if pr["activity_name"]:
-                    st.caption(pr["activity_name"])
+                    st.caption(md_escape(pr["activity_name"]))
 
 # En fin de page : peut demander jusqu'à DECOUPLING_TREND_MAX_RUNS appels API
 # au premier chargement, sans retarder les records et prédictions.

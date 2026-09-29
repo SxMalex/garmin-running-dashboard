@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 import goal_store
-from coach_logic import load_coach_context
+from coach_logic import COACH_UNKNOWN, load_coach_context
 from forme_logic import compute_forme_verdict, parse_recovery
 from illness_logic import health_watch as _health_watch, load_health_frame
 from next_session_logic import (
@@ -25,6 +25,7 @@ from next_session_logic import (
     compute_tsb,
     cross_training_factor,
     load_risk,
+    MIN_RUNS_FOR_SESSION,
     reference_threshold_sec,
     todays_session,
 )
@@ -45,7 +46,8 @@ from race_plan_logic import (
     plan_brief,
     predictions_by_km,
 )
-from garmin_client import ACTIVITY_HISTORY_LIMIT
+from garmin_client import (ACTIVITY_HISTORY_LIMIT, MAX_SKIPPED_IN_ROW, is_garmin_failure,
+                           skippable_activity_error)
 
 MAX_TREND_RUNS = 8  # budget d'appels API par requête MCP
 
@@ -75,6 +77,20 @@ def _activities(gc) -> pd.DataFrame:
     return gc.get_activities(limit=ACTIVITY_HISTORY_LIMIT)
 
 
+_UNCONFIRMED = ("Compte Garmin non confirmé (profileId indisponible) : le plan Objectif du "
+                "dashboard n'est pas lu, pour ne pas le chercher dans un autre dossier. "
+                "Réessaie dans une minute.")
+
+
+def _reliable(gc) -> bool:
+    return getattr(gc, "athlete_id_reliable", True)
+
+
+def _validated_sessions(gc):
+    """Plan Objectif validé — jamais lu sous un id d'athlète de repli (même règle que les pages)."""
+    return goal_store.validated_sessions(gc.athlete_id) if _reliable(gc) else None
+
+
 def daily_briefing(gc, today: date | None = None) -> dict:
     """Verdict du jour : fraîcheur, récupération, séance (plan Garmin d'abord), risque."""
     today = today or date.today()
@@ -83,14 +99,15 @@ def daily_briefing(gc, today: date | None = None) -> dict:
     cdate = today.isoformat()
     recovery = parse_recovery(gc.get_hrv(cdate), gc.get_sleep(cdate), gc.get_daily_stats(cdate))
     verdict = compute_forme_verdict(tsb, recovery["hrv_status"], recovery["sleep_score"])
-    coach = load_coach_context(gc, today)
-    n_runs = int((df["activityType"] == "running").sum()) if not df.empty else 0
-    # Même garde que l'Accueil (≥ 3 courses) : sinon séance annoncée ici et
-    # pas sur la page, voire plantage sur un historique vide.
-    session = (todays_session(df, recovery["hrv_status"], recovery["sleep_score"], coach,
-                              goal_store.validated_sessions(gc.athlete_id))
-               if n_runs >= 3 else None)
-    rec = session["rec"] if session else None
+    try:
+        coach = load_coach_context(gc, today)
+    except Exception as exc:
+        if not is_garmin_failure(exc):
+            raise              # bug de lecture : visible, pas déguisé en panne
+        coach = COACH_UNKNOWN  # Garmin n'a pas répondu : ni « pas de plan », ni plan Objectif
+    session = todays_session(df, recovery["hrv_status"], recovery["sleep_score"], coach,
+                             _validated_sessions(gc))
+    rec = session["rec"]
     task = (rec or {}).get("coach_task")
     pmc = compute_pmc_series(df, reference_threshold_sec(df)) if not df.empty else None
     return _clean({
@@ -113,11 +130,18 @@ def daily_briefing(gc, today: date | None = None) -> dict:
             "target_pace": rec.get("target_pace_str"),
             "downgraded_by_recovery": session["downgrade"],
             "warning": session["alert"],
-        } if rec else {"note": "Moins de 3 courses dans l'historique : pas de séance suggérée."}),
+        } if rec else {"note": f"Moins de {MIN_RUNS_FOR_SESSION} courses dans l'historique : "
+                               "pas de séance suggérée."}),
         "coach_plan": ({"name": coach["plan"]["name"],
                         "phase": (coach.get("phase") or {}).get("label"),
-                        "days_to_event": coach.get("days_to_event")} if coach else None),
+                        "days_to_event": coach.get("days_to_event")} if coach else
+                       {"status": "unknown",
+                        "note": "Garmin n'a pas répondu : impossible de savoir si un plan Run "
+                                "Coach est actif. Séance calculée par le dashboard, plan "
+                                "Objectif non annoncé ; si un plan Run Coach tourne, c'est "
+                                "la montre qui fait foi."} if session["coach_unknown"] else None),
         "load_risk": load_risk(pmc) if pmc is not None else {},
+        "account_note": None if _reliable(gc) else _UNCONFIRMED,
         "note": "Priorité de la séance : plan Garmin Run Coach s'il est actif (la montre le "
                 "suit, le dashboard ne réécrit rien), sinon plan Objectif validé dans le "
                 "dashboard (source « plan_objectif »), sinon recommandation calculée depuis "
@@ -167,12 +191,16 @@ def aerobic_trend(gc) -> dict:
     """Efficacité aérobie (tendance) et dérive des sorties longues récentes."""
     df = _activities(gc)
     trend = efficiency_trend(df)
-    items = []
+    items, skipped_in_row = [], 0
     for c in decoupling_candidates(df, max_runs=MAX_TREND_RUNS):
         try:
             items.append((c, gc.get_streams(int(c["activityId"]), strict=True)))
-        except Exception:
-            break  # premier refus Garmin : on s'arrête là
+            skipped_in_row = 0
+        except Exception as exc:
+            skipped_in_row += 1
+            if skippable_activity_error(exc) and skipped_in_row < MAX_SKIPPED_IN_ROW:
+                continue  # sortie refusée seule (supprimée…) : on passe aux suivantes
+            break  # 401/403, 429, 5xx, panne : premier refus Garmin, on s'arrête là
     hist = decoupling_history(items)
     return _clean({
         "efficiency_now": trend["ef_smooth"].iloc[-1] if not trend.empty else None,
@@ -224,8 +252,13 @@ def running_form(gc, today: date | None = None) -> dict:
     df = _activities(gc)
     report = [{k: v for k, v in r.items() if k != "series"} for r in form_report(df, pd.Timestamp(today))]
     # Même source que la semaine de l'Accueil : Run Coach s'il pilote, sinon le plan Objectif.
-    planned = planned_runs(load_coach_context(gc, today), goal_store.validated_sessions(gc.athlete_id),
-                           df, pd.Timestamp(today))
+    try:
+        coach = load_coach_context(gc, today)
+    except Exception as exc:
+        if not is_garmin_failure(exc):
+            raise
+        coach = COACH_UNKNOWN          # panne : aucune séance prévue annoncée à la place
+    planned = planned_runs(coach, _validated_sessions(gc), df, pd.Timestamp(today))
     spike = run_spike(df, planned, pd.Timestamp(today))
     return _clean({
         "form_at_equal_pace": report or "Pas de dynamique de course mesurée (capteur absent ?).",
@@ -245,6 +278,8 @@ def current_goal(gc) -> dict:
     aperçu recalculé, marqué comme tel.
     """
     from workout_export import plan_id_of
+    if not _reliable(gc):
+        return {"goal": None, "note": _UNCONFIRMED}       # « aucun objectif » serait faux
     doc = goal_store.load(gc.athlete_id)
     goal, prefs = doc.get("goal"), doc.get("prefs") or {}
     if not goal:

@@ -161,3 +161,22 @@ def test_pace_is_rounded_like_the_plan():
     assert seconds_to_pace_str(298.6) == "4:59/km"
     assert seconds_to_pace_str(299.6) == "5:00/km"
     assert seconds_to_pace_str(300.4) == "5:00/km"
+
+
+
+@pytest.mark.parametrize("name, forbidden", [
+    (":material/warning: danger", ":material"),     # icône Streamlit (le backslash n'y suffit pas)
+    (":smile: bonne sortie", ":smile:"),               # emoji
+    (":red[attention]", ":red["),                      # couleur
+    ("&#58;material/warning&#58;", "&#58;material"),   # entité fournie par le nom lui-même
+])
+def test_md_escape_neutralises_streamlit_directives(name, forbidden):
+    """Rendu vérifié dans le navigateur : « &#58; » s'affiche « : » sans rien activer."""
+    from formatting import md_escape
+    out = md_escape(name)
+    assert forbidden not in out and ":" not in out
+
+
+def test_md_escape_keeps_ordinary_text_readable():
+    from formatting import md_escape
+    assert md_escape("Tom & Jerry 10:30") == "Tom &amp; Jerry 10&#58;30"

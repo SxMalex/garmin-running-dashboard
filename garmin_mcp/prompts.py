@@ -55,6 +55,8 @@ def situation(gc, today: date | None = None) -> dict:
     except Exception:
         out["coach"] = "inconnu"
     try:
+        if not getattr(gc, "athlete_id_reliable", True):
+            raise LookupError      # id de repli : l'objectif serait lu dans un autre dossier
         doc = goal_store.load(gc.athlete_id)
         goal = doc.get("goal")
         if goal:
@@ -64,6 +66,8 @@ def situation(gc, today: date | None = None) -> dict:
             out["goal"] = {"distance": goal["distance"], "race_date": goal["race_date"],
                            "target": goal.get("target_text") or "", "validated": validated,
                            "past": goal["race_date"] < today.isoformat()}
+    except LookupError:
+        out["goal"] = "inconnu"
     except Exception:
         pass
     try:
@@ -88,7 +92,10 @@ def _contexte(sit: dict) -> str:
     elif coach == "inconnu":
         lines.append("- L'état du plan Garmin Run Coach est inconnu (Garmin n'a pas répondu) : "
                      "sois prudent avant de proposer des changements de séances.")
-    if goal:
+    if goal == "inconnu":
+        lines.append("- Objectif du dashboard non lu : compte Garmin non confirmé (réessaie dans une "
+                     "minute). Outil : current_goal.")
+    elif goal:
         state = ("terminé (la date de course est passée)" if goal.get("past") else
                  "validé (c'est ce plan que la montre reçoit)" if goal["validated"] else "pas encore validé")
         target = f", objectif {goal['target']}" if goal["target"] else ""

@@ -12,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from next_session_logic import cross_training_factor, pace_tss
+from next_session_logic import activity_tss
 
 # Zones d'intensité par IF (allure seuil ÷ allure) — repères usuels des zones
 # d'allure (≈ Coggan / Daniels) : sous 0,78 on récupère, au-dessus de 1,03 on
@@ -47,11 +47,13 @@ def intensity_zone(intensity: float | None) -> str:
     return next(key for limit, key, _ in INTENSITY_ZONES if intensity < limit)
 
 
-def enrich(activities: pd.DataFrame, threshold_sec: float) -> pd.DataFrame:
+def enrich(activities: pd.DataFrame, threshold_sec: float,
+           history: pd.DataFrame | None = None) -> pd.DataFrame:
     """
     Ajoute `intensity` (IF), `intensity_pct`, `zone`, `tss`, `pace_min` à chaque
-    activité. La course est notée à l'allure (même formule que le PMC) ; le
-    sport croisé par sa charge Garmin ramenée sur l'échelle du TSS.
+    activité. `tss` = exactement la charge que le PMC compte pour elle
+    (`activity_tss`) ; `history` = l'historique complet quand `activities` est
+    une vue filtrée (le facteur du sport croisé se calibre dessus).
     """
     df = activities.copy()
     if df.empty:
@@ -64,13 +66,7 @@ def enrich(activities: pd.DataFrame, threshold_sec: float) -> pd.DataFrame:
     df["intensity_pct"] = df["intensity"] * 100
     df["zone"] = [intensity_zone(v) for v in df["intensity"]]
     df["pace_min"] = pace / 60
-    tss = pd.Series(np.nan, index=df.index)
-    if is_run.any():
-        tss[is_run] = pace_tss(df[is_run], threshold_sec)
-    load = pd.to_numeric(df.get("trainingLoad"), errors="coerce") if "trainingLoad" in df else None
-    if load is not None:
-        k = cross_training_factor(activities, threshold_sec)
-        tss[~is_run] = load[~is_run] * k
+    tss = activity_tss(activities, threshold_sec, calibration_df=history)
     df["tss"] = tss
     return df
 

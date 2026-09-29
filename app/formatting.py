@@ -19,7 +19,12 @@ def md_escape(text) -> str:
     `![](https://tiers/p.png)` ferait charger une image distante (fuite d'IP) et
     `**x**` réécrirait la mise en forme de la page.
     """
-    return _MD_SPECIAL.sub(r"\\\1", " ".join(str(text).split()))
+    text = " ".join(str(text).split()).replace("&", "&amp;")      # pas d'entité injectée
+    text = _MD_SPECIAL.sub(r"\\\1", text)
+    # « : » en entité : un backslash ne neutralise pas les icônes `:material/x:`
+    # de Streamlit (vérifié dans le navigateur) ; `&#58;` neutralise icônes,
+    # emoji `:smile:` et couleurs `:red[…]`, et s'affiche « : ».
+    return text.replace(":", "&#58;")
 
 
 # ---------------------------------------------------------------------------

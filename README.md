@@ -209,6 +209,11 @@ Les tokens sont ensuite persistés dans `app/.garmin/` (dev) ou le volume
 `garmin_tokens` (prod) : les démarrages suivants se connectent **automatiquement**,
 sans mot de passe ni MFA, pendant environ un an.
 
+> **Mise à jour depuis une version précédente** : `garminconnect` 0.3.6 ne lit plus que
+> `garmin_tokens.json`. Les anciens jetons garth (`oauth1_token.json`, `oauth2_token.json`,
+> dont le secret OAuth1 longue durée) sont ignorés et supprimés dès le premier démarrage :
+> il faut se reconnecter une fois (mot de passe et code MFA).
+
 ### 4. (Optionnel) Accès depuis un autre appareil
 
 Par défaut, `docker-compose.yml` publie le port sur la seule interface de loopback :

@@ -9,6 +9,7 @@ from home_logic import (
     home_signals,
     planned_from_coach,
     planned_from_goal,
+    run_totals,
     short_label,
     week_days,
 )
@@ -51,8 +52,12 @@ def test_planned_adapters():
         {"date": "2026-09-25", "kind": "strength", "duration_min": 30},
         {"date": "2026-11-15", "kind": "race", "title": "🏁 Semi"}])
     assert [g["label"] for g in goal] == ["Footing 10 km", "Renfo 30 min", "Course !"]
-    coach = planned_from_coach({"tasks": [{"date": THU, "name": "Seuil 3×10"}, {"date": None}]})
-    assert coach == [{"date": "2026-09-24", "label": "Seuil 3×10"}]
+    assert [g["run"] for g in goal] == [True, False, True]
+    coach = planned_from_coach({"tasks": [
+        {"date": THU, "name": "Seuil 3×10", "sport": "running"},
+        {"date": THU, "name": "Gainage", "sport": "strength_training"}, {"date": None}]})
+    assert coach == [{"date": "2026-09-24", "label": "Seuil 3×10", "run": True},
+                     {"date": "2026-09-24", "label": "Gainage", "run": False}]
     assert planned_from_coach(None) == []
 
 
@@ -103,3 +108,85 @@ def test_short_label_uses_last_km_occurrence():
     faut afficher, pas la 1re occurrence."""
     assert short_label("Fractionné allure 5 km 9.1 km") == "9"
 
+
+
+# ---------------------------------------------------------------------------
+# Revue PR 1 (lot L)
+# ---------------------------------------------------------------------------
+
+def test_renfo_du_matin_ne_marque_pas_la_course_du_jour_faite():
+    """Revue : la case du jour passait « fait » après un renfo alors que la carte annonçait le seuil."""
+    df = _acts(("2026-09-24 07:00", "strength_training", 0.0))
+    today = week_days(df, THU, [{"date": "2026-09-24", "label": "Seuil 8 km", "run": True}])[3]
+    assert today["state"] == "today" and today["what"] == "Seuil 8 km"
+
+
+def test_course_prevue_sans_drapeau_run_compte_comme_course():
+    df = _acts(("2026-09-24 07:00", "cycling", 30.0))
+    assert week_days(df, THU, [{"date": "2026-09-24", "label": "Seuil"}])[3]["state"] == "today"
+
+
+def test_renfo_prevu_et_fait_marque_la_journee():
+    df = _acts(("2026-09-24 07:00", "strength_training", 0.0))
+    today = week_days(df, THU, [{"date": "2026-09-24", "label": "Renfo 30 min", "run": False}])[3]
+    assert today["state"] == "done" and today["what"] == "Renfo"
+
+
+def test_renfo_et_course_prevus_le_meme_jour():
+    """Plan Objectif : renfo + course le même jour (Run Coach aussi) — le renfo seul ne suffit pas."""
+    df = _acts(("2026-09-24 07:00", "strength_training", 0.0))
+    planned = planned_from_goal([
+        {"date": "2026-09-24", "kind": "strength", "duration_min": 30},
+        {"date": "2026-09-24", "kind": "tempo", "title": "Seuil", "distance_km": 8.0}])
+    today = week_days(df, THU, planned)[3]
+    assert today["state"] == "today" and today["what"] == "Seuil 8 km"
+    df = _acts(("2026-09-24 07:00", "strength_training", 0.0), ("2026-09-24 18:00", "running", 8.0))
+    assert week_days(df, THU, planned)[3]["state"] == "done"
+
+
+def test_sport_croise_sans_plan_reste_fait():
+    df = _acts(("2026-09-24 07:00", "cycling", 30.0))
+    assert week_days(df, THU)[3]["state"] == "done"
+
+
+def test_jour_passe_avec_renfo_seul_reste_fait():
+    """La règle ne vaut que pour aujourd'hui : un jour passé raconte ce qui a été fait."""
+    df = _acts(("2026-09-23 07:00", "strength_training", 0.0))
+    days = week_days(df, THU, [{"date": "2026-09-23", "label": "Seuil 8 km", "run": True}])
+    assert days[2]["state"] == "done"
+
+
+def _runs(*rows):
+    return pd.DataFrame([{"startTimeLocal": datetime.fromisoformat(d), "activityType": t,
+                          "distance_km": km, "avgPace_sec": pace, "duration_min": minutes,
+                          "avgHR": hr, "elevationGain": 10.0}
+                         for d, t, km, pace, minutes, hr in rows])
+
+
+def test_run_totals_sur_la_periode_seulement():
+    """
+    Revue : « Allure moyenne » et « FC moyenne » de la carte portaient sur tout
+    l'historique. Un coureur qui a progressé voyait une allure « du mois » plus
+    lente que toutes ses sorties du mois.
+    """
+    df = _runs(("2025-01-10 08:00", "running", 10.0, 420.0, 70.0, 160.0),
+               ("2026-08-31 23:59", "running", 10.0, 420.0, 70.0, 160.0),
+               ("2026-09-01 00:00", "running", 10.0, 300.0, 50.0, 150.0),
+               ("2026-09-20 08:00", "running", 5.0, 330.0, 27.5, 140.0),
+               ("2026-09-21 08:00", "cycling", 30.0, 0.0, 60.0, 120.0))
+    got = run_totals(df, date(2026, 9, 1))
+    assert got["runs"] == 2 and got["km"] == 15.0 and got["elevation"] == 20.0
+    # temps total ÷ distance : (3000 + 1650) / 15 = 310 s/km (pas la moyenne 315)
+    assert got["pace_sec"] == 310.0
+    # FC pondérée par la durée : (150×50 + 140×27,5) / 77,5
+    assert abs(got["hr"] - (150 * 50 + 140 * 27.5) / 77.5) < 1e-9
+
+
+def test_run_totals_sans_course_ni_donnee():
+    empty = {"km": 0.0, "runs": 0, "elevation": 0.0, "pace_sec": None, "hr": None}
+    assert run_totals(None, THU) == empty and run_totals(pd.DataFrame(), THU) == empty
+    df = _runs(("2026-09-24 08:00", "cycling", 30.0, 0.0, 60.0, 120.0))
+    assert run_totals(df, THU) == empty
+    df = _runs(("2026-09-24 08:00", "running", 0.0, 0.0, 0.0, float("nan")))
+    got = run_totals(df, THU)
+    assert got["runs"] == 1 and got["pace_sec"] is None and got["hr"] is None

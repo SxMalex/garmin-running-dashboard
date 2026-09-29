@@ -28,6 +28,7 @@ from __future__ import annotations
 import inspect
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,7 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 import insights  # noqa: E402
 import prompts  # noqa: E402
-from garmin_client import GarminClient  # noqa: E402
+from garmin_client import GarminClient, _purge_legacy_tokens  # noqa: E402
 
 DEFAULT_TOKENSTORE = "~/.garminconnect-mcp"  # ≠ dashboard hors Docker (~/.garminconnect)
 
@@ -94,6 +95,8 @@ def _get_client() -> Garmin:
         "`python test_connection.py` une fois pour créer le tokenstore."
     )
 
+    # Mise à jour depuis garth : anciens jetons (secret OAuth1 longue durée) inutiles.
+    _purge_legacy_tokens(tokenstore)
     try:
         client = Garmin()
         client.login(tokenstore)
@@ -115,14 +118,23 @@ def _get_client() -> Garmin:
 
 
 _gc: GarminClient | None = None
+_gc_built_at = 0.0
+GC_RECHECK_S = 60.0
 
 
 def _get_gc() -> GarminClient:
-    """GarminClient du dashboard (cache disque, streams, contrat DataFrame)."""
-    global _gc
-    if _gc is None:
+    """
+    GarminClient du dashboard (cache disque, streams, contrat DataFrame). Un id
+    d'athlète de repli (Garmin muet au démarrage) est retenté au plus une fois
+    par minute : sinon le MCP lisait l'objectif et le plan dans un autre dossier
+    jusqu'à son redémarrage.
+    """
+    global _gc, _gc_built_at
+    if _gc is None or (not _gc.athlete_id_reliable
+                       and time.monotonic() - _gc_built_at >= GC_RECHECK_S):
         _use_dashboard_data_dir()
         _gc = GarminClient(_get_client())
+        _gc_built_at = time.monotonic()
     return _gc
 
 

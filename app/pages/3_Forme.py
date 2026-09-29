@@ -10,7 +10,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from forme_logic import TSB_FATIGUE, TSB_FRESH, compute_forme_verdict, hrv_label, parse_recovery
+from forme_logic import compute_forme_verdict, hrv_label, parse_recovery, tsb_metric_delta
 from next_session_logic import compute_pmc_series, compute_tsb, load_risk, reference_threshold_sec
 from glossary import term
 from ui_mode import explain, help_text, is_pro
@@ -153,12 +153,7 @@ if verdict["reasons"]:
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 
 if tsb is not None and not df.empty:
-    if tsb > TSB_FRESH:
-        tsb_delta, tsb_dc = "Bien reposé", "normal"
-    elif tsb >= TSB_FATIGUE:
-        tsb_delta, tsb_dc = "Charge normale", "off"
-    else:
-        tsb_delta, tsb_dc = "Récupération nécessaire", "inverse"
+    tsb_delta, tsb_dc = tsb_metric_delta(tsb)
     c1.metric("⚡ TSB — Fraîcheur", f"{tsb:+.1f}", delta=tsb_delta, delta_color=tsb_dc,
               help=f"CTL (forme 42 j) : {ctl:.1f} · ATL (fatigue 7 j) : {atl:.1f}")
 else:

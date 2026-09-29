@@ -177,3 +177,11 @@ def test_planned_sessions_without_any_run_history_compare_to_each_other():
                for d, km in ((1, 5.0), (3, 10.0))]
     p = run_spike(df, planned, TODAY)["planned"]
     assert p["km"] == 10 and p["ref_km"] == 5 and p["ref_source"] == "planned" and p["level"] == "high"
+
+
+def test_planned_runs_during_a_run_coach_outage_announce_nothing():
+    """Intégration : COACH_UNKNOWN (dict vide, faux) retombait sur le plan Objectif."""
+    from coach_logic import COACH_UNKNOWN
+    from running_form_logic import planned_runs
+    goal = [{"date": "2026-09-27", "kind": "long", "distance_km": 30}]
+    assert planned_runs(COACH_UNKNOWN, goal, _hist([(3, 10.0)]), TODAY) == []

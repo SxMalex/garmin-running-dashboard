@@ -4,9 +4,9 @@ Lance le vrai dashboard Streamlit contre le faux compte Garmin des tests UI
 
 Usage : python tests_e2e/demo_server.py <port>
 
-Le correctif de `resume_session` doit précéder l'import de `ui_helpers`, qui
-en copie la référence : il est donc posé AVANT de démarrer Streamlit, dans ce
-même processus. `CACHE_DIR`, `DATA_DIR` et `GARMIN_TOKENSTORE` doivent pointer
+`garmin_client.resume_session` est remplacé AVANT de démarrer Streamlit, dans
+ce même processus : la session partagée (`shared_session`) le rappelle au premier
+besoin et adopte le faux compte. `CACHE_DIR`, `DATA_DIR` et `GARMIN_TOKENSTORE` doivent pointer
 vers des dossiers jetables (le conftest s'en charge) : ils sont lus à l'import
 de `garmin_client`.
 """

@@ -442,7 +442,7 @@ st.divider()
 # ---------------------------------------------------------------------------
 st.subheader(f"🎯 La sortie du {today.strftime('%d/%m')}, année par année")
 
-day_rows = day_comparison(runs, today_doy)
+day_rows = day_comparison(runs, today)
 _day_by_year = {int(r["year"]): r for _, r in day_rows.iterrows()}
 
 if not _day_by_year:

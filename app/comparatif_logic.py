@@ -7,17 +7,13 @@ Convention d'alignement : le jour de l'année est corrigé des années bissextil
 pour que le 1er mars vaille toujours 60, quelle que soit l'année comparée.
 """
 
-from datetime import date, timedelta
+from datetime import date
 
 import numpy as np
 import pandas as pd
 
 # Jour de l'année du 1er mars hors année bissextile — pivot de la correction.
 _MARCH_1_DOY = 60
-
-# Année de référence (non bissextile) pour retrouver le (mois, jour) réel
-# correspondant à un doy aligné — cf. `_doy_to_month_day`.
-_REF_NON_LEAP_YEAR = 2023
 
 # Mappings {colonne: clé JSON Garmin} des séries quotidiennes par plage.
 SLEEP_FIELDS = {
@@ -254,13 +250,7 @@ def _column(df: pd.DataFrame, name: str) -> pd.Series:
     return pd.Series(np.nan, index=df.index)
 
 
-def _doy_to_month_day(doy: int) -> tuple[int, int]:
-    """(mois, jour) réel correspondant à un doy aligné (échelle non bissextile)."""
-    d = date(_REF_NON_LEAP_YEAR, 1, 1) + timedelta(days=doy - 1)
-    return d.month, d.day
-
-
-def day_comparison(running_df: pd.DataFrame, doy: int) -> pd.DataFrame:
+def day_comparison(running_df: pd.DataFrame, day: date) -> pd.DataFrame:
     """
     Ce qui a été couru le même jour calendaire, année par année.
 
@@ -270,12 +260,12 @@ def day_comparison(running_df: pd.DataFrame, doy: int) -> pd.DataFrame:
     calories sommés, allure recalculée sur les totaux, FC et cadence moyennées au
     prorata de la durée, FC max prise au maximum.
 
-    Le filtre se fait sur le (mois, jour) RÉEL, pas sur le doy aligné : celui-ci
-    fait exprès retomber le 29 février sur la même valeur que le 28 (cf.
-    `aligned_doy`) pour superposer les courbes, mais ici on comparerait sinon le
-    28/02 d'une année non bissextile au 28 ET au 29/02 d'une année bissextile —
-    deux jours calendaires distincts. Le 29 février n'a d'équivalent que les
-    années bissextiles : il ne peut donc être agrégé avec aucun autre jour.
+    Le filtre se fait sur le (mois, jour) RÉEL de `day`, pas sur un doy aligné :
+    celui-ci fait exprès retomber le 29 février sur la même valeur que le 28
+    (cf. `aligned_doy`) pour superposer les courbes, si bien qu'aucun doy ne
+    désigne le 29 février — le 29/02/2028, on comparerait le 28. Le 29 février
+    ne trouve donc que les autres 29 février (années bissextiles), et le 28
+    n'agrège jamais le 29.
     """
     columns = [
         "year", "date", "start_time", "sorties", "km", "minutes", "pace_sec",
@@ -284,16 +274,16 @@ def day_comparison(running_df: pd.DataFrame, doy: int) -> pd.DataFrame:
     if running_df.empty or "startTimeLocal" not in running_df.columns:
         return pd.DataFrame(columns=columns)
 
-    month, day_num = _doy_to_month_day(doy)
-    day = running_df.copy()
-    day["startTimeLocal"] = pd.to_datetime(day["startTimeLocal"])
-    day = day[(day["startTimeLocal"].dt.month == month) & (day["startTimeLocal"].dt.day == day_num)]
-    if day.empty:
+    runs = running_df.copy()
+    runs["startTimeLocal"] = pd.to_datetime(runs["startTimeLocal"])
+    runs = runs[(runs["startTimeLocal"].dt.month == day.month)
+                & (runs["startTimeLocal"].dt.day == day.day)]
+    if runs.empty:
         return pd.DataFrame(columns=columns)
-    day["year"] = day["startTimeLocal"].dt.year.astype(int)
+    runs["year"] = runs["startTimeLocal"].dt.year.astype(int)
 
     rows = []
-    for year, grp in day.groupby("year"):
+    for year, grp in runs.groupby("year"):
         grp = grp.sort_values("startTimeLocal")
         km = float(pd.to_numeric(_column(grp, "distance_km"), errors="coerce").fillna(0).sum())
         minutes = float(pd.to_numeric(_column(grp, "duration_min"), errors="coerce").fillna(0).sum())

@@ -6,6 +6,7 @@ Run Coach, s'il est actif, reste la référence de la montre.
 """
 
 import os
+import time
 from datetime import date, timedelta
 
 import pandas as pd
@@ -30,6 +31,7 @@ from race_plan_logic import (
     predictions_by_km,
 )
 from ui_helpers import (
+    athlete_id_is_reliable,
     cache_nonce,
     cached_load_activities,
     get_athlete_id,
@@ -41,6 +43,7 @@ from ui_mode import decoupling_params, explain, lock_params
 from ui_theme import html_block, session_card
 from workout_export import (
     TAG_PREFIX,
+    UNVERIFIED_FINGERPRINT,
     coach_state,
     fingerprint,
     future_pushes,
@@ -48,6 +51,7 @@ from workout_export import (
     plan_id_of,
     push_gate,
     pushable_sessions,
+    reconciled_fingerprint,
     session_key,
     stale_pushes,
     workout_payload,
@@ -57,6 +61,16 @@ from workout_export import (
 st.set_page_config(page_title="Objectif — Running Dashboard", page_icon="🎯", layout="wide")
 require_login()
 _athlete_id = get_athlete_id()
+if not athlete_id_is_reliable():
+    # Garmin n'a pas donné le profileId : l'id de repli rangerait l'objectif, le
+    # plan validé et le journal des séances dans un autre dossier que celui relu
+    # ensuite (objectif « perdu », retrait du calendrier sans mémoire).
+    st.title("Objectif de course")
+    st.warning("Garmin n'a pas confirmé l'identifiant de ton compte (réponse lente ou refusée). "
+               "Ton objectif et ton plan ne sont ni lus ni modifiés tant que ce n'est pas fait, "
+               "pour ne pas les ranger au mauvais endroit : réessaie dans une minute.",
+               icon=":material/sync_problem:")
+    st.stop()
 TODAY = date.today()
 WRITE_ENABLED = os.getenv("GARMIN_WRITE_ENABLED", "").lower() in ("1", "true", "yes")
 
@@ -65,6 +79,10 @@ KIND_ICONS = {"easy": "🟦", "long": "🟩", "shakeout": "🟦", "strides": "�
               "interval": "🔺", "race_pace": "🎯", "race": "🏁", "strength": "🏋️"}
 # Couleur = identité de la phase, slots catégoriels dans l'ordre des phases.
 PHASE_COLORS = dict(zip(["MAINTENANCE", "BASE", "BUILD", "PEAK", "TAPER"], ct.CAT))
+# État Run Coach affiché sur la page validée : relu au plus une fois par minute
+# et par onglet (cocher une case ne coûte pas un appel Garmin) ; le clic sur
+# « Envoyer » le relit toujours.
+COACH_STATE_TTL_S = 60
 
 
 # ---------------------------------------------------------------------------
@@ -78,8 +96,8 @@ def load_predictions(athlete_id: int, nonce: int) -> dict:
 def current_coach_state(strict: bool = True) -> tuple[str, str | None]:
     """
     État du plan Garmin Run Coach, sans confondre « aucun » et « inconnu ».
-    `strict=True` (lecture fraîche) seulement avant d'écrire : la bannière
-    d'information se contente du cache, sinon chaque rerun appellerait Garmin.
+    `strict=True` = lecture fraîche (garde d'écriture, cf. `fresh_coach_state`) ;
+    la bannière d'information se contente du cache.
     """
     try:
         plans = get_garmin_client().get_training_plans(strict=strict)
@@ -88,6 +106,21 @@ def current_coach_state(strict: bool = True) -> tuple[str, str | None]:
     from coach_logic import active_plan
     plan = active_plan(plans)
     return coach_state(plans), (plan or {}).get("name")
+
+
+def fresh_coach_state() -> str:
+    """État Run Coach relu auprès de Garmin, mémorisé pour `displayed_coach_state`."""
+    state, _ = current_coach_state()
+    st.session_state["objectif_coach_state"] = (time.monotonic(), state)
+    return state
+
+
+def displayed_coach_state() -> str:
+    """État qui décide d'afficher le formulaire d'envoi : lecture fraîche de moins d'une minute."""
+    memo = st.session_state.get("objectif_coach_state")
+    if memo and time.monotonic() - memo[0] < COACH_STATE_TTL_S:
+        return memo[1]
+    return fresh_coach_state()
 
 
 def recent_long_run_drift(df: pd.DataFrame) -> float | None:
@@ -372,8 +405,7 @@ with e2:
     explain("taper")
 
 st.subheader("📲 Envoyer dans ton calendrier Garmin")
-state, _ = current_coach_state()   # lecture fraîche : on s'apprête à écrire
-allowed, reason = push_gate(WRITE_ENABLED, state)
+allowed, reason = push_gate(WRITE_ENABLED, displayed_coach_state())
 pushed = goal_store.load(_athlete_id).get("pushed") or {}
 stale = stale_pushes(pushed, plan_id, TODAY.isoformat(), sessions)
 todo = pushable_sessions(sessions, TODAY.isoformat(), pushed)
@@ -392,12 +424,13 @@ def remove_entries(entries: dict) -> None:
             ok = client.remove_workout(entry["workout_id"], entry.get("schedule_id"),
                                        required_tag=tag)
         except Exception as e:
-            flash("error", f"Erreur Garmin en retirant « {entry.get('name', key)} » : {e}. "
+            flash("error", f"Erreur Garmin en retirant « {md_escape(entry.get('name', key))} » : "
+                           f"{md_escape(e)}. "
                            f"{removed} séance(s) retirée(s) avant l'erreur.")
             return
         goal_store.forget_push(_athlete_id, key)
         if not ok:
-            flash("warning", f"« {entry.get('name', key)} » n'a pas été retirée : elle a été "
+            flash("warning", f"« {md_escape(entry.get('name', key))} » n'a pas été retirée : elle a été "
                              "renommée dans Garmin, ce n'est plus une séance du dashboard.")
             continue
         removed += 1
@@ -406,7 +439,8 @@ def remove_entries(entries: dict) -> None:
 
 if stale:
     st.warning(f"{len(stale)} séance(s) déjà envoyée(s) ne correspondent plus au plan affiché "
-               "(ancien plan, ou plan recalculé) : retire-les avant d'envoyer la nouvelle "
+               "(ancien plan, plan recalculé, ou séance retrouvée dans Garmin avec un autre "
+               "contenu) : retire-les avant d'envoyer la nouvelle "
                "version, sinon ta montre mélangerait les deux.")
     if WRITE_ENABLED and st.button("🧹 Retirer les séances de l'ancien plan"):
         remove_entries(stale)
@@ -422,8 +456,13 @@ else:
     confirm = st.checkbox(f"J'ajoute {len(chosen)} séance(s) à mon calendrier Garmin "
                           "(elles se synchroniseront sur la montre).", key="push_confirm")
     if st.button("📲 Envoyer", disabled=not (chosen and confirm), type="primary"):
+        # Garde relue au clic : l'état affiché peut dater d'une minute.
+        allowed, reason = push_gate(WRITE_ENABLED, fresh_coach_state())
+        if not allowed:
+            flash("warning", reason)
+            st.rerun()
         client = get_garmin_client()
-        sent = found = 0
+        sent = found = mismatched = duplicates = 0
         # Tout l'envoi sous verrou : deux onglets ne poussent pas la même semaine.
         with goal_store.locked(_athlete_id):
             current = goal_store.load(_athlete_id).get("pushed") or {}
@@ -432,9 +471,9 @@ else:
             try:
                 # Réconciliation : une séance déjà créée par ce plan (journal perdu,
                 # envoi interrompu) est rattachée au journal, pas recréée.
-                library = {w.get("workoutName"): w for w in client.list_workouts()}
+                library = client.list_workouts()
             except Exception as e:
-                flash("error", f"Erreur Garmin : impossible de lire tes séances ({e}). "
+                flash("error", f"Erreur Garmin : impossible de lire tes séances ({md_escape(e)}). "
                                "Rien n'a été envoyé.")
                 library = None
             for key in chosen if library is not None else []:
@@ -444,24 +483,51 @@ else:
                 payload = workout_payload(session, plan_id)
                 base = {"plan_id": plan_id, "date": session["date"], "kind": session["kind"],
                         "name": payload["workoutName"], "fingerprint": fingerprint(payload)}
-                existing = library.get(payload["workoutName"])
-                if existing:
-                    # Présente dans la bibliothèque ≠ planifiée : la création a pu
-                    # réussir sans réponse, et la planification jamais se faire.
+                # Par étiquette (plan + jour + créneau) et non par nom complet : un
+                # créneau passé de « Seuil » à « Lignes droites » change de nom,
+                # et la séance d'avant resterait à côté de la nouvelle.
+                tag = workout_tag(plan_id, session)
+                candidates = [w for w in library if tag in (w.get("workoutName") or "")]
+                if candidates:
                     try:
-                        sid = client.ensure_scheduled(int(existing["workoutId"]), session["date"])
+                        # Même étiquette ≠ même contenu : la séance a pu être créée
+                        # par une version du plan recalculée depuis (même créneau,
+                        # autres allures), ou copiée dans Garmin Connect (« Copie
+                        # de … »). On retient celle dont le contenu est vérifié ;
+                        # à défaut la première, non vérifiée : elle n'est pas
+                        # planifiée et son empreinte la fait signaler à retirer.
+                        existing, fp = candidates[0], None
+                        for cand in candidates:
+                            cand_fp = reconciled_fingerprint(
+                                payload, client.get_workout(int(cand["workoutId"])))
+                            if fp is None or cand_fp != UNVERIFIED_FINGERPRINT:
+                                existing, fp = cand, cand_fp
+                            if cand_fp != UNVERIFIED_FINGERPRINT:
+                                break
+                        duplicates += len(candidates) - 1
+                        wid = int(existing["workoutId"])
+                        # Présente dans la bibliothèque ≠ planifiée : la création a pu
+                        # réussir sans réponse, et la planification jamais se faire.
+                        sid = (client.find_schedule(wid, session["date"])
+                               if fp == UNVERIFIED_FINGERPRINT
+                               else client.ensure_scheduled(wid, session["date"]))
                     except Exception as e:
-                        flash("error", f"Erreur Garmin en planifiant « {labels[key]} » : {e}.")
+                        flash("error", f"Erreur Garmin en rattachant « {labels[key]} », déjà "
+                                       f"présente dans Garmin : {md_escape(e)}.")
                         break
                     goal_store.record_push(_athlete_id, key, {
-                        **base, "workout_id": existing.get("workoutId"),
+                        # Nom réel dans Garmin (autre titre si le créneau a changé de séance)
+                        **base, "name": existing.get("workoutName"), "fingerprint": fp, "workout_id": wid,
                         "schedule_id": sid, "reconciled": True})
-                    found += 1
+                    if fp == UNVERIFIED_FINGERPRINT:
+                        mismatched += 1
+                    else:
+                        found += 1
                     continue
                 try:
                     ids = client.push_workout(payload, session["date"])
                 except Exception as e:
-                    flash("error", f"Erreur Garmin à « {labels[key]} » : {e}. {sent} séance(s) "
+                    flash("error", f"Erreur Garmin à « {labels[key]} » : {md_escape(e)}. {sent} séance(s) "
                                    "envoyée(s) avant l'erreur, elles sont conservées.")
                     break
                 # Journal écrit AVANT tout appel st.* : un rerun (double clic)
@@ -470,8 +536,17 @@ else:
                 sent += 1
         if sent:
             flash("success", f"{sent} séance(s) envoyée(s) dans ton calendrier Garmin.")
+        if duplicates:
+            flash("warning", f"{duplicates} séance(s) du dashboard en double dans Garmin (copiée(s) "
+                             "dans Garmin Connect) : « Rechercher les séances du dashboard » plus bas "
+                             "permet de retirer les copies.")
         if found:
             flash("info", f"{found} séance(s) déjà présente(s) dans Garmin, rattachée(s) au plan.")
+        if mismatched:
+            flash("warning", f"{mismatched} séance(s) du dashboard déjà présente(s) dans Garmin "
+                             "sur ces créneaux ne correspondent pas au plan affiché (plan recalculé "
+                             "depuis, ou séance modifiée dans Garmin) : le dashboard ne les a pas "
+                             "planifiées. Retire-les (bouton ci-dessous) puis renvoie-les.")
         st.session_state.pop("push_confirm", None)
         st.rerun()
 
@@ -492,7 +567,7 @@ if WRITE_ENABLED and st.button("🔎 Rechercher les séances du dashboard dans G
                                                        "date": iso}
         st.session_state["objectif_orphans"] = orphans
     except Exception as e:
-        st.error(f"Erreur Garmin : impossible de lire tes séances ({e}).")
+        st.error(f"Erreur Garmin : impossible de lire tes séances ({md_escape(e)}).")
 orphans = st.session_state.get("objectif_orphans") or {}
 if orphans:
     st.warning(f"{len(orphans)} séance(s) du dashboard à venir dans Garmin, hors journal : "
@@ -508,7 +583,7 @@ upcoming = future_pushes(pushed, TODAY.isoformat())
 if pushed:
     with st.expander(f"🗓️ {len(upcoming)} séance(s) à venir envoyée(s) par le dashboard"):
         for key, entry in sorted(upcoming.items()):
-            st.markdown(f"- {entry.get('date', key)} — {entry.get('name', key)}")
+            st.markdown(f"- {entry.get('date', key)} — {md_escape(entry.get('name', key))}")
         include_past = st.checkbox("Inclure les séances passées (historique du calendrier)",
                                    key="remove_include_past")
         target = pushed if include_past else upcoming

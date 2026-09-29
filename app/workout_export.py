@@ -67,6 +67,71 @@ def fingerprint(payload: dict) -> str:
     return hashlib.md5(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:10]
 
 
+# Empreinte journalisée quand le contenu d'une séance retrouvée dans Garmin
+# n'a pas pu être confirmé identique au plan : jamais égale à `fingerprint()`
+# (hexadécimal), elle rend l'entrée périmée pour `stale_pushes`.
+UNVERIFIED_FINGERPRINT = "unverified"
+
+
+CONTENT_TOLERANCE = 1e-3   # m/s ou s : Garmin relit en float32 ; 1 s/km vaut ~1e-2 m/s
+
+
+def _number(value):
+    return None if value is None else float(value)
+
+
+def _same(a, b) -> bool:
+    """Égalité de contenu, nombres à `CONTENT_TOLERANCE` près (un arrondi fixe basculait
+    d'un côté ou de l'autre selon que Garmin relit la valeur en float32)."""
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+    if isinstance(a, float) and isinstance(b, float):
+        return abs(a - b) <= CONTENT_TOLERANCE
+    return a == b
+
+
+def _step_content(steps: list) -> list:
+    return [(
+        s.get("type"),
+        (s.get("stepType") or {}).get("stepTypeKey"),
+        (s.get("endCondition") or {}).get("conditionTypeKey"),
+        _number(s.get("endConditionValue")),
+        (s.get("targetType") or {}).get("workoutTargetTypeKey"),
+        _number(s.get("targetValueOne")),
+        _number(s.get("targetValueTwo")),
+        _number(s.get("numberOfIterations")),
+        (s.get("description") or "").strip(),
+        _step_content(s.get("workoutSteps") or []),
+    ) for s in sorted(steps or [], key=lambda s: s.get("stepOrder") or 0)]
+
+
+def workout_content(workout: dict) -> list:
+    """
+    Ce que la montre affiche et exécute (nom, sport, étapes, durées, cibles),
+    sans ce que Garmin ajoute à la lecture (ids, propriétaire, dates) : compare
+    la séance relue (`get_workout_by_id`) au payload qu'on enverrait aujourd'hui.
+    """
+    workout = workout or {}
+    return [workout.get("workoutName"), (workout.get("sportType") or {}).get("sportTypeKey"),
+            [_step_content(seg.get("workoutSteps"))
+             for seg in sorted(workout.get("workoutSegments") or [],
+                               key=lambda seg: seg.get("segmentOrder") or 0)]]
+
+
+def reconciled_fingerprint(payload: dict, remote: dict) -> str:
+    """
+    Empreinte à journaliser pour une séance retrouvée par son étiquette
+    (journal perdu, réponse d'envoi perdue) : celle du payload seulement si la
+    séance relue a le même contenu. Sinon — plan recalculé depuis (même nom,
+    autres allures ; ou autre séance sur le même créneau) ou séance modifiée
+    dans Garmin — `UNVERIFIED_FINGERPRINT`, qui
+    la fait signaler comme à retirer au lieu de passer pour à jour.
+    """
+    if _same(workout_content(remote), workout_content(payload)):
+        return fingerprint(payload)
+    return UNVERIFIED_FINGERPRINT
+
+
 def workout_name(plan_id: str, session: dict) -> str:
     tag = workout_tag(plan_id, session)
     title = session.get("title", "Séance")
@@ -224,7 +289,8 @@ def stale_pushes(pushed: dict, plan_id: str, today_iso: str,
     """
     Séances à venir déjà envoyées qui ne correspondent plus au plan affiché :
     autre plan (objectif ou préférences changés), créneau disparu, ou contenu
-    différent (empreinte) après « Recalculer ». Elles doivent être retirées
+    différent (empreinte) après « Recalculer », ou jamais confirmé
+    (`UNVERIFIED_FINGERPRINT`, séance rattachée par son nom). Elles doivent être retirées
     avant tout nouvel envoi, sinon la montre mélange deux versions du plan.
     """
     current = {}

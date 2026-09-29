@@ -33,7 +33,7 @@ def render(running_filtered: pd.DataFrame) -> None:
         name="Allure",
         marker=dict(
             color=pace_data["distance_km"],
-            colorscale=[[0.0, ct.ZONE_RAMP[0]], [0.5, ct.ZONE_RAMP[2]], [1.0, "#104281"]],
+            colorscale=[[0.0, ct.ZONE_RAMP[0]], [0.5, ct.ZONE_RAMP[2]], [1.0, ct.SEQ_COLORSCALE[-1][1]]],
             size=8,
             colorbar=dict(title="Distance (km)", tickfont=dict()),
             showscale=True,
@@ -100,7 +100,7 @@ def render(running_filtered: pd.DataFrame) -> None:
         y=pace_by_dist["pace_min"],
         text=pace_by_dist["allure"],
         textposition="outside",
-        marker_color="rgba(57,135,229,0.85)",
+        marker_color=ct.rgba(ct.PACE, 0.85),
     ))
     fig_pace_dist.update_layout(
         height=300,
@@ -179,7 +179,7 @@ def render(running_filtered: pd.DataFrame) -> None:
                         x=act_s["split"],
                         y=act_s["pace_min"],
                         mode="lines",
-                        line=dict(color="rgba(57,135,229,0.15)", width=1),
+                        line=dict(color=ct.rgba(ct.PACE, 0.15), width=1),
                         showlegend=False,
                         hoverinfo="skip",
                     ))
@@ -188,7 +188,7 @@ def render(running_filtered: pd.DataFrame) -> None:
                     y=avg_splits["pace_min"],
                     mode="lines+markers",
                     name="Allure moyenne",
-                    line=dict(color="rgba(201,133,0,0.95)", width=2.5),
+                    line=dict(color=ct.rgba(ct.YELLOW, 0.95), width=2.5),
                     marker=dict(size=6),
                     customdata=avg_splits["pace_str"],
                     hovertemplate="<b>Km %{x}</b><br>%{customdata}<extra></extra>",

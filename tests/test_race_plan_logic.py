@@ -460,3 +460,82 @@ def test_zones_follow_realistic_target_but_not_slower_or_ambitious_ones():
     assert slower == ref                             # objectif plus lent : forme actuelle
     assert ambitious["summary"]["paces"] == ref      # ambitieux : forme actuelle…
     assert any("restent calées" in w for w in ambitious["warnings"])   # …et c'est dit
+
+
+# ---------------------------------------------------------------------------
+# Revue PR 1 (lot L) : semaine 1 entamée — ne compter que ce qui est prescrit.
+# ---------------------------------------------------------------------------
+
+SATURDAY, SUNDAY, MONDAY = date(2026, 9, 26), date(2026, 9, 27), date(2026, 9, 21)
+
+
+def _plan_from(created: date, distance="10 km", weeks_out=10, runs=3, long_day=6):
+    """Plan créé le jour `created` (~30 km/semaine d'historique)."""
+    base = dict(athlete_baseline(history(km=6.5, runs_per_week=4), TODAY), weekly_km=30.0)
+    return build_race_plan(_monday_of(created) + timedelta(weeks=weeks_out, days=6), distance,
+                           base, created, runs_per_week=runs, long_run_weekday=long_day)
+
+
+def _monday_of(d: date) -> date:
+    return d - timedelta(days=d.weekday())
+
+
+def _visible_km(week):
+    return round(sum(s["distance_km"] for s in week["sessions"]
+                     if s["kind"] not in ("strength", "race")), 1)
+
+
+def test_semaine_1_creee_un_samedi_n_annonce_que_le_prescrit():
+    """
+    Repro revue : plan créé un samedi (30 km/sem.) → S1 affichait 30 km pour
+    une seule sortie visible de 12 km.
+    """
+    plan = _plan_from(SATURDAY)
+    w1 = plan["weeks"][0]
+    assert all(date.fromisoformat(s["date"]) >= SATURDAY for s in w1["sessions"])
+    assert w1["prescribed_km"] == _visible_km(w1) == 12.0
+    assert w1["volume_km"] == w1["prescribed_km"]
+
+
+def test_semaine_2_ne_progresse_pas_sur_un_volume_jamais_prescrit():
+    plan = _plan_from(SATURDAY)
+    start = plan["summary"]["start_km"]
+    assert plan["weeks"][1]["volume_km"] == start                       # 1re semaine complète
+    assert plan["weeks"][2]["volume_km"] == round(start * (1 + MAX_WEEKLY_GROWTH), 1)
+
+
+def test_plan_cree_un_lundi_inchange():
+    """Semaine complète : S1 au volume de départ, +10 % en S2 (comportement d'avant)."""
+    plan = _plan_from(MONDAY)
+    start = plan["summary"]["start_km"]
+    assert plan["weeks"][0]["volume_km"] == start
+    assert plan["weeks"][1]["volume_km"] == round(start * (1 + MAX_WEEKLY_GROWTH), 1)
+    assert plan["weeks"][0]["prescribed_km"] == _visible_km(plan["weeks"][0])
+
+
+def test_plan_cree_un_dimanche_sans_seance_visible_le_jour_meme():
+    plan = _plan_from(SUNDAY, long_day=5)                               # sortie longue le samedi
+    w1 = plan["weeks"][0]
+    assert all(s["date"] == SUNDAY.isoformat() for s in w1["sessions"])
+    assert w1["volume_km"] == w1["prescribed_km"] == _visible_km(w1)
+
+
+def test_plan_cree_la_semaine_de_la_course():
+    """Samedi, course le dimanche : seule la sortie de déblocage est prescrite."""
+    base = dict(athlete_baseline(history(), TODAY), weekly_km=30.0)
+    plan = build_race_plan(SUNDAY, "10 km", base, SATURDAY)
+    (w1,) = plan["weeks"]
+    assert [s["kind"] for s in w1["sessions"]] == ["shakeout", "race"]
+    assert w1["volume_km"] == w1["prescribed_km"] == 3.0
+
+
+@pytest.mark.parametrize("weekday", range(7))
+@pytest.mark.parametrize("distance", list(DISTANCE_PROFILE))
+def test_volume_annonce_egal_prescrit_quel_que_soit_le_jour_de_creation(weekday, distance):
+    """Toutes les semaines, S1 comprise : annoncé = prescrit affiché (±10 %)."""
+    plan = _plan_from(MONDAY + timedelta(days=weekday), distance=distance, weeks_out=12)
+    for w in plan["weeks"]:
+        assert w["prescribed_km"] == _visible_km(w)
+        if not any(s["kind"] == "race" for s in w["sessions"]):
+            assert w["prescribed_km"] <= w["volume_km"] * 1.10 + 0.2, (weekday, w["week"])
+    assert plan["weeks"][0]["volume_km"] <= plan["summary"]["start_km"] + 0.05

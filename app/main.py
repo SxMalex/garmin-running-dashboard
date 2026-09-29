@@ -12,7 +12,7 @@ import os
 import streamlit as st
 
 from garmin_client import (
-    clear_tokens,
+    end_session,
     complete_mfa,
     login_with_credentials,
 )
@@ -111,7 +111,9 @@ def login_page() -> None:
 
 
 def _logout() -> None:
-    clear_tokens()
+    # Pour tous les onglets : la session partagée est neutralisée (plus de
+    # réécriture du tokenstore au prochain rafraîchissement) puis effacée.
+    end_session()
     drop_session()
     st.rerun()
 

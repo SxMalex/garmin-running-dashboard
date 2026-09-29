@@ -35,6 +35,11 @@ from next_session_logic import (
 # _parse_ors_route
 # ===========================================================================
 
+
+def _displayed_tsb(row) -> float:
+    """TSB = différence des CTL/ATL arrondis au dixième (la seule définition)."""
+    return round(round(float(row["ctl"]), 1) - round(float(row["atl"]), 1), 1)
+
 class TestParseOrsRoute:
     def test_valid_response(self, sample_ors_geojson):
         result = _parse_ors_route(sample_ors_geojson)
@@ -566,9 +571,7 @@ class TestComputePmcSeries:
         # IF=1, duration_h=1 → tss=100
         assert result.iloc[0]["tss"] == pytest.approx(100.0)
         # TSB = CTL - ATL sur la même ligne : négatif le jour d'une séance
-        assert result.iloc[0]["tsb"] == pytest.approx(
-            result.iloc[0]["ctl"] - result.iloc[0]["atl"]
-        )
+        assert result.iloc[0]["tsb"] == _displayed_tsb(result.iloc[0])
         assert result.iloc[0]["tsb"] < 0
         # Après la TSS, ATL et CTL sont strictement positifs
         assert result.iloc[0]["ctl"] > 0
@@ -601,22 +604,40 @@ class TestComputePmcSeries:
         assert not result.empty
         assert result.iloc[-1]["date"] == pd.Timestamp(tomorrow).normalize()
         assert result.iloc[-1]["tss"] > 0
-        assert result.iloc[-1]["tsb"] == pytest.approx(
-            result.iloc[-1]["ctl"] - result.iloc[-1]["atl"]
-        )
+        assert result.iloc[-1]["tsb"] == _displayed_tsb(result.iloc[-1])
 
     def test_tsb_est_toujours_ctl_moins_atl(self, make_running_df):
         """
         Invariant de la seule définition du TSB dans l'app : sur CHAQUE jour de
-        la série, tsb == ctl - atl. C'est ce qui garantit un chiffre unique
-        entre la métrique du haut de la page Forme, celle de tab_charge, la
-        courbe PMC et la page Comparatif — et que le TSB tracé soit bien
-        l'écart vertical entre les courbes CTL et ATL.
+        la série, tsb == round(ctl, 1) - round(atl, 1) — la soustraction des
+        deux chiffres affichés. C'est ce qui garantit un chiffre unique entre la
+        métrique du haut de la page Forme, celle de tab_charge, la courbe PMC et
+        la page Comparatif ; l'écart à ctl - atl brut reste sous 0,1.
         """
         df = make_running_df(n=25, days_apart=2, with_location=False)
         result = _compute_pmc_series(df, threshold_sec=330.0)
         assert not result.empty
-        assert ((result["tsb"] - (result["ctl"] - result["atl"])).abs() < 1e-9).all()
+        assert all(r["tsb"] == _displayed_tsb(r) for _, r in result.iterrows())
+        assert ((result["tsb"] - (result["ctl"] - result["atl"])).abs() <= 0.1 + 1e-9).all()
+
+    def test_tsb_du_haut_de_page_egale_celui_de_l_onglet_charge(self, monkeypatch):
+        """
+        Revue #1 : sur une limite d'arrondi, compute_tsb (soustraction des arrondis)
+        et tab_charge (last["tsb"] brut) donnaient deux chiffres. La série est
+        construite pour tomber sur cette limite : le test échoue si l'une des deux
+        définitions revient.
+        """
+        import next_session_logic
+        from pmc_edge import rounding_edge_daily
+        daily, c, a = rounding_edge_daily(pd.Timestamp.now())
+        monkeypatch.setattr(next_session_logic, "daily_tss", lambda df, thr: daily.copy())
+        df = pd.DataFrame([{"startTimeLocal": pd.Timestamp.now(), "activityType": "running",
+                            "distance_km": 10.0, "duration_min": 55.0, "avgPace_sec": 330.0}])
+        last = _compute_pmc_series(df, 330).iloc[-1]
+        ctl, atl, tsb = _compute_tsb(df)
+        assert (ctl, atl) == (round(c, 1), round(a, 1))
+        assert tsb == last["tsb"] == round(round(c, 1) - round(a, 1), 1)
+        assert tsb != round(c - a, 1)                    # la série est bien sur la limite
 
     def test_compute_tsb_reprend_le_tsb_de_la_serie(self, make_running_df):
         """compute_tsb ne doit pas recalculer sa propre fraîcheur."""
@@ -869,7 +890,7 @@ class TestPmcAvecSportCroise:
         assert (pmc["tss"] == pmc["tss_run"] + pmc["tss_cross"]).all()
         assert pmc["tss_cross"].sum() > 0
         # Le TSB reste l'écart vertical exact entre CTL et ATL
-        assert (pmc["tsb"] - (pmc["ctl"] - pmc["atl"])).abs().max() < 1e-9
+        assert all(r["tsb"] == _displayed_tsb(r) for _, r in pmc.iterrows())
 
     def test_seuil_de_reference_ignore_les_autres_sports(self, make_running_df):
         """Une sortie vélo de 8 km ne doit pas déplacer l'allure seuil."""
@@ -1026,3 +1047,73 @@ def test_validated_sessions_only_when_current(tmp_path, monkeypatch):
     assert goal_store.validated_sessions(1) is None                    # préférences changées
     goal_store.save_goal(1, dict(goal, race_date="2020-01-01"), prefs)
     assert goal_store.validated_sessions(1) is None                    # course passée
+
+
+# ---------------------------------------------------------------------------
+# Revue PR 1 (lot L) : todays_session sans course, Run Coach inconnu, contrat
+# de la reco fusionnée (allure affichée et fiche de séance).
+# ---------------------------------------------------------------------------
+
+def _cross(n=5):
+    now = pd.Timestamp.now().normalize()
+    return pd.DataFrame([{"startTimeLocal": now - pd.Timedelta(days=2 * i), "activityType": "cycling",
+                          "distance_km": 30.0, "duration_min": 60.0, "avgPace_sec": 0.0,
+                          "avgHR": 130.0, "elevationGain": 100.0, "trainingLoad": 80.0}
+                         for i in range(n)])
+
+
+@pytest.mark.parametrize("df", [None, pd.DataFrame()], ids=["none", "vide"])
+def test_todays_session_sans_historique_ne_plante_pas(df):
+    from next_session_logic import todays_session
+    out = todays_session(df, "LOW", 50, None, _goal_sessions())
+    assert out["rec"] is None and out["alert"] is None and out["downgrade"] > 0
+    assert out["coach_unknown"] is False
+
+
+def test_todays_session_sport_croise_seul_ne_plante_pas():
+    """Repro revue : vélo seul → TypeError sur une date NaT."""
+    from next_session_logic import todays_session
+    assert todays_session(_cross(), "BALANCED", 80, None, _goal_sessions())["rec"] is None
+
+
+def test_todays_session_sous_le_minimum_de_courses(make_running_df):
+    from next_session_logic import MIN_RUNS_FOR_SESSION, todays_session
+    runs = make_running_df(n=MIN_RUNS_FOR_SESSION)
+    assert todays_session(pd.concat([runs.iloc[:-1], _cross()]), None, None, None)["rec"] is None
+    assert todays_session(pd.concat([runs, _cross()]), None, None, None)["rec"] is not None
+
+
+def test_todays_session_courses_sans_date_ignorees(make_running_df):
+    """3 courses dont une sans date : 2 courses datées → pas de séance (et pas d'erreur)."""
+    from next_session_logic import todays_session
+    df = make_running_df(n=3)
+    df.loc[df.index[0], "startTimeLocal"] = pd.NaT
+    assert todays_session(df, None, None, None)["rec"] is None
+    df = pd.concat([make_running_df(n=3), df.iloc[[0]]], ignore_index=True)
+    assert todays_session(df, None, None, None)["rec"]["days_since"] == 0
+
+
+def test_todays_session_coach_inconnu_n_annonce_pas_le_plan_objectif(sample_running_df):
+    """
+    Revue : un échec passager de get_training_plans (contexte None, mis en cache
+    1 h) faisait annoncer le plan Objectif à la place de Run Coach.
+    """
+    from coach_logic import COACH_UNKNOWN
+    from next_session_logic import recommend_session, todays_session
+    out = todays_session(sample_running_df, "BALANCED", 80, COACH_UNKNOWN, _goal_sessions())
+    assert out["coach_unknown"] is True
+    assert out["rec"].get("goal_session") is None and out["rec"]["coach"] is None
+    assert out["rec"]["session_key"] == recommend_session(
+        sample_running_df, load_df=sample_running_df)["session_key"]
+    # « aucun plan » (None) : le plan Objectif reprend la main, comme avant.
+    known = todays_session(sample_running_df, "BALANCED", 80, None, _goal_sessions())
+    assert known["coach_unknown"] is False and known["rec"]["goal_session"]["title"] == "Seuil"
+
+
+def test_todays_session_goal_plan_met_a_jour_la_fiche_de_seance(sample_running_df):
+    """Revue : rec["session"] restait celle de la logique interne (seule la page la recalculait)."""
+    from next_session_logic import SESSION_TYPES, todays_session
+    rec = todays_session(sample_running_df, "BALANCED", 80, None,
+                         _goal_sessions(first_kind="long"))["rec"]
+    assert rec["session_key"] == "sortie_longue"
+    assert rec["session"] is SESSION_TYPES["sortie_longue"]

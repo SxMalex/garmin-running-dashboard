@@ -106,3 +106,49 @@ def test_integer_vo2max_gets_a_real_uncertainty_band():
                        "vo2max": [47.0] * 60})
     p = vo2max_projection(df)["projections"][2]
     assert p.value == 47 and p.high - p.low >= 2
+
+
+# ---------------------------------------------------------------------------
+# Revue PR 1 (lot L) : une valeur par JOUR, pas par horodatage.
+# ---------------------------------------------------------------------------
+
+def _vo2_runs(days, per_day, tz=None):
+    """`per_day` courses (matin/soir) sur chacun des `days` jours de mesure, espacés de 10 j."""
+    rows = []
+    for i, day in enumerate(pd.date_range("2026-05-01", periods=days, freq="10D", tz=tz)):
+        for h in (7, 19)[:per_day]:
+            rows.append({"startTimeLocal": day + pd.Timedelta(hours=h), "activityType": "running",
+                         "vo2max": 48.0 + 0.1 * i})
+    return pd.DataFrame(rows)
+
+
+def test_deux_courses_le_meme_jour_ne_comptent_qu_un_point():
+    """Repro revue : 4 jours × 2 courses = 8 points → projection affichée ; 4 × 1 → None."""
+    assert vo2max_projection(_vo2_runs(4, 1)) is None
+    assert vo2max_projection(_vo2_runs(4, 2)) is None
+
+
+def test_un_point_par_jour_au_minimum_de_points():
+    res = vo2max_projection(_vo2_runs(8, 2))
+    assert res is not None and res["n"] == 8
+
+
+def test_minuit_separe_deux_jours():
+    """23:59 et 00:00 le lendemain : deux jours, deux points."""
+    dates = [pd.Timestamp("2026-05-01 23:59"), pd.Timestamp("2026-05-02 00:00")]
+    dates += [pd.Timestamp("2026-05-01") + pd.Timedelta(days=5 * k) for k in range(2, 8)]
+    res = project(dates, [50.0 + 0.01 * k for k in range(8)], [30], max_monthly_change=1,
+                  relative=False)
+    assert res is not None and res["n"] == 8
+
+
+def test_jour_en_heure_locale_avec_fuseau():
+    """Horodatages avec fuseau : le jour est celui de l'heure locale (Paris), pas d'UTC."""
+    res = vo2max_projection(_vo2_runs(8, 2, tz="Europe/Paris"))
+    assert res is not None and res["n"] == 8
+    dates = [pd.Timestamp("2026-05-01 00:30", tz="Europe/Paris"),     # 30/04 22:30 UTC
+             pd.Timestamp("2026-05-01 23:30", tz="Europe/Paris")]
+    dates += [pd.Timestamp("2026-05-01", tz="Europe/Paris") + pd.Timedelta(days=5 * k)
+              for k in range(2, 9)]
+    res = project(dates, [50.0] * len(dates), [30], max_monthly_change=1, relative=False)
+    assert res["n"] == 8          # les deux mesures du 01/05 (heure locale) fusionnées

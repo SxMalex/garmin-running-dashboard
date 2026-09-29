@@ -1,5 +1,7 @@
 """Tests de la logique pure du comparatif annuel."""
 
+from datetime import date
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -298,7 +300,7 @@ def test_day_comparison_une_sortie_par_annee():
          "avgHR": 140.0, "maxHR": 155.0, "elevationGain": 12.0, "avgCadence": 153.0,
          "trainingLoad": 26.0, "calories": 216, "activityName": "Sortie B"},
     ])
-    out = day_comparison(df, doy=225)
+    out = day_comparison(df, date(2026, 8, 13))
     assert out["year"].tolist() == [2026, 2025]
     assert out.loc[0, "km"] == 6.0
     assert out.loc[0, "start_time"] == "07:00"
@@ -315,7 +317,7 @@ def test_day_comparison_agrege_plusieurs_sorties_du_meme_jour():
          "avgHR": 130.0, "maxHR": 145.0, "elevationGain": 10.0, "avgCadence": 160.0,
          "trainingLoad": 30.0, "calories": 300, "activityName": "Soir"},
     ])
-    out = day_comparison(df, doy=121)
+    out = day_comparison(df, date(2026, 5, 1))
     assert len(out) == 1
     assert out.loc[0, "sorties"] == 2
     assert out.loc[0, "km"] == 15.0
@@ -337,7 +339,7 @@ def test_day_comparison_prend_le_depart_de_la_premiere_sortie():
         {"startTimeLocal": "2026-05-01 06:30", "distance_km": 8.0, "duration_min": 48.0,
          "activityName": "Matin"},
     ])
-    out = day_comparison(df, doy=121)
+    out = day_comparison(df, date(2026, 5, 1))
     assert out.loc[0, "start_time"] == "06:30"
     assert out.loc[0, "names"] == ["Matin", "Soir"]
 
@@ -347,7 +349,7 @@ def test_day_comparison_annee_sans_sortie_absente():
         {"startTimeLocal": "2026-08-13 07:00", "distance_km": 6.0, "duration_min": 40.0},
         {"startTimeLocal": "2025-08-20 07:00", "distance_km": 6.0, "duration_min": 40.0},
     ])
-    out = day_comparison(df, doy=225)
+    out = day_comparison(df, date(2026, 8, 13))
     assert out["year"].tolist() == [2026]
 
 
@@ -358,7 +360,7 @@ def test_day_comparison_aligne_les_annees_bissextiles():
         {"startTimeLocal": "2024-03-15 09:00", "distance_km": 5.0, "duration_min": 30.0},
         {"startTimeLocal": "2025-03-15 09:00", "distance_km": 7.0, "duration_min": 42.0},
     ])
-    out = day_comparison(df, doy=74)
+    out = day_comparison(df, date(2025, 3, 15))
     assert sorted(out["year"].tolist()) == [2024, 2025]
 
 
@@ -378,8 +380,7 @@ def test_day_comparison_28_fevrier_n_agrege_pas_le_29():
         {"startTimeLocal": "2025-02-28 08:00", "distance_km": 8.0, "duration_min": 45.0,
          "activityName": "28 fev non bissextile"},
     ])
-    doy = int(aligned_doy(pd.Series([pd.Timestamp("2025-02-28")])).iloc[0])
-    out = day_comparison(df, doy)
+    out = day_comparison(df, date(2025, 2, 28))
     assert sorted(out["year"].tolist()) == [2024, 2025]
     row_2024 = out[out["year"] == 2024].iloc[0]
     assert row_2024["sorties"] == 1
@@ -387,11 +388,68 @@ def test_day_comparison_28_fevrier_n_agrege_pas_le_29():
     assert row_2024["names"] == ["28 fev bissextile"]
 
 
+def _leap_runs() -> pd.DataFrame:
+    """Sorties autour de la fin février, années bissextiles (2024, 2028) et non (2025)."""
+    return _day_runs([
+        {"startTimeLocal": "2024-02-28 23:59", "distance_km": 10.0, "duration_min": 55.0,
+         "activityName": "28/02/2024"},
+        {"startTimeLocal": "2024-02-29 00:00", "distance_km": 21.1, "duration_min": 110.0,
+         "activityName": "29/02/2024"},
+        {"startTimeLocal": "2024-03-01 07:00", "distance_km": 6.0, "duration_min": 33.0,
+         "activityName": "01/03/2024"},
+        {"startTimeLocal": "2025-02-28 08:00", "distance_km": 8.0, "duration_min": 45.0,
+         "activityName": "28/02/2025"},
+        {"startTimeLocal": "2025-03-01 08:00", "distance_km": 7.0, "duration_min": 40.0,
+         "activityName": "01/03/2025"},
+        {"startTimeLocal": "2028-02-28 18:00", "distance_km": 5.0, "duration_min": 28.0,
+         "activityName": "28/02/2028"},
+        {"startTimeLocal": "2028-02-29 07:30", "distance_km": 12.0, "duration_min": 66.0,
+         "activityName": "29/02/2028"},
+    ])
+
+
+def test_day_comparison_29_fevrier_trouve_les_29_fevrier():
+    """
+    Revue PR 1 : le 29/02/2028, la page comparait le 28 février (le doy aligné
+    du 29 vaut celui du 28) et excluait la sortie du jour. Le 29 ne trouve que
+    les 29 — y compris la sortie de minuit pile — et jamais le 28 ni le 1er mars.
+    """
+    out = day_comparison(_leap_runs(), date(2028, 2, 29))
+    assert out["year"].tolist() == [2028, 2024]
+    assert [n for names in out["names"] for n in names] == ["29/02/2028", "29/02/2024"]
+    assert out["km"].tolist() == [12.0, 21.1]
+
+
+def test_day_comparison_1er_mars_ne_prend_pas_le_29_fevrier():
+    out = day_comparison(_leap_runs(), date(2028, 3, 1))
+    assert sorted(out["year"].tolist()) == [2024, 2025]
+    assert sorted(n for names in out["names"] for n in names) == ["01/03/2024", "01/03/2025"]
+
+
+def test_day_comparison_28_fevrier_bissextile_et_minuit():
+    """Le 28 (année bissextile consultée) : la sortie de 23:59 compte, celle de 00:00 le 29 non."""
+    out = day_comparison(_leap_runs(), date(2028, 2, 28))
+    assert out["year"].tolist() == [2028, 2025, 2024]
+    assert out[out["year"] == 2024].iloc[0]["names"] == ["28/02/2024"]
+
+
+def test_day_comparison_31_decembre_bissextile():
+    """Le 31/12 d'une année bissextile (jour 366) retrouve le 31/12 des autres années."""
+    df = _day_runs([
+        {"startTimeLocal": "2024-12-31 10:00", "distance_km": 10.0, "duration_min": 50.0},
+        {"startTimeLocal": "2025-12-31 10:00", "distance_km": 5.0, "duration_min": 25.0},
+        {"startTimeLocal": "2025-12-30 10:00", "distance_km": 9.0, "duration_min": 45.0},
+    ])
+    out = day_comparison(df, date(2024, 12, 31))
+    assert out["year"].tolist() == [2025, 2024]
+    assert out["km"].tolist() == [5.0, 10.0]
+
+
 def test_day_comparison_tolere_les_colonnes_absentes():
     df = _day_runs([
         {"startTimeLocal": "2026-08-13 07:00", "distance_km": 6.0, "duration_min": 40.0},
     ])
-    out = day_comparison(df, doy=225)
+    out = day_comparison(df, date(2026, 8, 13))
     assert pd.isna(out.loc[0, "avgHR"])
     assert out.loc[0, "elevation"] == 0.0
     assert out.loc[0, "names"] == []
@@ -401,11 +459,11 @@ def test_day_comparison_km_nul_ne_divise_pas_par_zero():
     df = _day_runs([
         {"startTimeLocal": "2026-08-13 07:00", "distance_km": 0.0, "duration_min": 30.0},
     ])
-    assert pd.isna(day_comparison(df, doy=225).loc[0, "pace_sec"])
+    assert pd.isna(day_comparison(df, date(2026, 8, 13)).loc[0, "pace_sec"])
 
 
 def test_day_comparison_vide():
-    assert day_comparison(pd.DataFrame(), 225).empty
-    assert list(day_comparison(pd.DataFrame(), 225).columns)[:4] == [
+    assert day_comparison(pd.DataFrame(), date(2026, 8, 13)).empty
+    assert list(day_comparison(pd.DataFrame(), date(2026, 8, 13)).columns)[:4] == [
         "year", "date", "start_time", "sorties",
     ]

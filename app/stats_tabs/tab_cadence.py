@@ -24,7 +24,7 @@ def render(running_filtered: pd.DataFrame) -> None:
     fig_cad = go.Figure()
     fig_cad.add_hrect(
         y0=_CADENCE_LOW, y1=_CADENCE_HIGH,
-        fillcolor="rgba(12,163,12,0.08)",
+        fillcolor=ct.rgba(ct.GOOD, 0.08),
         line_width=0,
         annotation_text="Zone optimale",
         annotation_position="top right",
@@ -35,7 +35,7 @@ def render(running_filtered: pd.DataFrame) -> None:
         y=cad_data["avgCadence"],
         mode="markers+lines",
         name="Cadence",
-        line=dict(color="rgba(25,158,112,0.5)", width=1),
+        line=dict(color=ct.rgba(ct.CADENCE, 0.5), width=1),
         marker=dict(
             color=cad_data["avgCadence"].apply(
                 lambda c: ct.GOOD if _CADENCE_LOW <= c <= _CADENCE_HIGH
@@ -83,13 +83,13 @@ def render(running_filtered: pd.DataFrame) -> None:
     fig_cad_hist = go.Figure(go.Histogram(
         x=cad_data["avgCadence"],
         nbinsx=20,
-        marker_color="rgba(25,158,112,0.85)",
+        marker_color=ct.rgba(ct.CADENCE, 0.85),
         hovertemplate="Cadence : %{x:.0f} spm<br>Sorties : %{y}<extra></extra>",
     ))
     for x_val, label in [(_CADENCE_LOW, "170 spm"), (_CADENCE_HIGH, "180 spm")]:
         fig_cad_hist.add_vline(
             x=x_val,
-            line_color="rgba(12,163,12,0.7)",
+            line_color=ct.rgba(ct.GOOD, 0.7),
             line_dash="dash",
             annotation_text=label,
             annotation_font=dict(color=ct.GOOD),

@@ -1,6 +1,5 @@
 """GARMIN_PASSWORD (.env) ne doit ni atteindre le navigateur ni servir de repli."""
 
-import ui_helpers
 import pytest
 from streamlit.testing.v1 import AppTest
 
@@ -14,7 +13,7 @@ SECRET = "s3cret-value"
 def login_page(monkeypatch):
     monkeypatch.setenv("GARMIN_EMAIL", "runner@example.com")
     monkeypatch.setenv("GARMIN_PASSWORD", SECRET)
-    monkeypatch.setattr(ui_helpers, "resume_session", lambda: None)
+    monkeypatch.setattr(garmin_client, "resume_session", lambda: None)
     calls = []
     # main.py importe login_with_credentials depuis garmin_client à chaque run.
     monkeypatch.setattr(garmin_client, "login_with_credentials",

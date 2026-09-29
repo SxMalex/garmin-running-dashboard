@@ -332,3 +332,253 @@ def test_meal_prompt_uses_the_validated_plan(logged_in, goal):
     prompt = at.code[0].value
     assert "Aucun plan d'entraînement actif" not in prompt
     assert "plan Objectif validé" in prompt and "À retenir pour la prochaine course" in prompt
+
+
+def test_objectif_writes_nothing_under_a_fallback_athlete_id(logged_in, fake_api, monkeypatch):
+    """Revue #1 : un 429 sur socialProfile rangeait l'objectif sous un autre dossier."""
+    import garmin_client
+    import goal_store
+    at = logged_in("9_Objectif.py")
+    for writer in ("save_goal", "clear_goal", "validate_plan", "record_push", "forget_push"):
+        monkeypatch.setattr(goal_store, writer, lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("écriture sous un id de repli")))
+    garmin_client._SESSION.update(athlete_id=123456, reliable=False, checked_at=10**12)
+    at.session_state["garmin_athlete_id_reliable"] = False
+    at.run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert any("identifiant de ton compte" in w.value for w in at.warning)
+    # Ni formulaire ni bouton d'écriture : rien à cliquer pour ranger au mauvais endroit
+    assert not [b for b in at.button if not b.key.startswith("gd-")] and not at.text_input
+
+
+# ---------------------------------------------------------------------------
+# Revue PR #1, lot G
+# ---------------------------------------------------------------------------
+from workout_export import UNVERIFIED_FINGERPRINT, workout_tag  # noqa: E402
+
+RUN_COACH = [{"trainingPlanId": 7, "name": "Run Coach", "trainingStatus": {"statusKey": "Scheduled"}}]
+
+
+def _count_plan_reads(fake_api, monkeypatch):
+    calls = []
+    original = fake_api.get_training_plans
+    monkeypatch.setattr(fake_api, "get_training_plans",
+                        lambda *a, **k: calls.append(1) or original(*a, **k))
+    return calls
+
+
+def test_ticking_boxes_does_not_call_garmin(logged_in, fake_api, goal, monkeypatch):
+    """Revue : chaque case cochée coûtait un get_training_plans frais (0,4 s)."""
+    monkeypatch.setenv("GARMIN_WRITE_ENABLED", "true")
+    at = _validated(logged_in)
+    calls = _count_plan_reads(fake_api, monkeypatch)
+    choice = at.multiselect(key="push_choice")
+    choice.set_value(choice.value[:1]).run()
+    at.checkbox(key="push_confirm").check().run()
+    at.checkbox(key="push_confirm").uncheck().run()
+    at.checkbox(key="push_confirm").check().run()
+    assert calls == []
+    _button(at, "Envoyer").click().run()
+    assert calls == [1]                                    # la garde relit au clic, une fois
+    assert len(goal_store.load(42)["pushed"]) == 1
+
+
+@pytest.mark.parametrize("change,expected", [
+    ("coach", "Run Coach est actif"),
+    ("down", "Impossible de vérifier"),
+])
+def test_guard_is_reread_at_click(logged_in, fake_api, goal, monkeypatch, change, expected):
+    """Run Coach démarré (ou Garmin en panne) entre l'affichage et le clic : rien n'est envoyé."""
+    monkeypatch.setenv("GARMIN_WRITE_ENABLED", "true")
+    at = _validated(logged_in)
+    at.checkbox(key="push_confirm").check().run()
+    if change == "coach":
+        fake_api.plans = RUN_COACH
+    else:
+        fake_api.plans_error = RuntimeError("API Error 503")
+    _button(at, "Envoyer").click().run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert "upload_workout" not in fake_api.calls
+    assert goal_store.load(42)["pushed"] == {}
+    assert any(expected in w.value for w in at.warning)
+
+
+def test_displayed_state_is_reread_after_a_minute(logged_in, fake_api, goal, monkeypatch):
+    monkeypatch.setenv("GARMIN_WRITE_ENABLED", "true")
+    at = _validated(logged_in)
+    fake_api.plans = RUN_COACH
+    at.run()                                               # < 1 min : état mémorisé
+    assert any(b.label == "📲 Envoyer" for b in at.button)
+    stamp, state = at.session_state["objectif_coach_state"]
+    at.session_state["objectif_coach_state"] = (stamp - 61, state)
+    at.run()
+    assert any("Run Coach est actif" in w.value for w in at.warning)
+    assert not any(b.label == "📲 Envoyer" for b in at.button)
+
+
+def _lose_journal():
+    for key in list(goal_store.load(42)["pushed"]):
+        goal_store.forget_push(42, key)
+
+
+def _uploads(fake_api):
+    return fake_api.calls.count("upload_workout")
+
+
+def test_lost_journal_then_recalculated_plan_is_not_trusted(logged_in, fake_api, goal, monkeypatch):
+    """Revue : séance créée (réponse perdue), plan recalculé (mêmes noms, autres allures),
+    puis « Envoyer » : la montre gardait les anciennes cibles, marquées à jour."""
+    monkeypatch.setenv("GARMIN_WRITE_ENABLED", "true")
+    at = _push_all(_validated(logged_in))
+    n_workouts, n_schedules, n_uploads = len(fake_api.workouts), len(fake_api.scheduled), _uploads(fake_api)
+    _lose_journal()
+    fake_api.scheduled.clear()                            # la planification n'a jamais eu lieu
+    doc = goal_store.load(42)
+    plan = doc["validated"]["plan"]
+    changed = set()
+    for w in plan["weeks"]:
+        for s in w["sessions"]:
+            if s["kind"] == "easy":
+                for step in s["steps"]:
+                    step["pace_fast"] += 3
+                    step["pace_slow"] += 3
+                changed.add(f"{s['date']}-{s['kind']}")
+    goal_store.validate_plan(42, doc["validated"]["plan_id"], plan)
+    _push_all(at.run())
+    journal = goal_store.load(42)["pushed"]
+    flagged = {k for k, e in journal.items() if e["fingerprint"] == UNVERIFIED_FINGERPRINT}
+    assert flagged and flagged == changed & set(journal)
+    assert all(e["reconciled"] for e in journal.values())
+    assert len(fake_api.workouts) == n_workouts and _uploads(fake_api) == n_uploads
+    assert len(fake_api.scheduled) == n_schedules - len(flagged)   # les périmées ne sont pas planifiées
+    assert any("ne correspondent pas au plan affiché" in w.value for w in at.warning)
+    assert any("ne correspondent plus au plan affiché" in w.value for w in at.warning)
+    _button(at, "Retirer les séances de l'ancien plan").click().run()
+    _push_all(at.run())
+    journal = goal_store.load(42)["pushed"]
+    assert all(e["fingerprint"] != UNVERIFIED_FINGERPRINT for e in journal.values())
+    assert _uploads(fake_api) == n_uploads + len(flagged)
+    assert len(fake_api.workouts) == n_workouts          # remplacées, pas doublées
+
+
+def test_same_slot_new_title_is_found_by_tag(logged_in, fake_api, goal, monkeypatch):
+    """Journal perdu, créneau passé à une autre séance (autre titre, même étiquette) :
+    l'ancienne n'est pas laissée à côté de la nouvelle."""
+    monkeypatch.setenv("GARMIN_WRITE_ENABLED", "true")
+    at = _push_all(_validated(logged_in))
+    _lose_journal()
+    doc = goal_store.load(42)
+    plan, plan_id = doc["validated"]["plan"], doc["validated"]["plan_id"]
+    target = next(s for w in plan["weeks"] for s in w["sessions"]
+                  if s["kind"] == "easy" and s["date"] >= date.today().isoformat())
+    target.update(kind="shakeout", title="Déblocage")
+    goal_store.validate_plan(42, plan_id, plan)
+    n_uploads = _uploads(fake_api)
+    _push_all(at.run())
+    assert _uploads(fake_api) == n_uploads
+    entry = goal_store.load(42)["pushed"][f"{target['date']}-shakeout"]
+    assert entry["fingerprint"] == UNVERIFIED_FINGERPRINT and "Déblocage" not in entry["name"]
+    _button(at, "Retirer les séances de l'ancien plan").click().run()
+    _push_all(at.run())
+    tag = workout_tag(plan_id, target)
+    names = [w["workoutName"] for w in fake_api.workouts.values() if tag in w["workoutName"]]
+    assert len(names) == 1 and names[0].startswith("Déblocage")
+
+
+def test_lost_journal_and_session_moved_in_garmin_is_not_rescheduled(logged_in, fake_api, goal, monkeypatch):
+    """Revue : séance décalée d'un jour dans Garmin Connect, journal perdu → pas de doublon."""
+    monkeypatch.setenv("GARMIN_WRITE_ENABLED", "true")
+    at = _push_all(_validated(logged_in))
+    sid, (wid, day) = next(iter(fake_api.scheduled.items()))
+    fake_api.scheduled[sid] = (wid, (date.fromisoformat(day) + timedelta(days=1)).isoformat())
+    n_schedules = len(fake_api.scheduled)
+    _lose_journal()
+    _push_all(at.run())
+    assert len(fake_api.scheduled) == n_schedules
+    assert [s for s, (w, _) in fake_api.scheduled.items() if w == wid] == [sid]
+    entry = next(e for e in goal_store.load(42)["pushed"].values() if e["workout_id"] == wid)
+    assert entry["schedule_id"] == sid and entry["fingerprint"] != UNVERIFIED_FINGERPRINT
+
+
+def test_garmin_failure_while_reattaching_a_found_session_is_shown_and_stops(logged_in, fake_api, goal,
+                                                                             monkeypatch):
+    """Journal perdu, séance retrouvée, mais Garmin tombe en la rattachant : erreur affichée,
+    rien de recréé ni de planifié en double, la page tient."""
+    monkeypatch.setenv("GARMIN_WRITE_ENABLED", "true")
+    at = _push_all(_validated(logged_in))
+    _lose_journal()
+    uploads, scheduled = _uploads(fake_api), len(fake_api.scheduled)
+
+    def down(year, month):
+        raise RuntimeError("API Error 503 - Service Unavailable")
+
+    monkeypatch.setattr(fake_api, "get_scheduled_workouts", down)
+    _push_all(at.run())
+    assert not at.exception, [e.value for e in at.exception]
+    assert any("Erreur Garmin en rattachant" in e.value for e in at.error)
+    assert _uploads(fake_api) == uploads and len(fake_api.scheduled) == scheduled
+
+
+def test_garmin_side_session_names_are_inert_markdown(logged_in, fake_api, goal, monkeypatch):
+    """Revue : le journal garde désormais le nom réel lu dans Garmin (renommable par
+    l'utilisateur) — affiché tel quel, il chargeait une image distante."""
+    monkeypatch.setenv("GARMIN_WRITE_ENABLED", "true")
+    at = _push_all(_validated(logged_in))
+    key, entry = next(iter(goal_store.load(42)["pushed"].items()))
+    goal_store.record_push(42, key, {**entry, "name": "![](https://tiers.example/p.png) **x** :red[y]"})
+    at.run()
+    assert not at.exception, [e.value for e in at.exception]
+    shown = [m.value for m in at.markdown if "tiers" in m.value]
+    assert shown and all("![](" not in v and "**x**" not in v and ":red[" not in v for v in shown), shown
+
+
+def test_duplicated_tagged_session_is_reported_not_silently_ignored(logged_in, fake_api, goal, monkeypatch):
+    """Revue : « Copie de … [GD-…] » dans Garmin Connect — seule la 1re trouvée était prise,
+    la copie restait planifiée hors journal, sans rien dire."""
+    import copy
+    monkeypatch.setenv("GARMIN_WRITE_ENABLED", "true")
+    at = _push_all(_validated(logged_in))
+    wid, payload = next(iter(fake_api.workouts.items()))
+    fake_api._next_id += 1
+    dup = copy.deepcopy(payload)
+    dup["workoutName"] = "Copie de " + dup["workoutName"]
+    # la copie est rangée AVANT l'original : l'ancien code la prenait
+    fake_api.workouts = {fake_api._next_id: dup, **fake_api.workouts}
+    _lose_journal()
+    uploads = _uploads(fake_api)
+    _push_all(at.run())
+    assert not at.exception, [e.value for e in at.exception]
+    journal = goal_store.load(42)["pushed"]
+    slot = next(e for e in journal.values() if e["workout_id"] in (wid, fake_api._next_id))
+    assert slot["workout_id"] == wid and slot["fingerprint"] != "unverified"   # l'original vérifié
+    assert any("en double" in w.value for w in at.warning)
+    assert _uploads(fake_api) == uploads
+
+
+_HOSTILE = RuntimeError("API Error 500 ![](https://tiers.example/p.png)")
+
+
+def _inert(values):
+    return values and all("![](" not in v for v in values)
+
+
+def test_garmin_errors_on_every_write_path_are_shown_escaped(logged_in, fake_api, goal, monkeypatch):
+    """Chemins d'erreur de la page (retrait, lecture de la bibliothèque, recherche) :
+    message visible, texte Garmin échappé, page debout."""
+    monkeypatch.setenv("GARMIN_WRITE_ENABLED", "true")
+    at = _push_all(_validated(logged_in))
+    # 1. Retrait qui échoue
+    monkeypatch.setattr(fake_api, "delete_workout", lambda wid: (_ for _ in ()).throw(_HOSTILE))
+    _button(at, "Retirer").click().run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert _inert([e.value for e in at.error if "en retirant" in e.value])
+    # 2. Bibliothèque illisible au moment d'envoyer
+    _lose_journal()
+    monkeypatch.setattr(fake_api, "get_workouts", lambda *a, **k: (_ for _ in ()).throw(_HOSTILE))
+    _push_all(at.run())
+    assert not at.exception, [e.value for e in at.exception]
+    assert _inert([e.value for e in at.error if "impossible de lire tes séances" in e.value])
+    # 3. Recherche des séances du dashboard
+    _button(at, "Rechercher les séances du dashboard").click().run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert _inert([e.value for e in at.error if "impossible de lire tes séances" in e.value])

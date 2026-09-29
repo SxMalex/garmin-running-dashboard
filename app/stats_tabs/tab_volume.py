@@ -25,7 +25,7 @@ def render(running_filtered: pd.DataFrame, client) -> None:
                 x=weekly["week_label"],
                 y=weekly["km_total"],
                 name="km/semaine",
-                marker_color="rgba(57,135,229,0.85)",
+                marker_color=ct.rgba(ct.VOLUME, 0.85),
                 hovertemplate="<b>%{x}</b><br>%{y:.1f} km<br>%{customdata} sorties<extra></extra>",
                 customdata=weekly["nb_sorties"],
             ))
@@ -37,7 +37,7 @@ def render(running_filtered: pd.DataFrame, client) -> None:
                     y=weekly["rolling_avg"],
                     mode="lines",
                     name="Moy. mobile (4 sem.)",
-                    line=dict(color="rgba(201,133,0,0.95)", width=2),
+                    line=dict(color=ct.rgba(ct.YELLOW, 0.95), width=2),
                 ))
 
             fig_w.update_layout(
@@ -69,10 +69,9 @@ def render(running_filtered: pd.DataFrame, client) -> None:
                 x=monthly["month_label"],
                 y=monthly["km_total"],
                 name="km/mois",
-                marker_color=[
-                    f"rgba({int(100 + 155 * i / max(len(monthly)-1, 1))}, 156, 252, 0.8)"
-                    for i in range(len(monthly))
-                ],
+                # Le volume est bleu partout : la couleur suit l'entité, pas le
+                # rang du mois (l'ancien dégradé bleu→rose tombait à 1,7:1).
+                marker_color=ct.rgba(ct.VOLUME, 0.8),
                 hovertemplate="<b>%{x}</b><br>%{y:.1f} km<br>%{customdata} sorties<extra></extra>",
                 customdata=monthly["nb_sorties"],
                 text=monthly["km_total"].map("{:.0f}".format),
@@ -103,7 +102,7 @@ def render(running_filtered: pd.DataFrame, client) -> None:
         x="distance_km",
         nbins=20,
         labels={"distance_km": "Distance (km)", "count": "Nombre de sorties"},
-        color_discrete_sequence=["rgba(57,135,229,0.85)"],
+        color_discrete_sequence=[ct.rgba(ct.VOLUME, 0.85)],
     )
     fig_hist.update_layout(
         height=280,

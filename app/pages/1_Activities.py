@@ -3,6 +3,7 @@ Page Activités — explorateur des sorties (un indicateur, points cliquables),
 répartition de l'intensité (80/20), liste enrichie et détail d'une sortie.
 """
 
+import hashlib
 import math
 from datetime import timedelta, date
 
@@ -136,8 +137,8 @@ def _render_streams(streams: dict, max_hr: int = 190) -> None:
             fig.add_trace(go.Scatter(
                 x=dist_km, y=alt,
                 fill="tozeroy",
-                fillcolor="rgba(144,133,233,0.16)",
-                line=dict(color="rgba(144,133,233,0.9)", width=1.5),
+                fillcolor=ct.rgba(ct.ALTITUDE, 0.16),
+                line=dict(color=ct.rgba(ct.ALTITUDE, 0.9), width=1.5),
                 name="Altitude",
                 customdata=customdata,
                 hovertemplate=(
@@ -164,7 +165,7 @@ def _render_streams(streams: dict, max_hr: int = 190) -> None:
             fig.add_trace(go.Scatter(
                 x=dist_km, y=clipped,
                 mode="lines",
-                line=dict(color="rgba(57,135,229,0.95)", width=1.5),
+                line=dict(color=ct.rgba(ct.PACE, 0.95), width=1.5),
                 name="Allure",
                 customdata=hover,
                 hovertemplate="%{x:.2f} km · %{customdata}<extra></extra>",
@@ -189,11 +190,11 @@ def _render_streams(streams: dict, max_hr: int = 190) -> None:
             hr = streams["heartrate"]
             # Bandes de zones FC en arrière-plan
             zone_bands = [
-                (0,              0.60 * max_hr, "rgba(57,135,229,0.07)"),
-                (0.60 * max_hr,  0.70 * max_hr, "rgba(25,158,112,0.08)"),
-                (0.70 * max_hr,  0.80 * max_hr, "rgba(201,133,0,0.10)"),
-                (0.80 * max_hr,  0.90 * max_hr, "rgba(217,89,38,0.10)"),
-                (0.90 * max_hr,  max_hr * 1.1,  "rgba(230,103,103,0.12)"),
+                (0,              0.60 * max_hr, ct.rgba(ct.ZONE_HEAT[0], 0.07)),
+                (0.60 * max_hr,  0.70 * max_hr, ct.rgba(ct.ZONE_HEAT[1], 0.08)),
+                (0.70 * max_hr,  0.80 * max_hr, ct.rgba(ct.ZONE_HEAT[2], 0.10)),
+                (0.80 * max_hr,  0.90 * max_hr, ct.rgba(ct.ZONE_HEAT[3], 0.10)),
+                (0.90 * max_hr,  max_hr * 1.1,  ct.rgba(ct.ZONE_HEAT[4], 0.12)),
             ]
             for y0, y1, color in zone_bands:
                 fig.add_hrect(y0=y0, y1=y1, fillcolor=color, line_width=0, row=row_idx, col=1)
@@ -201,9 +202,9 @@ def _render_streams(streams: dict, max_hr: int = 190) -> None:
             fig.add_trace(go.Scatter(
                 x=dist_km, y=hr,
                 mode="lines",
-                line=dict(color="rgba(230,103,103,0.9)", width=1.5),
+                line=dict(color=ct.rgba(ct.HR, 0.9), width=1.5),
                 fill="tozeroy",
-                fillcolor="rgba(230,103,103,0.08)",
+                fillcolor=ct.rgba(ct.HR, 0.08),
                 name="FC",
                 hovertemplate="%{x:.2f} km · %{y:.0f} bpm<extra></extra>",
             ), row=row_idx, col=1)
@@ -358,7 +359,16 @@ if filtered.empty:
 
 # Intensité et charge de chaque sortie : même allure seuil (et donc même TSS)
 # que la page Forme — calculée sur l'historique complet, pas sur le filtre.
-enriched = enrich(filtered, reference_threshold_sec(df))
+enriched = enrich(filtered, reference_threshold_sec(df), history=df)   # TSS = celui du PMC
+
+# Sélection (graphe ou liste) : chaque widget a une version dans sa clé. Quand
+# l'un choisit une sortie, l'autre est remis à zéro — on ne garde qu'un choix
+# visible, et recliquer une ligne ne la décoche pas en silence. (En revenant sur
+# la page, Streamlit a purgé les deux widgets : la sélection « change » vers
+# vide et le détail reste fermé — rien à faire de plus.)
+for _k in ("_act_chart_ver", "_act_table_ver"):
+    st.session_state.setdefault(_k, 0)
+_chart_key = f"act_explorer_chart_{st.session_state['_act_chart_ver']}"
 
 with st.container(key="card-act-kpi"):
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -384,6 +394,7 @@ column, axis_label, hover_value, sense = METRICS[metric_key]
 plot_df = enriched.dropna(subset=[column]) if column in enriched else enriched.iloc[0:0]
 plot_df = plot_df[pd.to_numeric(plot_df[column], errors="coerce") > 0] if metric_key != "intensite" else plot_df
 
+_fig_sig = None                        # empreinte de la figure (aucune si pas de graphe)
 with st.container(key="card-act-explorer"):
     if plot_df.empty:
         st.info(f"Aucune sortie filtrée ne porte cette donnée ({axis_label.lower()}).")
@@ -425,8 +436,11 @@ with st.container(key="card-act-explorer"):
         fig.update_layout(height=380, margin=dict(l=0, r=0, t=30, b=0),
                           yaxis=dict(title=axis_label, autorange="reversed" if sense == "lower" else True),
                           legend=dict(orientation="h", y=1.1), clickmode="event+select")
+        # Streamlit identifie le graphe par TOUTE la figure : une figure nouvelle
+        # (filtre, indicateur, Actualiser) repart sans sélection.
+        _fig_sig = hashlib.md5(fig.to_json().encode()).hexdigest()
         chart_event = st.plotly_chart(fig, on_select="rerun", selection_mode="points",
-                                      key="act_explorer_chart")
+                                      key=_chart_key)
         st.caption("Chaque point est une sortie (taille = distance, couleur = zone d'intensité). "
                    "**Clique un point** pour ouvrir son détail en bas de page.")
 explain("intensite")
@@ -464,6 +478,7 @@ if polar:
 # ---------------------------------------------------------------------------
 # Toutes les sorties (sélection possible aussi depuis la liste)
 # ---------------------------------------------------------------------------
+_rows_sig = hashlib.md5(",".join(map(str, enriched["activityId"])).encode()).hexdigest()[:10]
 display = enriched[[
     "activityId", "startTimeLocal", "activityName", "activityType", "zone", "intensity_pct",
     "distance_km", "duration_min", "avgPace", "avgHR", "tss", "calories", "elevationGain",
@@ -475,10 +490,14 @@ for col in ["avgHR", "calories", "elevationGain", "tss", "intensity_pct"]:
     display[col] = pd.to_numeric(display[col], errors="coerce")
 
 with st.expander(f"Toutes les sorties ({len(display)})", expanded=False, icon=":material/list:"):
+    _table_key = f"act_table_{_rows_sig}_{st.session_state['_act_table_ver']}"
     selected_event = st.dataframe(
         display.drop(columns=["activityId"]),
         width="stretch", hide_index=True, on_select="rerun", selection_mode="single-row",
-        key="act_table",
+        # Clé liée aux lignes affichées : un filtre change la liste, la sélection
+        # repart de zéro (l'ancien index pointait hors de la liste → iloc plantait,
+        # ou, pire, sur une autre sortie sans rien dire).
+        key=_table_key,
         column_config={
             "startTimeLocal": st.column_config.TextColumn("Date"),
             "activityName": st.column_config.TextColumn("Nom"),
@@ -501,13 +520,36 @@ with st.expander(f"Toutes les sorties ({len(display)})", expanded=False, icon=":
         },
     )
 
-# Sortie choisie : dernier clic sur le graphe, sinon ligne de la liste.
-_picked_id = None
+# Sortie choisie : le DERNIER geste, graphe ou liste (cf. versions de clés plus haut).
 _points = (getattr(getattr(chart_event, "selection", None), "points", None) or []) if chart_event else []
-if _points and _points[0].get("customdata"):
-    _picked_id = int(_points[0]["customdata"][0])
-elif selected_event.selection.rows:
-    _picked_id = int(display.iloc[selected_event.selection.rows[0]]["activityId"])
+_chart_sel = tuple(int(p["customdata"][0]) for p in _points if p.get("customdata"))
+_rows = [r for r in (selected_event.selection.rows or []) if 0 <= r < len(display)]
+_table_sel = tuple(int(display.iloc[r]["activityId"]) for r in _rows)
+_prev_chart, _prev_table = st.session_state.get("_act_last_sel", ((), ()))
+_prev_view = st.session_state.get("_act_last_view")
+_view = (_rows_sig, _fig_sig)
+if _prev_view is not None and _prev_view[0] != _view[0]:
+    _prev_table = ()     # nouvelle liste (filtre) : widget neuf et vide, pas une ligne décochée
+if _prev_view is not None and _prev_view[1] != _view[1]:
+    _prev_chart = ()     # nouvelle figure : sélection vidée par Streamlit, pas un point désélectionné
+st.session_state["_act_last_view"] = _view
+_picked_id = st.session_state.get("_act_picked")
+_reset = None
+if _chart_sel != _prev_chart:
+    # Le point AJOUTÉ (shift-clic : plusieurs points), sinon rien = désélection.
+    _added = [i for i in _chart_sel if i not in _prev_chart]
+    _picked_id = _added[-1] if _added else None
+    if _picked_id is not None and _table_sel:
+        _reset, _table_sel = "_act_table_ver", ()
+elif _table_sel != _prev_table:
+    _picked_id = _table_sel[0] if _table_sel else None           # ligne décochée : détail refermé
+    if _picked_id is not None and _chart_sel:
+        _reset, _chart_sel = "_act_chart_ver", ()
+st.session_state["_act_last_sel"] = (_chart_sel, _table_sel)
+st.session_state["_act_picked"] = _picked_id
+if _reset:
+    st.session_state[_reset] += 1        # l'autre widget repart vide au prochain run
+    st.rerun()
 
 # ---------------------------------------------------------------------------
 # Détails de l'activité sélectionnée
@@ -590,8 +632,8 @@ if _picked_id is not None and (filtered["activityId"] == _picked_id).any():
                 y=splits_df["pace_sec"].apply(lambda s: s / 60 if s > 0 else None),
                 name="Allure (min/km)",
                 marker_color=[
-                    "rgba(12,163,12,0.9)" if p > 0 and p < avg_split_pace
-                    else "rgba(57,135,229,0.85)"
+                    ct.rgba(ct.GOOD, 0.9) if p > 0 and p < avg_split_pace
+                    else ct.rgba(ct.PACE, 0.85)
                     for p in splits_df["pace_sec"]
                 ],
                 hovertemplate="<b>Lap %{x}</b><br>Allure : %{customdata}<extra></extra>",

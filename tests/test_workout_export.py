@@ -220,3 +220,119 @@ class TestGoalStore:
     def test_no_tmp_left(self, tmp_path):
         goal_store.save_goal(1, {}, {})
         assert not list(tmp_path.rglob("*.tmp"))
+
+
+# ---------------------------------------------------------------------------
+# Revue PR #1, lot G : réconciliation par étiquette, contenu comparé
+# ---------------------------------------------------------------------------
+import copy  # noqa: E402
+
+from workout_export import (  # noqa: E402
+    UNVERIFIED_FINGERPRINT,
+    fingerprint,
+    reconciled_fingerprint,
+    stale_pushes,
+)
+
+
+def _as_read_by_garmin(payload):
+    """Ce que `get_workout_by_id` renvoie : même DTO, enrichi et renormalisé par Garmin."""
+    w = copy.deepcopy(payload)
+    w.update(workoutId=987654, ownerId=1234, createdDate="2026-09-24T08:00:00.0",
+             updatedDate="2026-09-24T08:00:00.0", author={"displayName": "moi"},
+             estimatedDurationInSecs=1234, description=(w.get("description") or "").replace("\n", "\r\n"))
+    w["sportType"]["displayOrder"] = 99
+
+    def enrich(steps):
+        for i, s in enumerate(steps):
+            s.update(stepId=5000 + i, childStepId=None, preferredEndConditionUnit=None)
+            s.setdefault("description", None)
+            if s.get("endConditionValue") is not None:
+                s["endConditionValue"] = float(s["endConditionValue"]) + 1e-9
+            for k in ("targetValueOne", "targetValueTwo"):
+                if s.get(k) is not None:
+                    s[k] += 1e-7
+            enrich(s.get("workoutSteps") or [])
+        steps.reverse()                               # ordre de liste ≠ stepOrder
+    for seg in w["workoutSegments"]:
+        enrich(seg["workoutSteps"])
+    return w
+
+
+def _shift_paces(session, seconds):
+    def shift(steps):
+        return [dict(s, steps=shift(s["steps"])) if s["type"] == "repeat" else
+                dict(s, pace_fast=s["pace_fast"] and s["pace_fast"] + seconds,
+                     pace_slow=s["pace_slow"] and s["pace_slow"] + seconds) for s in steps]
+    return dict(session, steps=shift(session["steps"]))
+
+
+class TestReconciledFingerprint:
+    @pytest.mark.parametrize("kind", ["easy", "tempo", "interval", "strides", "strength"])
+    def test_same_content_as_read_by_garmin_is_verified(self, sessions, kind):
+        payload = workout_payload(_first(sessions, kind), "abc123")
+        assert reconciled_fingerprint(payload, _as_read_by_garmin(payload)) == fingerprint(payload)
+
+    @pytest.mark.parametrize("seconds", [1, 3, -5])
+    def test_recalculated_plan_same_name_other_paces_is_unverified(self, sessions, seconds):
+        """Cas de la revue : même plan_id, même titre, allures recalculées."""
+        tempo = _first(sessions, "tempo")
+        old, new = workout_payload(tempo, "abc123"), workout_payload(_shift_paces(tempo, seconds), "abc123")
+        assert old["workoutName"] == new["workoutName"]
+        assert reconciled_fingerprint(new, _as_read_by_garmin(old)) == UNVERIFIED_FINGERPRINT
+
+    def test_other_changes_are_unverified(self, sessions):
+        tempo = _first(sessions, "tempo")
+        payload = workout_payload(tempo, "abc123")
+        more_reps = copy.deepcopy(tempo)
+        more_reps["steps"][1]["count"] += 1
+        longer = copy.deepcopy(tempo)
+        longer["steps"][0]["duration_s"] += 60
+        other_kind = dict(tempo, kind="strides", title="Footing + lignes droites")   # même créneau
+        for changed in (more_reps, longer, other_kind):
+            assert reconciled_fingerprint(workout_payload(changed, "abc123"),
+                                          _as_read_by_garmin(payload)) == UNVERIFIED_FINGERPRINT
+        strength = _first(sessions, "strength")
+        old = workout_payload(strength, "abc123")
+        new = workout_payload(dict(strength, target="4 tours : autre routine"), "abc123")
+        assert reconciled_fingerprint(new, _as_read_by_garmin(old)) == UNVERIFIED_FINGERPRINT
+
+    @pytest.mark.parametrize("remote", [None, {}, {"workoutName": "x", "workoutSegments": []}])
+    def test_unreadable_remote_is_unverified(self, sessions, remote):
+        payload = workout_payload(_first(sessions, "easy"), "abc123")
+        assert reconciled_fingerprint(payload, remote) == UNVERIFIED_FINGERPRINT
+
+    def test_unverified_entry_is_stale_verified_one_is_not(self, sessions):
+        easy = _first(sessions, "easy")
+        payload = workout_payload(easy, "abc123")
+        entry = {"plan_id": "abc123", "date": easy["date"], "kind": "easy"}
+        ok = {"k": {**entry, "fingerprint": reconciled_fingerprint(payload, _as_read_by_garmin(payload))}}
+        assert stale_pushes(ok, "abc123", TODAY.isoformat(), sessions) == {}
+        bad = {"k": {**entry, "fingerprint": UNVERIFIED_FINGERPRINT}}
+        assert set(stale_pushes(bad, "abc123", TODAY.isoformat(), sessions)) == {"k"}
+
+
+def test_reread_content_compared_with_tolerance_not_rounding():
+    """Revue : arrondi à 3 décimales d'un payload à 4 décimales — une valeur relue en
+    float32 tombait de l'autre côté de l'arrondi et la séance passait « non vérifiée »."""
+    import copy
+    import struct
+    from workout_export import UNVERIFIED_FINGERPRINT, fingerprint, reconciled_fingerprint
+
+    def f32(v):
+        return struct.unpack("f", struct.pack("f", v))[0]
+    # Une valeur à 4 décimales que l'arrondi à 3 range différemment une fois relue en float32
+    edge = next(k / 10000 for k in range(20000, 60000) if round(k / 10000, 3) != round(f32(k / 10000), 3))
+    step = {"type": "ExecutableStepDTO", "stepOrder": 1, "stepType": {"stepTypeKey": "interval"},
+            "endCondition": {"conditionTypeKey": "time"}, "endConditionValue": 300.0,
+            "targetType": {"workoutTargetTypeKey": "pace.zone"},
+            "targetValueOne": edge, "targetValueTwo": 3.1250, "description": "seuil"}
+    payload = {"workoutName": "Seuil [GD-x-20260930-run]", "sportType": {"sportTypeKey": "running"},
+               "workoutSegments": [{"segmentOrder": 1, "workoutSteps": [step]}]}
+    reread = copy.deepcopy(payload)
+    reread["workoutSegments"][0]["workoutSteps"][0]["targetValueOne"] = f32(edge)
+    reread["workoutSegments"][0]["workoutSteps"][0]["targetValueTwo"] = f32(3.125)
+    assert reconciled_fingerprint(payload, reread) == fingerprint(payload)
+    slower = copy.deepcopy(payload)                              # 3 s/km plus lent : autre séance
+    slower["workoutSegments"][0]["workoutSteps"][0]["targetValueOne"] = 1000 / (1000 / edge + 3)
+    assert reconciled_fingerprint(payload, slower) == UNVERIFIED_FINGERPRINT

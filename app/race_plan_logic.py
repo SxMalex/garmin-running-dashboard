@@ -607,6 +607,11 @@ def build_race_plan(
         )
     peak_km = min(max(profile["peak_km"], start_km), start_km * MAX_PEAK_OVER_START)
     volumes = weekly_volumes(phases, start_km, peak_km)
+    if today > first_monday and phases[0] in ("BASE", "BUILD", "PEAK") and len(phases) > 1:
+        # Semaine 1 entamée : elle n'est prescrite qu'en partie, la progression
+        # (+10 %, semaine allégée) démarre donc à la première semaine complète —
+        # sinon la S2 progressait sur un volume jamais prescrit.
+        volumes = [round(start_km, 1)] + weekly_volumes(phases[1:], start_km, peak_km)
 
     p10 = baseline.get("pace_10k_sec") or DEFAULT_10K_PACE
     predicted = _riegel(p10 * 10, 10.0, dist_km)
@@ -715,7 +720,11 @@ def build_race_plan(
             (s for s in sessions if date.fromisoformat(s["date"]) >= today),
             key=lambda s: (s["date"], s["kind"] == "strength"),
         )
-        prescribed = sum(s["distance_km"] for s in sessions if s["kind"] not in ("strength", "race"))
+        # Sur les séances affichées : celles d'avant `today` ne sont pas générées.
+        prescribed = sum(s["distance_km"] for s in week_sessions
+                         if s["kind"] not in ("strength", "race"))
+        if monday < today:
+            volume = round(prescribed, 1)   # semaine entamée : on annonce ce qui reste
         weeks.append({
             "week": idx + 1, "start": monday.isoformat(), "phase": phase,
             "phase_label": PHASE_LABELS[phase], "volume_km": volume,
