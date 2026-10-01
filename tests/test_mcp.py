@@ -269,7 +269,7 @@ def test_briefing_run_coach_expose_l_allure_du_parcours(client, monkeypatch):
         "sportType": {"sportTypeKey": "running"}, "workoutName": "Seuil",
         "workoutDescription": "3x6:00@5:05/km", "estimatedDurationInSecs": 2520,
         "trainingEffectLabel": "LACTATE_THRESHOLD", "adaptiveCoachingWorkoutStatus": "NOT_COMPLETE"}}]}
-    monkeypatch.setattr(client, "get_adaptive_plan", lambda plan_id: detail)
+    monkeypatch.setattr(client, "get_adaptive_plan", lambda plan_id, strict=False: detail)
     df = client.get_activities(limit=gc.ACTIVITY_HISTORY_LIMIT)
     runs = df[df["activityType"] == "running"].sort_values("startTimeLocal", ascending=False).head(20)
     avg_pace = runs.loc[runs["avgPace_sec"] > 0, "avgPace_sec"].mean()

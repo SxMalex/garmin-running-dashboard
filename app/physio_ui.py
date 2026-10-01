@@ -26,6 +26,7 @@ from physio_logic import (
 )
 from ui_helpers import get_garmin_client
 from ui_mode import decoupling_params, explain, help_text, is_pro, lock_params, render_pro_settings
+from ui_theme import esc
 
 PHYSIO_SETTINGS = ["lock_tol_bpm", "lock_min_duration_s", "lock_min_jump_bpm",
                    "decoupling_warmup_min", "decoupling_min_moving_min",
@@ -221,7 +222,9 @@ def render_aerobic_progress(activities_df, athlete_id: int) -> None:
                 name=meta["label"],
                 marker=dict(size=11, color=LEVEL_COLORS[level],
                             line=dict(color=ct.SURFACE, width=2)),
-                customdata=part[["activityName", "moving_min"]].to_numpy(),
+                # Plotly interprète le HTML du survol : nom Garmin échappé.
+                customdata=part.assign(activityName=part["activityName"].fillna("").map(esc))
+                [["activityName", "moving_min"]].to_numpy(),
                 hovertemplate="%{x|%d/%m/%Y} · %{customdata[0]}<br>"
                               "%{y:+.1f} % sur %{customdata[1]:.0f} min"
                               f"<extra>{meta['label']}</extra>",

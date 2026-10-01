@@ -308,6 +308,14 @@ def test_run_coach_banner_before_validation(logged_in, fake_api, goal):
     assert any("Valider ce plan" in b.label for b in at.button)
 
 
+def test_run_coach_plan_name_is_escaped(logged_in, fake_api, goal):
+    """Revue #1 : le nom du plan Run Coach, lu dans Garmin, passait brut dans st.info."""
+    fake_api.plans = [{"trainingPlanId": 7, "name": "Semi ![](https://tiers.example/p.png)",
+                       "trainingStatus": {"statusKey": "Scheduled"}}]
+    at = logged_in(PAGE).run()
+    assert _inert([i.value for i in at.info if "Run Coach actif" in i.value])
+
+
 def test_next_session_page_shows_plan_session(logged_in, goal):
     """Revue : la page Prochaine sortie affichait un libellé générique et l'allure d'échauffement."""
     from race_plan_logic import plan_sessions

@@ -250,7 +250,7 @@ plan = build_race_plan(
 # même la validation (contre-validation : bannière invisible jusqu'ici).
 _, coach_name = current_coach_state(strict=False)
 if coach_name:
-    st.info(f"Plan Garmin Run Coach actif : **{coach_name}**. Ta montre suit ce plan-là : "
+    st.info(f"Plan Garmin Run Coach actif : **{md_escape(coach_name)}**. Ta montre suit ce plan-là : "
             "celui-ci reste consultable, mais ne pourra pas être envoyé tant que Run Coach "
             "est actif.")
 

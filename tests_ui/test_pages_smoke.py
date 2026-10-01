@@ -283,3 +283,12 @@ def test_ai_coach_slot_with_the_objectif_plan(logged_in, monkeypatch):
     empty_day = logged_in("7_AI_Coach.py", ai_slot_on=True, ai_slot_date=slot + timedelta(days=1),
                           ai_slot_time=time(12, 0)).run()
     assert "Rien de prévu ce jour-là par le plan Objectif" in empty_day.code[0].value
+
+
+def test_charge_legend_uses_the_shared_tsb_scale(logged_in):
+    """Revue #1 : l'encart de l'onglet Charge gardait son échelle (« Sous-entraîné »
+    au-delà de 25) sous une métrique qui disait « Bien reposé »."""
+    at = logged_in("3_Forme.py").run()
+    legend = " ".join(e.value for e in [*at.success, *at.warning, *at.error, *at.info])
+    assert "Sous-entraîné" not in legend
+    assert "Bien reposé" in legend and "Récupération nécessaire" in legend

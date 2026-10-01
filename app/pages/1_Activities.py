@@ -18,7 +18,7 @@ from next_session_logic import reference_threshold_sec
 from raceday_logic import cool_equivalent_pace, heat_slowdown, weather_from_garmin
 from physio_ui import render_physio_settings, render_signal_quality
 from ui_mode import explain
-from ui_theme import chip, html_block
+from ui_theme import chip, esc, html_block
 from ui_helpers import (
     cached_load_activities,
     get_garmin_client,
@@ -409,7 +409,8 @@ with st.container(key="card-act-explorer"):
                 continue
             custom = pd.DataFrame({
                 "id": part["activityId"].astype("int64"),
-                "name": part["activityName"].fillna("").astype(str).str.slice(0, 40),
+                # Plotly interprète le HTML du survol : nom Garmin échappé.
+                "name": part["activityName"].fillna("").astype(str).str.slice(0, 40).map(esc),
                 "pace": part["avgPace"].fillna("—").astype(str),
                 "dist": part["distance_km"].round(1),
                 "zone": ZONE_LABELS[zone],

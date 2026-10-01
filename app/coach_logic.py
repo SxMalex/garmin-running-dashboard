@@ -454,14 +454,14 @@ def load_coach_context(client, day: date) -> dict | None:
     serveur MCP.
 
     Relève l'erreur Garmin quand l'état est inconnu (la lecture tolérante
-    renvoyait {} aussi bien pour « aucun plan » que pour une panne) : une seule
-    lecture stricte, servie par le cache disque quand Garmin a vraiment
-    répondu. À l'appelant de traduire l'erreur en `COACH_UNKNOWN`, sans la
+    renvoyait {} aussi bien pour « aucun plan » que pour une panne) : lectures
+    strictes (liste des plans ET détail du plan actif), servies par le cache
+    disque quand Garmin a vraiment répondu. À l'appelant de traduire l'erreur en `COACH_UNKNOWN`, sans la
     mettre en cache.
     """
     plans = client.get_training_plans(strict=True, use_cache=True)
     plan = active_plan(plans)
     if plan is None:
         return None
-    detail = client.get_adaptive_plan(plan["plan_id"])
+    detail = client.get_adaptive_plan(plan["plan_id"], strict=True)
     return coach_plan_context(plans, detail, day)

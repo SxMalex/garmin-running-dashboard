@@ -5,7 +5,7 @@ from datetime import date, datetime
 
 import chart_theme
 import chart_theme as ct
-from forme_logic import tsb_metric_delta
+from forme_logic import TSB_FATIGUE, TSB_FRESH, tsb_metric_delta
 from ui_helpers import cache_nonce
 from next_session_logic import (
     THRESHOLD_SLIDER_MAX,
@@ -201,8 +201,9 @@ def render(activities_df: pd.DataFrame, cutoff: datetime) -> None:
     st.plotly_chart(fig)
 
     st.markdown("#### Interprétation du TSB")
-    iz1, iz2, iz3, iz4 = st.columns(4)
-    iz1.info("**TSB > 25**\nTrop frais\nSous-entraîné")
-    iz2.success("**TSB 5 → 25**\nForme optimale\nIdéal compétition")
-    iz3.warning("**TSB −20 → 5**\nCharge normale\nPhase d'entraînement")
-    iz4.error("**TSB < −20**\nSur-entraîné\nRécupération requise")
+    # Mêmes seuils et libellés que la métrique (tsb_metric_delta) : une
+    # échelle à part donnait « Sous-entraîné » sous un « Bien reposé ».
+    iz1, iz2, iz3 = st.columns(3)
+    iz1.success(f"**TSB > {TSB_FRESH:+g}**\n{tsb_metric_delta(TSB_FRESH + 1)[0]}")
+    iz2.warning(f"**TSB {TSB_FATIGUE:+g} → {TSB_FRESH:+g}**\n{tsb_metric_delta(TSB_FATIGUE)[0]}")
+    iz3.error(f"**TSB < {TSB_FATIGUE:+g}**\n{tsb_metric_delta(TSB_FATIGUE - 1)[0]}")
