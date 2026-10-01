@@ -60,3 +60,12 @@ def test_forme_page_shows_a_single_tsb(logged_in, monkeypatch):
     shown = {float(v.replace("+", "")) for v in values.values()}
     assert shown == {round(round(c, 1) - round(a, 1), 1)}, values
     assert round(c - a, 1) not in shown                     # l'ancienne définition aurait différé
+
+
+def test_charge_legend_uses_the_shared_tsb_scale(logged_in):
+    """Revue #1 : l'encart de l'onglet Charge gardait son échelle (« Sous-entraîné »
+    au-delà de 25) sous une métrique qui disait « Bien reposé »."""
+    at = logged_in("3_Forme.py").run()
+    legend = " ".join(e.value for e in [*at.success, *at.warning, *at.error, *at.info])
+    assert "Sous-entraîné" not in legend
+    assert "Bien reposé" in legend and "Récupération nécessaire" in legend

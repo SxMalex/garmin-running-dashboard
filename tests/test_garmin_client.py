@@ -4,6 +4,7 @@ lignes d'activité), cache disque et mapping d'erreurs.
 Aucun appel réseau — l'API Garmin est systématiquement stubée.
 """
 
+import json
 import time
 
 import pandas as pd
@@ -488,6 +489,13 @@ class TestSafeLoadActivities:
         df, err = safe_load_activities(_RaisingClient(exc), 10)
         assert df.empty
         assert fragment in err
+
+    @pytest.mark.parametrize("exc", [GarminConnectConnectionError("![](https://tiers.example/p.png)"),
+                                     RuntimeError("![](https://tiers.example/p.png)")])
+    def test_server_text_is_escaped(self, exc):
+        """Revue #1 : le message est rendu en Markdown par toutes les pages."""
+        _, err = safe_load_activities(_RaisingClient(exc), 10)
+        assert "![](" not in err and "tiers" in err
 
 
 # ---------------------------------------------------------------------------
@@ -1099,6 +1107,22 @@ def test_account_without_display_name_is_not_remembered(session_env):
     assert gcm.resolve_athlete_id(_StubApi(_StubClient(store), display_name="")) == (777, True)
     assert not gcm._athlete_ids_path().exists()
 
+
+
+@pytest.mark.parametrize("written, kept", [("R1", False), ("reconnexion", True)])
+def test_refused_resume_removes_the_tokens_its_login_rewrote(session_env, written, kept):
+    """Revue #1 : `login()` rafraîchit un jeton proche de l'expiration et réécrit le
+    tokenstore ; une déconnexion passée entre-temps refusait la reprise mais laissait
+    ce fichier, et le visiteur suivant était reconnecté. Celui d'une reconnexion reste."""
+    gcm, store = session_env
+    generation = gcm._SESSION["generation"]
+    gcm.end_session()                                       # déconnexion pendant la reprise
+    client = _StubClient(store)
+    client.di_refresh_token = "R1"                          # jeton neuf du rafraîchissement
+    store.mkdir(parents=True, exist_ok=True)
+    (store / "garmin_tokens.json").write_text(json.dumps({"di_refresh_token": written}))
+    assert gcm.adopt_session(_StubApi(client), generation=generation) is False
+    assert (store / "garmin_tokens.json").exists() is kept
 
 # --- Contre-revue 2 : la déconnexion doit gagner contre toute reprise concurrente ---
 def test_logout_wins_against_a_resume_started_during_a_slow_refresh(session_env, monkeypatch):

@@ -30,6 +30,7 @@ from garminconnect import (
 )
 
 from formatting import (
+    md_escape,
     normalize_activity_type,
     seconds_to_pace_str,
     speed_to_pace,
@@ -371,7 +372,13 @@ def adopt_session(api: Garmin, generation: Optional[int] = None) -> bool:
             _SESSION.update(api=api, athlete_id=athlete_id, reliable=reliable,
                             checked_at=time.monotonic(), resume_failed_at=None)
     if stale is not None:
+        # `login()` a pu rafraîchir (jeton proche de l'expiration) et réécrire le
+        # tokenstore après la déconnexion : ce fichier-là part avec l'objet.
+        client = getattr(stale, "client", None)
+        path = getattr(client, "_tokenstore_path", None)
+        refresh_tokens = {getattr(client, "di_refresh_token", None)}
         _neutralize(stale)
+        _remove_tokens_of(path, refresh_tokens)
         return False
     if old is not None and old is not api:
         _neutralize(old)
@@ -1179,12 +1186,14 @@ class GarminClient:
             logger.warning("Plans d'entraînement indisponibles : %s", e)
             return {}
 
-    def get_adaptive_plan(self, plan_id: int) -> dict:
+    def get_adaptive_plan(self, plan_id: int, strict: bool = False) -> dict:
         """
         Détail d'un plan adaptatif : séances programmées (`taskList`) et phases.
 
         Le plan se réajuste côté Garmin après chaque séance — le TTL de cache
         habituel suffit, le bouton d'actualisation force la relecture.
+        `strict=True` relève l'erreur au lieu de renvoyer {} : le contexte coach
+        en ferait un « Run Coach actif sans séance », gardé une heure.
         """
         cache_key = f"adaptive_plan_{plan_id}"
         cached = _cache_get(self.athlete_id, cache_key)
@@ -1196,6 +1205,9 @@ class GarminClient:
             time.sleep(API_COOLDOWN_S)
             return data
         except Exception as e:
+            time.sleep(API_COOLDOWN_S)          # un refus reste un appel réel
+            if strict:
+                raise
             logger.warning("Plan adaptatif %s indisponible : %s", plan_id, e)
             return {}
 
@@ -1469,8 +1481,8 @@ class GarminClient:
         """
         Identifiant de planification de `workout_id`, ou None s'il n'est pas au
         calendrier. Cherché d'abord dans le mois de `date_str`, puis dans les
-        mois voisins qu'atteint un déplacement d'au plus SCHEDULE_SEARCH_DAYS
-        jours : une séance que l'utilisateur a décalée d'un jour dans Garmin
+        mois voisins (lus en entier) qu'atteint un déplacement d'au plus
+        SCHEDULE_SEARCH_DAYS jours : une séance que l'utilisateur a décalée d'un jour dans Garmin
         Connect (du 30 au 1er compris) reste la nôtre — la replanifier la
         mettrait deux fois sur la montre. Chaque séance du dashboard ne sert
         qu'un créneau : toute planification trouvée compte ; s'il y en a
@@ -1628,7 +1640,8 @@ def safe_load_activities(
 ) -> tuple[pd.DataFrame, str | None]:
     """
     Encapsule `client.get_activities(limit)` avec des messages d'erreur lisibles.
-    Retourne (DataFrame, message). `message` est None en cas de succès.
+    Retourne (DataFrame, message). `message` est None en cas de succès ; il
+    est rendu en Markdown par les pages, d'où le texte d'exception échappé.
     """
     try:
         df = client.get_activities(limit=limit)
@@ -1642,10 +1655,10 @@ def safe_load_activities(
             "Garmin rate-limite les requêtes (429). Réessaie dans quelques minutes."
         )
     except GarminConnectConnectionError as e:
-        return pd.DataFrame(), f"Erreur réseau Garmin : {e}"
+        return pd.DataFrame(), f"Erreur réseau Garmin : {md_escape(e)}"
     except Exception as e:
         logger.exception("Erreur inattendue dans safe_load_activities")
-        return pd.DataFrame(), f"Erreur inattendue : {e}"
+        return pd.DataFrame(), f"Erreur inattendue : {md_escape(e)}"
 
 
 # ---------------------------------------------------------------------------

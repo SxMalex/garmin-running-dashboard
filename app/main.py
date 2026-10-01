@@ -11,6 +11,7 @@ import os
 
 import streamlit as st
 
+from formatting import md_escape
 from garmin_client import (
     end_session,
     complete_mfa,
@@ -70,7 +71,7 @@ def login_page() -> None:
                     store_session(api)
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Code refusé : {e}")
+                    st.error(f"Code refusé : {md_escape(e)}")
             if st.button("↩️ Recommencer la connexion"):
                 del st.session_state["garmin_mfa_pending"]
                 st.rerun()
@@ -102,7 +103,7 @@ def login_page() -> None:
                             store_session(payload)
                             st.rerun()
                     except Exception as e:
-                        st.error(f"Connexion refusée : {e}")
+                        st.error(f"Connexion refusée : {md_escape(e)}")
 
         st.caption(
             "La session est mémorisée sur le serveur (tokens valides ~1 an) : "

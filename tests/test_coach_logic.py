@@ -450,7 +450,7 @@ class _PlansClient:
     def get_training_plans(self, strict=False, use_cache=None):
         return self.plans
 
-    def get_adaptive_plan(self, plan_id):
+    def get_adaptive_plan(self, plan_id, strict=False):
         self.detail_calls += 1
         return self.detail
 
@@ -494,7 +494,7 @@ class _FlakyPlansClient:
             raise self.answer
         return self.answer
 
-    def get_adaptive_plan(self, plan_id):
+    def get_adaptive_plan(self, plan_id, strict=False):
         return self.detail
 
 
@@ -520,6 +520,30 @@ def test_load_coach_context_plan_actif(plans_raw, plan_detail):
     from coach_logic import load_coach_context
     ctx = load_coach_context(_FlakyPlansClient(plans_raw, plan_detail), TODAY)
     assert ctx["plan"]["name"] == "Programme test"
+
+
+def test_load_coach_context_panne_du_detail_releve(plans_raw, plan_detail, tmp_path, monkeypatch):
+    """Revue #1 : le détail du plan actif lu en tolérant donnait {} → « Run Coach
+    actif sans séance », mis en cache 1 h (l'Accueil annonçait la logique interne)."""
+    import garmin_client as gcm
+    from coach_logic import load_coach_context
+    monkeypatch.setattr(gcm, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(gcm, "API_COOLDOWN_S", 0)
+
+    class Api:
+        fail = True
+        def get_training_plans(self):
+            return plans_raw
+        def get_adaptive_training_plan_by_id(self, plan_id):
+            if Api.fail:
+                raise RuntimeError("API Error 503")
+            return plan_detail
+
+    client = gcm.GarminClient(api=Api(), athlete_id=1)
+    with pytest.raises(RuntimeError, match="503"):
+        load_coach_context(client, TODAY)
+    Api.fail = False                                       # Garmin revient : rien n'était mis en cache
+    assert load_coach_context(client, TODAY)["plan"]["name"] == "Programme test"
 
 
 def test_coach_unknown_est_faux_mais_distinct_de_none():

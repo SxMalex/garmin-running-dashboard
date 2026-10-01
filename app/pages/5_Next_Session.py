@@ -553,10 +553,10 @@ with st.spinner("Génération du parcours en cours..."):
     try:
         route = _fetch_ors_route(profile, json.dumps(body, sort_keys=True), ors_key, target_dist_km)
     except requests.HTTPError as e:
-        st.error(f"Erreur ORS ({e.response.status_code}) : {e.response.text[:400]}")
+        st.error(f"Erreur ORS ({e.response.status_code}) : {md_escape(e.response.text[:400])}")
         route = None
     except Exception as e:
-        st.error(f"Erreur réseau : {e}")
+        st.error(f"Erreur réseau : {md_escape(e)}")
         route = None
 
 if route:

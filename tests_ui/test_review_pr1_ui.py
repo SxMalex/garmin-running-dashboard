@@ -50,3 +50,13 @@ def test_record_activity_name_keeps_plain_text_and_emoji(logged_in, fake_api):
     """Un nom ordinaire n'est pas altéré (pas d'antislash parasite hors Markdown)."""
     shown = _record_caption(logged_in, fake_api, "Sortie 🏃 matinale à Rennes")
     assert shown == f"Sortie 🏃 matinale à Rennes {_MARK}"
+
+
+def test_activity_name_is_escaped_in_plotly_hover(logged_in, fake_api):
+    """Plotly interprète le HTML du survol : un nom Garmin brut y devenait un lien."""
+    fake_api.activities[0]["activityName"] = '<a href="https://tiers.example">x</a>'
+    at = logged_in("1_Activities.py").run()
+    assert not at.exception, [e.value for e in at.exception]
+    specs = " ".join(c.proto.spec for c in at.get("plotly_chart"))
+    assert "tiers.example" in specs                       # le nom est bien dans un survol
+    assert "<a href" not in specs and "\\u003ca href" not in specs
