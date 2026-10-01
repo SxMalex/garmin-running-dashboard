@@ -1,9 +1,12 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import date, datetime
 
 import chart_theme
+import chart_theme as ct
+from forme_logic import TSB_FATIGUE, TSB_FRESH, tsb_metric_delta
+from ui_helpers import cache_nonce
 from next_session_logic import (
     THRESHOLD_SLIDER_MAX,
     THRESHOLD_SLIDER_MIN,
@@ -35,7 +38,11 @@ _TSS_CROSS_COLOR = chart_theme.rgba(chart_theme.MAGENTA, 0.30)
         )
     },
 )
-def _cached_pmc_series(activities_df: pd.DataFrame, threshold_sec: int) -> pd.DataFrame:
+def _cached_pmc_series(activities_df: pd.DataFrame, threshold_sec: int,
+                       today_iso: str, nonce: int) -> pd.DataFrame:
+    # `today_iso` : la série court jusqu'à aujourd'hui (elle doit s'allonger
+    # après minuit) ; `nonce` : invalidée par Actualiser comme le reste.
+    del today_iso, nonce
     return compute_pmc_series(activities_df, threshold_sec)
 
 
@@ -79,7 +86,8 @@ def render(activities_df: pd.DataFrame, cutoff: datetime) -> None:
             "tes courses — le curseur fait donc bouger les deux parts ensemble."
         )
 
-    pmc = _cached_pmc_series(activities_df, threshold_pace_sec)
+    pmc = _cached_pmc_series(activities_df, threshold_pace_sec,
+                             date.today().isoformat(), cache_nonce())
     if pmc.empty:
         st.info("Pas de données d'activité disponibles.")
         return
@@ -87,15 +95,8 @@ def render(activities_df: pd.DataFrame, cutoff: datetime) -> None:
     pmc_view = pmc[pmc["date"] >= pd.Timestamp(cutoff)].copy()
 
     last    = pmc.iloc[-1]
-    tsb_now = last["tsb"]
-    if tsb_now > 25:
-        tsb_status, tsb_color = "Sous-entraîné", "off"
-    elif tsb_now >= 5:
-        tsb_status, tsb_color = "Forme optimale ✓", "normal"
-    elif tsb_now >= -20:
-        tsb_status, tsb_color = "Charge normale", "off"
-    else:
-        tsb_status, tsb_color = "Sur-entraîné ⚠️", "inverse"
+    tsb_now = float(last["tsb"])
+    tsb_status, tsb_color = tsb_metric_delta(tsb_now)      # mêmes seuils que le haut de page
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("CTL — Forme",    f"{last['ctl']:.1f}", help="Charge chronique sur 42 jours (fitness)")
@@ -107,7 +108,7 @@ def render(activities_df: pd.DataFrame, cutoff: datetime) -> None:
     m4.metric(
         "TSS aujourd'hui", f"{last['tss']:.0f}",
         delta=f"dont {_cross_today:.0f} hors course" if _cross_today else None,
-        delta_color="off",
+        delta_color="off", delta_arrow="off",
         help="Training Stress Score du jour, course et autres sports confondus",
     )
 
@@ -149,33 +150,33 @@ def render(activities_df: pd.DataFrame, cutoff: datetime) -> None:
         ))
     fig.add_trace(go.Scatter(
         x=pmc_view["date"], y=pmc_view["tsb"].clip(lower=0),
-        fill="tozeroy", fillcolor="rgba(12,163,12,0.10)",
+        fill="tozeroy", fillcolor=ct.rgba(ct.GOOD, 0.10),
         line=dict(width=0), showlegend=False, hoverinfo="skip",
     ))
     fig.add_trace(go.Scatter(
         x=pmc_view["date"], y=pmc_view["tsb"].clip(upper=0),
-        fill="tozeroy", fillcolor="rgba(208,59,59,0.10)",
+        fill="tozeroy", fillcolor=ct.rgba(ct.CRITICAL, 0.10),
         line=dict(width=0), showlegend=False, hoverinfo="skip",
     ))
     fig.add_trace(go.Scatter(
         x=pmc_view["date"], y=pmc_view["ctl"],
         mode="lines", name="CTL — Forme",
-        line=dict(color="#3987e5", width=2.5),
+        line=dict(color=ct.BLUE, width=2.5),
         hovertemplate="<b>%{x|%d/%m/%Y}</b><br>CTL : %{y:.1f}<extra></extra>",
     ))
     fig.add_trace(go.Scatter(
         x=pmc_view["date"], y=pmc_view["atl"],
         mode="lines", name="ATL — Fatigue",
-        line=dict(color="#d95926", width=2),
+        line=dict(color=ct.ORANGE, width=2),
         hovertemplate="<b>%{x|%d/%m/%Y}</b><br>ATL : %{y:.1f}<extra></extra>",
     ))
     fig.add_trace(go.Scatter(
         x=pmc_view["date"], y=pmc_view["tsb"],
         mode="lines", name="TSB — Fraîcheur",
-        line=dict(color="#199e70", width=2, dash="dot"),
+        line=dict(color=ct.AQUA, width=2, dash="dot"),
         hovertemplate="<b>%{x|%d/%m/%Y}</b><br>TSB : %{y:.1f}<extra></extra>",
     ))
-    fig.add_hline(y=0, line_color="#3a3f4a", line_dash="dot")
+    fig.add_hline(y=0, line_color=ct.BASELINE, line_dash="dot")
 
     tss_max = pmc_view["tss"].max() if not pmc_view.empty else 100
     fig.update_layout(
@@ -183,17 +184,15 @@ def render(activities_df: pd.DataFrame, cutoff: datetime) -> None:
         barmode="stack",
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#c6c8ce"),
-        xaxis=dict(gridcolor="#232833"),
-        yaxis=dict(
-            gridcolor="#232833", title="CTL / ATL / TSB",
-            zeroline=True, zerolinecolor="#3a3f4a",
+        xaxis=dict(),
+        yaxis=dict( title="CTL / ATL / TSB",
+            zeroline=True, zerolinecolor=ct.BASELINE,
         ),
         yaxis2=dict(
             title="TSS journalier", overlaying="y", side="right",
             showgrid=False, range=[0, max(tss_max * 4, 100)],
-            tickfont=dict(color="rgba(57,135,229,0.5)"),
-            titlefont=dict(color="rgba(57,135,229,0.5)"),
+            tickfont=dict(color=ct.INK_MUTED),
+            titlefont=dict(color=ct.INK_MUTED),
         ),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         margin=dict(l=0, r=60, t=40, b=0),
@@ -202,8 +201,9 @@ def render(activities_df: pd.DataFrame, cutoff: datetime) -> None:
     st.plotly_chart(fig)
 
     st.markdown("#### Interprétation du TSB")
-    iz1, iz2, iz3, iz4 = st.columns(4)
-    iz1.info("**TSB > 25**\nTrop frais\nSous-entraîné")
-    iz2.success("**TSB 5 → 25**\nForme optimale\nIdéal compétition")
-    iz3.warning("**TSB −20 → 5**\nCharge normale\nPhase d'entraînement")
-    iz4.error("**TSB < −20**\nSur-entraîné\nRécupération requise")
+    # Mêmes seuils et libellés que la métrique (tsb_metric_delta) : une
+    # échelle à part donnait « Sous-entraîné » sous un « Bien reposé ».
+    iz1, iz2, iz3 = st.columns(3)
+    iz1.success(f"**TSB > {TSB_FRESH:+g}**\n{tsb_metric_delta(TSB_FRESH + 1)[0]}")
+    iz2.warning(f"**TSB {TSB_FATIGUE:+g} → {TSB_FRESH:+g}**\n{tsb_metric_delta(TSB_FATIGUE)[0]}")
+    iz3.error(f"**TSB < {TSB_FATIGUE:+g}**\n{tsb_metric_delta(TSB_FATIGUE - 1)[0]}")

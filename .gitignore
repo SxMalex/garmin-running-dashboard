@@ -1,15 +1,25 @@
 # Secrets et sessions
 .env
+.env.*
+!.env.example
 .garmin/
 .garminconnect/
 app/.garmin/
+garmin_tokens.json
+*.gpx
+*.fit
+goal.json*
 
 # Caches
 app/.cache/
+app/.data/
 __pycache__/
 *.pyc
 .pytest_cache/
 .coverage
+
+# Profil local (contient un identifiant Garmin réel)
+PROJECT_PROFILE.md
 
 # Environnements
 .venv/

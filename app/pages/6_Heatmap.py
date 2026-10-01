@@ -27,7 +27,6 @@ from heatmap_logic import (
 from ui_helpers import (
     cached_load_activities,
     get_garmin_client,
-    render_refresh_button,
     render_garmin_attribution,
     get_athlete_id,
     require_login,
@@ -126,7 +125,7 @@ def compute_heatmap(
 # ---------------------------------------------------------------------------
 # Chargement initial
 # ---------------------------------------------------------------------------
-st.title("🔥 Heatmap")
+st.title("Carte de tes sorties")
 st.caption(
     "Cartes de chaleur de tes courses : fréquence des passages, allure moyenne, "
     "FC moyenne, pente absolue et dénivelé signé."
@@ -180,7 +179,6 @@ with st.sidebar:
     gps_spread_min_m = st.slider("Exclure tapis (spread min m)", 0, 500, 200, 50)
     max_activities = st.slider("Activités max", 10, MAX_ACTIVITIES_LIMIT, 100, 10)
 
-    render_refresh_button("🔄 Actualiser")
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +347,17 @@ else:  # elev
 # Folium
 # ---------------------------------------------------------------------------
 m = folium.Map(location=centre, zoom_start=13, tiles=None, control_scale=True)
-folium.TileLayer("CartoDB.DarkMatterNoLabels", name="Basemap", control=False).add_to(m)
+# Fond SOMBRE voulu malgré le thème clair : les rampes de heatmap_logic montent
+# vers le clair (le passage le plus fréquent est presque blanc) et
+# disparaîtraient sur un fond clair. Esri Dark Gray : sans clé (le fond CartoDB
+# sombre affiche désormais « API KEY REQUIRED »).
+folium.TileLayer(
+    tiles="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/"
+          "World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+    # Attribution exigée par Esri (celle que renvoie le service lui-même).
+    attr="Esri, HERE, Garmin, &copy; OpenStreetMap contributors, and the GIS user community",
+    name="Basemap", control=False, max_zoom=16,
+).add_to(m)
 folium.raster_layers.ImageOverlay(
     image=image_uri,
     bounds=bounds,

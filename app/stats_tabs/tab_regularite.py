@@ -4,6 +4,8 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import date, timedelta
 
+import chart_theme
+
 
 def render(running_df: pd.DataFrame) -> None:
     st.subheader("Calendrier de régularité")
@@ -54,10 +56,9 @@ def render(running_df: pd.DataFrame) -> None:
             x_tickvals.append(col_idx)
             x_ticktext.append(m_start.strftime("%b"))
 
-    colorscale = [
-        [0.00, "#151b26"], [0.05, "#104281"], [0.25, "#1c5cab"],
-        [0.50, "#3987e5"], [0.75, "#6da7ec"], [1.00, "#9ec5f4"],
-    ]
+    # Le zéro se fond dans le papier, les grosses semaines foncent (une teinte).
+    colorscale = [[pos, c] for pos, c in zip((0.0, 0.05, 0.25, 0.5, 0.75, 1.0),
+                                              chart_theme.SEQ_SURFACE_SCALE)]
     max_km = float(full_year["distance_km"].max()) or 1.0
 
     fig_cal = go.Figure(go.Heatmap(
@@ -72,15 +73,14 @@ def render(running_df: pd.DataFrame) -> None:
         showscale=True,
         colorbar=dict(
             title="km", thickness=12, len=0.85,
-            tickfont=dict(color="#c6c8ce", size=10),
-            titlefont=dict(color="#c6c8ce"),
+            tickfont=dict(size=10),
+            titlefont=dict(),
         ),
     ))
     fig_cal.update_layout(
         height=210,
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#c6c8ce"),
         xaxis=dict(
             tickmode="array", tickvals=x_tickvals, ticktext=x_ticktext,
             tickfont=dict(size=11), showgrid=False, side="top",

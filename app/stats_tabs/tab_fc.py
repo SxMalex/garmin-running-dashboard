@@ -6,6 +6,8 @@ import plotly.express as px
 
 from stats_tabs._shared import add_trend_line
 
+import chart_theme as ct
+
 
 def render(running_filtered: pd.DataFrame, client, hr_zones: list) -> None:
     st.subheader("Analyse de la fréquence cardiaque")
@@ -27,8 +29,8 @@ def render(running_filtered: pd.DataFrame, client, hr_zones: list) -> None:
             y=hr_data["avgHR"],
             mode="markers+lines",
             name="FC moyenne",
-            line=dict(color="rgba(230,103,103,0.5)", width=1),
-            marker=dict(color="rgba(230,103,103,0.9)", size=6),
+            line=dict(color=ct.rgba(ct.HR, 0.5), width=1),
+            marker=dict(color=ct.rgba(ct.HR, 0.9), size=6),
             hovertemplate="<b>%{x|%d/%m/%Y}</b><br>FC : %{y:.0f} bpm<extra></extra>",
         ))
         if hr_data["maxHR"].notna().any():
@@ -38,7 +40,7 @@ def render(running_filtered: pd.DataFrame, client, hr_zones: list) -> None:
                 y=max_hr_data["maxHR"],
                 mode="markers",
                 name="FC max",
-                marker=dict(color="rgba(217,89,38,0.75)", size=5, symbol="triangle-up"),
+                marker=dict(color=ct.rgba(ct.HR_MAX, 0.75), size=5, symbol="triangle-up"),
                 hovertemplate="<b>%{x|%d/%m/%Y}</b><br>FC max : %{y:.0f} bpm<extra></extra>",
             ))
         fig_hr, _ = add_trend_line(
@@ -48,9 +50,8 @@ def render(running_filtered: pd.DataFrame, client, hr_zones: list) -> None:
             height=350,
             plot_bgcolor="rgba(0,0,0,0)",
             paper_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#c6c8ce"),
-            xaxis=dict(gridcolor="#232833"),
-            yaxis=dict(gridcolor="#232833", title="bpm"),
+            xaxis=dict(),
+            yaxis=dict(title="bpm"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
             margin=dict(l=0, r=0, t=30, b=0),
         )
@@ -65,7 +66,7 @@ def render(running_filtered: pd.DataFrame, client, hr_zones: list) -> None:
                 values=hr_zones_df["nb_activites"],
                 hole=0.4,
                 # ZONE_RAMP — rampe ordinale bleue validée (Z1 clair → Z5 foncé)
-                marker=dict(colors=["#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95"]),
+                marker=dict(colors=ct.ZONE_RAMP),
                 textinfo="label+percent",
                 textfont=dict(size=11),
             ))
@@ -73,7 +74,6 @@ def render(running_filtered: pd.DataFrame, client, hr_zones: list) -> None:
                 height=350,
                 plot_bgcolor="rgba(0,0,0,0)",
                 paper_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#c6c8ce"),
                 legend=dict(orientation="v", font=dict(size=10)),
                 margin=dict(l=0, r=0, t=10, b=0),
                 showlegend=True,
@@ -103,7 +103,7 @@ def render(running_filtered: pd.DataFrame, client, hr_zones: list) -> None:
             x="avgPace_sec",
             y="avgHR",
             color="distance_km",
-            color_continuous_scale=["#9ec5f4", "#3987e5", "#104281"],
+            color_continuous_scale=[ct.ZONE_RAMP[0], ct.ZONE_RAMP[2], ct.SEQ_COLORSCALE[-1][1]],
             labels={
                 "avgPace_sec": "Allure (sec/km)",
                 "avgHR": "FC moyenne (bpm)",
@@ -116,13 +116,11 @@ def render(running_filtered: pd.DataFrame, client, hr_zones: list) -> None:
             height=300,
             plot_bgcolor="rgba(0,0,0,0)",
             paper_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#c6c8ce"),
             xaxis=dict(
-                gridcolor="#232833",
                 title="Allure (sec/km) — valeur élevée = lent",
             ),
-            yaxis=dict(gridcolor="#232833"),
-            coloraxis_colorbar=dict(tickfont=dict(color="#c6c8ce")),
+            yaxis=dict(),
+            coloraxis_colorbar=dict(tickfont=dict()),
             margin=dict(l=0, r=0, t=10, b=0),
         )
         st.plotly_chart(fig_corr)

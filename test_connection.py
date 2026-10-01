@@ -6,6 +6,7 @@ fallback sur login complet sinon, callback MFA si requis, et dump des tokens
 sur disque après login réussi.
 """
 
+import getpass
 import os
 import sys
 from datetime import date
@@ -18,7 +19,10 @@ from garminconnect import (
     GarminConnectTooManyRequestsError,
 )
 
-DEFAULT_TOKENSTORE = "~/.garminconnect"
+# Tokenstore du serveur MCP — distinct de celui du dashboard (hors Docker, le
+# dashboard utilise ~/.garminconnect : les deux processus se disputeraient le
+# jeton de rafraîchissement).
+DEFAULT_TOKENSTORE = "~/.garminconnect-mcp"
 
 
 def main() -> int:
@@ -26,13 +30,21 @@ def main() -> int:
 
     email = os.environ.get("GARMIN_EMAIL")
     password = os.environ.get("GARMIN_PASSWORD")
-    tokenstore = os.environ.get("GARMIN_TOKENSTORE", DEFAULT_TOKENSTORE)
+    # Amorce la session du SERVEUR MCP : son tokenstore est distinct de celui du
+    # dashboard (deux processus sur un même jeton se l'invalideraient).
+    tokenstore = os.environ.get("GARMIN_TOKENSTORE_MCP") or DEFAULT_TOKENSTORE
 
+    # Le mot de passe peut (et devrait) rester hors de .env : il est demandé ici,
+    # une seule fois, puis les tokens suffisent (~1 an).
+    try:
+        if not email:
+            email = input("Email Garmin : ").strip()
+        if not password:
+            password = getpass.getpass("Mot de passe Garmin (non affiché) : ")
+    except (EOFError, KeyboardInterrupt):
+        email = password = ""
     if not email or not password:
-        print(
-            "Erreur : renseigne GARMIN_EMAIL et GARMIN_PASSWORD dans .env",
-            file=sys.stderr,
-        )
+        print("Erreur : email et mot de passe Garmin requis.", file=sys.stderr)
         return 2
 
     print(f"→ Connexion à Garmin Connect (tokenstore: {tokenstore})")

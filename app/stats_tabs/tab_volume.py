@@ -5,6 +5,8 @@ import plotly.graph_objects as go
 
 from stats_tabs._shared import WORKOUT_COLORS
 
+import chart_theme as ct
+
 
 def render(running_filtered: pd.DataFrame, client) -> None:
     st.subheader("Volume hebdomadaire et mensuel")
@@ -23,7 +25,7 @@ def render(running_filtered: pd.DataFrame, client) -> None:
                 x=weekly["week_label"],
                 y=weekly["km_total"],
                 name="km/semaine",
-                marker_color="rgba(57,135,229,0.85)",
+                marker_color=ct.rgba(ct.VOLUME, 0.85),
                 hovertemplate="<b>%{x}</b><br>%{y:.1f} km<br>%{customdata} sorties<extra></extra>",
                 customdata=weekly["nb_sorties"],
             ))
@@ -35,16 +37,15 @@ def render(running_filtered: pd.DataFrame, client) -> None:
                     y=weekly["rolling_avg"],
                     mode="lines",
                     name="Moy. mobile (4 sem.)",
-                    line=dict(color="rgba(201,133,0,0.95)", width=2),
+                    line=dict(color=ct.rgba(ct.YELLOW, 0.95), width=2),
                 ))
 
             fig_w.update_layout(
                 height=350,
                 plot_bgcolor="rgba(0,0,0,0)",
                 paper_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#c6c8ce"),
-                xaxis=dict(gridcolor="#232833", tickangle=-45),
-                yaxis=dict(gridcolor="#232833", title="km"),
+                xaxis=dict(tickangle=-45),
+                yaxis=dict(title="km"),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02),
                 margin=dict(l=0, r=0, t=30, b=60),
                 hovermode="x unified",
@@ -68,10 +69,9 @@ def render(running_filtered: pd.DataFrame, client) -> None:
                 x=monthly["month_label"],
                 y=monthly["km_total"],
                 name="km/mois",
-                marker_color=[
-                    f"rgba({int(100 + 155 * i / max(len(monthly)-1, 1))}, 156, 252, 0.8)"
-                    for i in range(len(monthly))
-                ],
+                # Le volume est bleu partout : la couleur suit l'entité, pas le
+                # rang du mois (l'ancien dégradé bleu→rose tombait à 1,7:1).
+                marker_color=ct.rgba(ct.VOLUME, 0.8),
                 hovertemplate="<b>%{x}</b><br>%{y:.1f} km<br>%{customdata} sorties<extra></extra>",
                 customdata=monthly["nb_sorties"],
                 text=monthly["km_total"].map("{:.0f}".format),
@@ -81,9 +81,8 @@ def render(running_filtered: pd.DataFrame, client) -> None:
                 height=350,
                 plot_bgcolor="rgba(0,0,0,0)",
                 paper_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#c6c8ce"),
-                xaxis=dict(gridcolor="#232833", tickangle=-30),
-                yaxis=dict(gridcolor="#232833", title="km"),
+                xaxis=dict(tickangle=-30),
+                yaxis=dict(title="km"),
                 margin=dict(l=0, r=0, t=30, b=60),
                 showlegend=False,
                 hovermode="x unified",
@@ -103,15 +102,14 @@ def render(running_filtered: pd.DataFrame, client) -> None:
         x="distance_km",
         nbins=20,
         labels={"distance_km": "Distance (km)", "count": "Nombre de sorties"},
-        color_discrete_sequence=["rgba(57,135,229,0.85)"],
+        color_discrete_sequence=[ct.rgba(ct.VOLUME, 0.85)],
     )
     fig_hist.update_layout(
         height=280,
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#c6c8ce"),
-        xaxis=dict(gridcolor="#232833"),
-        yaxis=dict(gridcolor="#232833", title="Sorties"),
+        xaxis=dict(),
+        yaxis=dict(title="Sorties"),
         margin=dict(l=0, r=0, t=10, b=0),
         showlegend=False,
     )
@@ -126,7 +124,7 @@ def render(running_filtered: pd.DataFrame, client) -> None:
     fig_types = go.Figure(go.Bar(
         x=type_stats["workoutLabel"],
         y=type_stats["km"],
-        marker_color=[WORKOUT_COLORS.get(t, "#3987e5") for t in type_stats["workoutLabel"]],
+        marker_color=[WORKOUT_COLORS.get(t, ct.BLUE) for t in type_stats["workoutLabel"]],
         text=type_stats["km"].map("{:.0f} km".format),
         textposition="outside",
         hovertemplate="<b>%{x}</b><br>%{y:.0f} km · %{customdata} sorties<extra></extra>",
@@ -136,9 +134,8 @@ def render(running_filtered: pd.DataFrame, client) -> None:
         height=260,
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#c6c8ce"),
-        xaxis=dict(gridcolor="#232833"),
-        yaxis=dict(gridcolor="#232833", title="km"),
+        xaxis=dict(),
+        yaxis=dict(title="km"),
         margin=dict(l=0, r=0, t=30, b=0),
         showlegend=False,
     )

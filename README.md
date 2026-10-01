@@ -1,9 +1,21 @@
 # 🏃 Garmin Running Dashboard
 
 Tableau de bord pour l'analyse de tes données de course à pied.
-Se connecte à **Garmin Connect** (lib non officielle `garminconnect`), génère des
-**parcours inédits** via OpenRouteService, et produit des **prompts d'analyse IA**
-prêts à coller dans Claude, ChatGPT ou Gemini.
+Se connecte à **Garmin Connect** (lib non officielle `garminconnect`), prépare un
+**plan course + renforcement** vers ta prochaine course (envoyé à ta montre sur
+confirmation), repère ce que les graphiques cachent (**dérive cardiaque**, **FC
+optique calée sur la cadence**), génère des **parcours inédits** via
+OpenRouteService, et se branche sur **Claude** (Claude Desktop / Claude Code, via
+MCP) pour discuter de ton entraînement.
+
+🔒 **Auto-hébergé** : tes données de santé sont stockées chez toi (cache, plan,
+jetons). Quelques flux partent quand même vers des tiers, listés dans
+[« Données et services tiers »](#-données-et-services-tiers) — lis-la avant d'héberger
+l'outil pour quelqu'un d'autre.
+
+> Garmin®, Garmin Connect™ et Run Coach sont des marques de Garmin Ltd. ou de ses
+> filiales ; Strava est une marque de Strava, Inc. Ce projet n'est **ni affilié, ni
+> approuvé** par Garmin ou Strava.
 
 Portage Garmin du projet `run` (ex-Strava) : même architecture (Streamlit multipage,
 logique pure testée, cache à deux niveaux, Docker + Caddy), mais **mono-utilisateur** —
@@ -13,12 +25,25 @@ l'API Garmin non officielle s'authentifie par identifiants, pas par OAuth multi-
 
 ## Fonctionnalités
 
-- **Accueil** — cockpit du jour : sommeil, HRV, Body Battery, FC repos, verdict de
-  forme, métriques semaine/mois, **séance du coach Garmin** (la même que sur
-  Prochaine sortie), dernière sortie en résumé, kilométrage des chaussures
-  (gear Garmin)
-- **Activités** — liste filtrée par date, type et distance ; détail complet avec
-  laps, streams (altitude / allure / FC) et carte GPS
+- **Navigation en 4 pôles** — Aujourd'hui / Entraînement / Progrès / Objectif,
+  une question par pôle ; en-tête commun (Light/Pro, Actualiser, Compte,
+  Prompt coach IA) et, sur téléphone, barre d'onglets en bas. Thème clair
+  « Piste claire » (papier, encre, accent volt), polices servies localement
+- **Accueil** — cockpit du jour : **séance du jour** (Run Coach, sinon plan
+  Objectif validé, sinon calculée — la même que sur Prochaine sortie) avec son
+  pourquoi, jauge de fraîcheur, récupération de la nuit (sommeil, HRV, Body
+  Battery, FC repos), la semaine en 7 cases (fait / prévu), des **signaux** tirés
+  des données (charge ACWR, monotonie, efficacité aérobie sur 90 j, usure des
+  chaussures) et la dernière sortie en résumé
+- **Activités** — un **explorateur** : choisis un indicateur (intensité en % de
+  ton allure seuil, FC, allure, charge, calories, distance, cadence, dénivelé),
+  chaque sortie est un point coloré par zone d'intensité, **clique-le** pour
+  l'ouvrir ; la **répartition de l'intensité** semaine par semaine (le repère
+  80/20 facile/dur, et l'alerte « zone grise ») ; la liste enrichie (barres
+  d'intensité, de distance, de charge). Détail complet d'une sortie avec
+  laps, streams (altitude / allure / FC), carte GPS, et **qualité du signal** :
+  détection de la FC optique calée sur la cadence (faux relevés du capteur au
+  poignet) et **dérive cardiaque** (Pa:HR) de la sortie
 - **Statistiques** — 5 onglets : volume, allure, FC (zones réelles du profil Garmin),
   cadence, régularité
 - **Forme & Récup** — charge d'entraînement (CTL/ATL/TSB) calculée sur **toutes
@@ -26,8 +51,12 @@ l'API Garmin non officielle s'authentifie par identifiants, pas par OAuth multi-
   Garmin), croisée avec la récupération (HRV vs baseline, sommeil, Body Battery,
   FC repos, stress) et **verdict du jour** (prêt à performer / normal / lève le
   pied)
-- **Progression** — records personnels Garmin, prédictions de course natives
-  (+ Riegel) avec historique d'évolution, courbe de VO2max
+- **Progression** — prédictions de course (5 km, 10 km, semi, marathon) en 4
+  graphes ou superposées en % de progression, avec une **projection à 30 et 90
+  jours** si tu continues comme ces 8 dernières semaines ; **VO2max** et sa
+  projection de 1 à 6 mois (tendance robuste, gains amortis, plafonnée,
+  bande d'incertitude — une estimation, pas une promesse) ; records personnels,
+  **efficacité aérobie** (vitesse ÷ FC, tendance) et dérive des sorties longues
 - **Prochaine sortie** — la séance du **plan Garmin Run Coach** (nom, cibles,
   durée, phase du plan, programme de la semaine avec renfo et repos imposés), un
   avertissement quand le coach programme une séance intense sur une récupération
@@ -35,11 +64,22 @@ l'API Garmin non officielle s'authentifie par identifiants, pas par OAuth multi-
   actif, repli sur la recommandation calculée depuis la charge (TSB) et **modulée
   par la récupération** (HRV/sommeil dégradés → séance rétrogradée)
 - **Heatmap** — cartes de chaleur des courses (fréquence, allure, FC, pente,
-  dénivelé signé) sur fond CartoDB sombre
+  dénivelé signé) sur fond sombre Esri
 - **IA Coach** — deux prompts prêts à coller dans n'importe quel LLM :
   **analyse d'entraînement** (sorties, charge, HRV, sommeil, records, prédictions)
   et **idées de repas** (séances des prochains jours issues du plan Garmin,
   dépense énergétique sur 7 jours, contraintes alimentaires saisies)
+- **Objectif** — une course datée (5 km → marathon, temps visé optionnel) →
+  plan périodisé **course + renforcement** (base, développement, spécifique,
+  affûtage), allures tirées de ta forme récente, chaque séance avec son
+  **pourquoi** et ses sources. Une fois validé, le plan est figé ; les séances des
+  14 prochains jours s'envoient dans le **calendrier Garmin** (sur confirmation,
+  retirables). Si un plan Garmin Run Coach est actif, il reste la référence et
+  l'envoi est bloqué
+- **Modes Light / Pro** (en-tête) — Light explique les indicateurs techniques (TSB,
+  HRV, dérive, VO2max…) et pourquoi il compte ; Pro affiche les chiffres bruts
+  (ACWR, monotonie de Foster — l'Accueil en tire des signaux en clair dans les deux
+  modes) et permet de régler les seuils des analyses
 - **Comparatif annuel** — l'année en cours superposée aux précédentes sur un axe
   « jour de l'année » : charge (CTL/ATL/TSB), volume cumulé (km, D+, heures),
   physiologie (VO2max, FC repos, prédictions) et récupération (sommeil, HRV),
@@ -50,11 +90,11 @@ l'API Garmin non officielle s'authentifie par identifiants, pas par OAuth multi-
 
 | | Strava (`run`) | Garmin (`gar`) |
 |---|---|---|
-| Authentification | OAuth multi-user, token en session | Identifiants + tokens garth persistés (~1 an), mono-user |
+| Authentification | OAuth multi-user, token en session | Identifiants + tokens persistés (~1 an), mono-user |
 | Segments / KOM | ✅ page Segments | ❌ pas d'équivalent API Garmin |
 | Prédictions de course | Formule de Riegel | **Natives Garmin** + Riegel |
 | Zones FC | Configurées dans Strava | Réelles du profil Garmin (par sport) |
-| Santé (sommeil, Body Battery, readiness) | ❌ | ✅ page dédiée |
+| Santé (sommeil, Body Battery, HRV) | ❌ | ✅ page Forme & Récup |
 | Cadence | RPM à doubler | Directement en pas/min |
 | Calories | Souvent absentes (estimation) | Fiables (montre) |
 
@@ -72,11 +112,14 @@ utilisateur**. Quelques points à connaître avant de l'installer :
 - **La bibliothèque `garminconnect` n'est pas officielle.** Elle rejoue l'API
   interne de Garmin Connect. Garmin peut la casser sans préavis, renvoyer des
   `429 Too Many Requests` en cas d'appels trop fréquents, et rien ne garantit
-  contractuellement que l'usage soit toléré. Tu utilises tes propres identifiants,
-  à tes risques.
-- **Ton mot de passe Garmin est stocké en clair** dans le fichier `.env` (il n'est
-  utilisé qu'au premier login : ensuite ce sont les tokens garth). Garde ce fichier
-  hors de tout dépôt — il est dans `.gitignore`.
+  contractuellement que l'usage soit toléré : les conditions d'utilisation de
+  Garmin interdisent l'accès automatisé hors de leurs API officielles, et un compte
+  peut être bloqué. Tu utilises tes propres identifiants, à tes risques.
+- **Ton mot de passe Garmin n'a pas besoin d'être dans `.env`** : le dashboard le
+  demande dans son formulaire et ne lit jamais `GARMIN_PASSWORD` ;
+  `test_connection.py` le demande aussi s'il est absent. Si tu l'y mets quand
+  même, il est en clair : garde `.env` hors de tout dépôt (il est dans
+  `.gitignore`). Ensuite, ce sont les tokens qui servent (~1 an).
 - **L'application n'a aucune authentification propre** : quiconque atteint le port
   voit tes données Garmin. C'est pourquoi la stack de dev publie le port sur
   `127.0.0.1:8501` uniquement — le dashboard n'est joignable que **depuis la machine
@@ -134,14 +177,19 @@ accessible uniquement depuis cette machine.
 
 ### 3. Se connecter à Garmin
 
-Ouvre **[http://localhost:8501](http://localhost:8501)**. Si `GARMIN_EMAIL` /
-`GARMIN_PASSWORD` sont dans `.env`, le formulaire est pré-rempli — clique sur
-**« Se connecter à Garmin »**. Si ton compte a le MFA activé, un champ apparaît
+Ouvre **[http://localhost:8501](http://localhost:8501)**, saisis ton mot de passe Garmin (l'email est pré-rempli si `GARMIN_EMAIL` est
+dans `.env`) et clique sur **« Se connecter à Garmin »**. Le dashboard n'utilise
+jamais `GARMIN_PASSWORD` : les tokens obtenus tiennent ~1 an. Si ton compte a le MFA activé, un champ apparaît
 pour saisir le code reçu par email.
 
-Les tokens garth sont ensuite persistés dans `app/.garmin/` (dev) ou le volume
+Les tokens sont ensuite persistés dans `app/.garmin/` (dev) ou le volume
 `garmin_tokens` (prod) : les démarrages suivants se connectent **automatiquement**,
 sans mot de passe ni MFA, pendant environ un an.
+
+> **Mise à jour depuis une version précédente** : `garminconnect` 0.3.6 ne lit plus que
+> `garmin_tokens.json`. Les anciens jetons garth (`oauth1_token.json`, `oauth2_token.json`,
+> dont le secret OAuth1 longue durée) sont ignorés et supprimés dès le premier démarrage :
+> il faut se reconnecter une fois (mot de passe et code MFA).
 
 ### 4. (Optionnel) Accès depuis un autre appareil
 
@@ -153,8 +201,15 @@ ports:
 ```
 
 Pour ouvrir le dashboard au **réseau local** (consulter depuis ton téléphone, par
-exemple), remplace cette ligne par `- "8501:8501"` et relance
-`docker compose up -d`. Mesure les conséquences avant : l'app n'ayant aucune
+exemple), remplace cette ligne par `- "8501:8501"`, ajoute l'IP de la machine à la
+liste des hôtes acceptés (protection contre le DNS rebinding, sinon la page reste
+bloquée au chargement) puis relance `docker compose up -d` :
+
+```yaml
+environment:
+  STREAMLIT_SERVER_ALLOWED_HOSTS: "localhost,127.0.0.1,192.168.1.20"   # ← ton IP
+```
+ Mesure les conséquences avant : l'app n'ayant aucune
 authentification, **tout appareil du réseau** — y compris sur un wifi partagé,
 au bureau ou en coworking — pourra lire l'intégralité de tes données Garmin en
 ouvrant `http://<ip-de-la-machine>:8501`.
@@ -176,13 +231,16 @@ protection d'accès — l'authentification basique de Caddy, un tunnel VPN
 Identique au projet `run` : Caddy en frontal HTTPS (Let's Encrypt auto).
 
 ```bash
-# .env : compléter PUBLIC_DOMAIN, ACME_EMAIL, STREAMLIT_BROWSER_SERVER_ADDRESS
+# .env : compléter PUBLIC_DOMAIN, ACME_EMAIL, STREAMLIT_BROWSER_SERVER_ADDRESS,
+#        BASIC_AUTH_USER et BASIC_AUTH_HASH (entre quotes simples)
+docker run --rm caddy:2-alpine caddy hash-password --plaintext 'mon-mot-de-passe'
 docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-⚠️ L'app étant **mono-utilisateur** et l'authentification simple, ne pas exposer
-publiquement sans protection supplémentaire (auth basique Caddy, VPN, Tailscale…) :
-quiconque accède à l'URL voit tes données une fois la session serveur connectée.
+🔒 L'app n'a pas d'authentification propre et reprend la session Garmin du
+serveur : **Caddy impose une authentification basique** (`BASIC_AUTH_USER` /
+`BASIC_AUTH_HASH`). Sans ces variables, `docker compose` refuse de démarrer —
+c'est voulu. Un VPN (WireGuard, Tailscale) reste une bonne protection en plus.
 
 ---
 
@@ -198,10 +256,13 @@ docker compose exec app rm -rf /app/.cache   # vider le cache disque
 # ── Tests (hors Docker, venv local) ──────────────────────────────────
 # Créer le venv une fois :
 python3 -m venv .venv
-.venv/bin/pip install -r app/requirements.txt -r requirements.txt pytest
+.venv/bin/pip install -r app/requirements.txt -r requirements.txt pytest playwright
+.venv/bin/playwright install chromium   # optionnel : sinon le Chrome du système sert
 
-# Puis :
-.venv/bin/python -m pytest tests/ -v
+# Puis — trois suites, à lancer séparément (tests/ remplace streamlit par un mock) :
+.venv/bin/python -m pytest tests/ -v          # logique pure
+.venv/bin/python -m pytest tests_ui/ -q       # pages rendues en headless (AppTest, faux Garmin)
+.venv/bin/python -m pytest tests_e2e/ -q      # vrai navigateur : clics, CSS, mobile (Playwright)
 
 # ── Test de connexion CLI ────────────────────────────────────────────
 .venv/bin/python test_connection.py
@@ -211,7 +272,7 @@ docker compose -f docker-compose.prod.yml up -d --build
 docker compose -f docker-compose.prod.yml logs -f app
 ```
 
-Pour se déconnecter : bouton **« Déconnexion »** dans la barre latérale
+Pour se déconnecter : menu **« Compte » → « Déconnexion »** dans l'en-tête
 (supprime le tokenstore).
 
 ---
@@ -221,14 +282,21 @@ Pour se déconnecter : bouton **« Déconnexion »** dans la barre latérale
 | Variable | Défaut | Description |
 |---|---|---|
 | `GARMIN_EMAIL` | — | Email du compte Garmin (pré-remplit le formulaire) |
-| `GARMIN_PASSWORD` | — | Mot de passe (jamais stocké, sert au premier login) |
-| `GARMIN_TOKENSTORE` | `/app/.garmin` (Docker) ou `~/.garminconnect` | Dossier des tokens garth |
+| `GARMIN_PASSWORD` | — | Utilisé seulement par `test_connection.py` et le serveur MCP (jamais par le dashboard) |
+| `GARMIN_TOKENSTORE` | `/app/.garmin` (Docker) ou `~/.garminconnect` | Dossier des tokens du dashboard |
 | `CACHE_DIR` | `/app/.cache` (Docker) ou `~/.cache/garmin-dashboard` | Cache disque des appels API |
 | `CACHE_TTL` | `3600` | Durée du cache disque en secondes |
+| `STREAMS_CACHE_TTL` | `2592000` (30 j) | Durée du cache des streams d'activité (conservés par « Actualiser ») |
 | `ORS_API_KEY` | — | Clé OpenRouteService (page Prochaine sortie) |
 | `PUBLIC_DOMAIN` | — | *(prod)* Domaine servi par Caddy |
 | `ACME_EMAIL` | — | *(prod)* Email Let's Encrypt |
 | `STREAMLIT_BROWSER_SERVER_ADDRESS` | `localhost` | *(prod)* Hostname annoncé au navigateur |
+| `BASIC_AUTH_USER` | — | *(prod, obligatoire)* Identifiant de l'authentification Caddy |
+| `BASIC_AUTH_HASH` | — | *(prod, obligatoire)* Hash bcrypt (`caddy hash-password`), entre quotes simples |
+| `GARMIN_WRITE_ENABLED` | `false` (`true` dans `docker-compose.yml`) | Autorise l'envoi de séances dans le calendrier Garmin (page Objectif). Activé en dev car le port n'écoute que sur 127.0.0.1 ; à n'activer en prod que derrière l'authentification |
+| `DATA_DIR` | `/app/.data` (Docker) ou `~/.local/share/garmin-dashboard` | Objectif, plan validé et journal des séances envoyées (à sauvegarder : volume `app_data` en prod) |
+| `GARMIN_TOKENSTORE_MCP` | `~/.garminconnect-mcp` | Tokens du serveur MCP (volontairement distincts de ceux du dashboard) |
+| `TZ` | `Europe/Paris` (compose) | Fuseau de « aujourd'hui » (titre, séance du jour) ; le conteneur serait sinon en UTC |
 
 ---
 
@@ -242,7 +310,14 @@ gar/
 ├── .env.example                # Template de configuration
 ├── pytest.ini                  # Configuration des tests (pythonpath = app)
 ├── test_connection.py          # Test CLI de connexion Garmin
-├── garmin_mcp/                 # Serveur MCP Garmin (indépendant du dashboard)
+├── .mcp.json                   # Déclaration du serveur MCP pour Claude Code
+├── garmin_mcp/
+│   ├── server.py                 # Serveur MCP (stdio), liste blanche de lecture
+│   └── insights.py               # Outils « raisonnement » (réutilisent app/)
+├── tests_ui/                   # Pages rendues en headless (AppTest + faux Garmin)
+├── tests_e2e/                  # Vrai navigateur (Playwright) contre le dashboard de démo
+│   ├── demo_server.py            # Lance le dashboard sur le faux Garmin (aucune donnée réelle)
+│   └── test_navigation.py        # Pôles, sous-pages, Light/Pro, Actualiser, barre mobile
 ├── tests/
 │   ├── conftest.py               # Fixtures pytest et stubs Streamlit/Plotly
 │   ├── test_garmin_client.py     # Transformations Garmin, cache, erreurs
@@ -251,24 +326,40 @@ gar/
 │   ├── test_comparatif_logic.py  # Alignement des années, cumuls, instantanés
 │   ├── test_coach_logic.py       # Plan Garmin Run Coach, cibles, fusion reco
 │   ├── test_formatting.py        # decimate, map_zoom
-│   ├── test_next_session.py      # Logique TSB / recommandation / GPX
+│   ├── test_next_session.py      # Logique TSB / recommandation / GPX / ACWR
+│   ├── test_physio_logic.py      # FC calée sur la cadence, dérive, efficacité
+│   ├── test_race_plan_logic.py   # Générateur de plan (phases, charge, renfo)
+│   ├── test_workout_export.py    # Export Garmin, garde d'envoi, journal
+│   ├── test_glossary.py          # Glossaire du mode Light
+│   ├── test_mcp.py               # Outils MCP, liste blanche
 │   └── test_heatmap_logic.py     # Haversine, detect_home, rasterize, normalize
 └── app/
     ├── Dockerfile              # Image Docker (Python 3.12-slim, user non-root)
     ├── requirements.txt        # Dépendances Python
-    ├── main.py                 # Accueil (cockpit du jour) + login Garmin (MFA)
+    ├── main.py                 # Routeur st.navigation + login Garmin (MFA)
+    ├── nav.py                  # 4 pôles, en-tête, barre d'onglets mobile
+    ├── ui_theme.py             # Thème « Piste claire » : CSS, cartes, jauge, semaine
+    ├── home_logic.py           # Logique pure : semaine en 7 cases, signaux de l'Accueil
     ├── garmin_client.py        # Client Garmin + cache + transformations
-    ├── chart_theme.py          # Palette validée + template Plotly gar_dark
+    ├── chart_theme.py          # Palette validée + template Plotly gar
     ├── next_session_logic.py   # Logique pure : TSB, recommandation, GPX
     ├── forme_logic.py          # Logique pure : verdict forme, rétrogradation
     ├── progression_logic.py    # Logique pure : records, Riegel, prédictions
     ├── comparatif_logic.py     # Logique pure : alignement des années, cumuls
     ├── coach_logic.py          # Logique pure : plan Garmin Run Coach, cibles
+    ├── physio_logic.py         # Logique pure : lock FC/cadence, dérive, efficacité
+    ├── race_plan_logic.py      # Logique pure : plan vers un objectif (course + renfo)
+    ├── workout_export.py       # Logique pure : séances → workouts Garmin, garde d'envoi
+    ├── goal_store.py           # Objectif, plan validé, journal (JSON, DATA_DIR)
+    ├── glossary.py             # Textes pédagogiques du mode Light
+    ├── ui_mode.py              # Bascule Light / Pro, réglages Pro
+    ├── physio_ui.py            # Rendus qualité du signal / efficacité
     ├── heatmap_logic.py        # Logique pure : rasterize, blur, normalize
     ├── formatting.py           # Logique pure : pace, types d'activité
     ├── ui_helpers.py           # require_login(), get_garmin_client(), carte
     ├── stats_tabs/             # Onglets de Statistiques (+ charge sur Forme)
     └── pages/
+        ├── 0_Accueil.py        # Cockpit du jour (séance, fraîcheur, semaine, signaux)
         ├── 1_Activities.py     # Liste et détails des activités
         ├── 2_Stats.py          # Volume, allure, FC, cadence, régularité
         ├── 3_Forme.py          # Charge × récupération + verdict du jour
@@ -276,7 +367,8 @@ gar/
         ├── 5_Next_Session.py   # Séance du coach Garmin + parcours ORS
         ├── 6_Heatmap.py        # Heatmaps multi-calques (Folium)
         ├── 7_AI_Coach.py       # Prompts LLM avec contexte complet
-        └── 8_Comparatif.py     # Années superposées (charge, volume, physio, récup)
+        ├── 8_Comparatif.py     # Années superposées (charge, volume, physio, récup)
+        └── 9_Objectif.py       # Objectif de course → plan → envoi au calendrier
 ```
 
 ---
@@ -297,6 +389,12 @@ _cache_get(athlete_id, key) (fichier JSON sur disque, TTL 1h)
       ▼
 API Garmin Connect (réseau, cooldown 0.4 s après chaque appel réel)
 ```
+
+Les **streams** d'activité (FC, allure, cadence… point par point) ont leur
+propre dossier `streams/` et un TTL long (`STREAMS_CACHE_TTL`, 30 jours) : une
+sortie passée ne change plus, et la page Progression en analyse jusqu'à 12.
+Le bouton « Actualiser » vide tout le reste mais **conserve les streams**
+(il n'en purge que les expirés).
 
 Le cooldown évite le ban temporaire que Garmin applique aux clients trop agressifs.
 
@@ -361,7 +459,7 @@ dernier compte vraiment, car chaque activité retenue coûte un fetch de streams
 
 | Couche | Fichier(s) | Rôle |
 |---|---|---|
-| Données | `garmin_client.py` | Fetch API, cache disque, auth garth, transformations |
+| Données | `garmin_client.py` | Fetch API, cache disque, auth (tokens), transformations |
 | Logique métier | `next_session_logic.py`, `heatmap_logic.py`, `comparatif_logic.py`, `coach_logic.py`, `formatting.py` | Calculs purs, testables sans Streamlit |
 | UI helpers | `ui_helpers.py` | `require_login()`, `get_garmin_client()`, rendu carte |
 | UI | `main.py` + `pages/` + `stats_tabs/` | Affichage uniquement |
@@ -429,6 +527,49 @@ disponibles au lieu de tomber en erreur.
 
 ---
 
+## 🤖 Discuter avec Claude (licence Pro / Max)
+
+Un abonnement claude.ai ne se branche pas dans une application tierce : on
+l'utilise via **Claude Code** ou **Claude Desktop**, qui lancent le serveur MCP du
+projet sur ta machine. Claude lit alors tes métriques **calculées** par le
+dashboard — fraîcheur, séance du jour, dérive cardiaque, plan vers ton objectif —
+et tu en discutes (« pourquoi je stagne ? », « mon plan est-il trop chargé ? »).
+
+Outils exposés : `daily_briefing`, `training_load`, `activity_analysis`,
+`aerobic_trend`, `race_plan_preview`, `current_goal`, plus l'accès en lecture aux
+~100 méthodes de lecture de `garminconnect` (`garmin_call`). **Lecture seule** (liste
+blanche `get_*` / `count_*` / `download_*`) : envoyer des séances à la montre se
+fait uniquement depuis la page Objectif, sur confirmation.
+
+1. Amorcer la session du serveur (une fois) : le script demande email, mot de
+   passe (s'ils ne sont pas dans `.env`) et code MFA, puis enregistre les tokens
+   dans `~/.garminconnect-mcp` :
+   `uv run --no-project --with-requirements requirements.txt python test_connection.py`
+2. **Claude Code** : ouvre le dossier du projet, le fichier `.mcp.json` déclare
+   le serveur (`uv` requis). Vérifie avec `/mcp`.
+3. **Claude Desktop** : ajoute dans `claude_desktop_config.json` :
+   ```json
+   { "mcpServers": { "garmin": {
+       "command": "uv",
+       "args": ["run", "--no-project", "--with-requirements",
+                "/chemin/vers/garmin-running-dashboard/requirements.txt",
+                "python", "/chemin/vers/garmin-running-dashboard/garmin_mcp/server.py"]
+   } } }
+   ```
+
+Les analyses du MCP utilisent les seuils par défaut : les réglages du mode Pro
+(propres à ta session du dashboard) ne s'y appliquent pas.
+
+> **Mise à jour depuis une version précédente** : le serveur MCP utilisait
+> `~/.garminconnect`. Relance une fois `test_connection.py` (ou renomme le dossier
+> en `~/.garminconnect-mcp`) pour lui recréer sa session.
+
+Le serveur lit l'objectif enregistré par le dashboard de dev (`app/.data`) mais
+garde ses propres tokens (`~/.garminconnect-mcp`) : deux processus qui partagent un
+jeton de rafraîchissement se l'invalideraient mutuellement.
+
+---
+
 ## Dépannage
 
 **L'application ne démarre pas**
@@ -456,6 +597,48 @@ docker compose logs app
 
 ---
 
+## 🔐 Données et services tiers
+
+**Ce qui reste chez toi** (données de santé : FC, HRV, sommeil, GPS, dont la zone
+de ton domicile) :
+
+| Donnée | Docker | Hors Docker |
+|---|---|---|
+| Cache des réponses Garmin et des streams | volume `app_cache` (`/app/.cache`) | `~/.cache/garmin-dashboard` (ou `CACHE_DIR`) |
+| Objectif, plan validé, journal des envois | volume `app_data` (`/app/.data`) | `~/.local/share/garmin-dashboard` (ou `DATA_DIR`) |
+| Jetons Garmin du dashboard | volume `garmin_tokens` (`/app/.garmin`) | `~/.garminconnect` (ou `GARMIN_TOKENSTORE`) |
+| Jetons Garmin du serveur MCP | — | `~/.garminconnect-mcp` (ou `GARMIN_TOKENSTORE_MCP`) |
+
+**Ce qui part vers des tiers :**
+
+- **Garmin Connect** : toutes les lectures, et l'envoi de séances au calendrier
+  (page Objectif, sur confirmation).
+- **Tuiles de carte** : OpenStreetMap (cartes des sorties, parcours) et Esri (page
+  Carte). Ces serveurs voient ton IP et les zones affichées, donc la région de tes
+  sorties.
+- **CDN de Folium** (page Carte) : Leaflet, jQuery, Bootstrap… chargés depuis
+  jsdelivr / cdnjs.
+- **OpenRouteService** (page Prochaine sortie, si une clé est configurée) : le point
+  de départ du parcours, souvent ton domicile. L'appel est mis en cache une heure.
+- **Claude (Anthropic)**, si tu branches le serveur MCP : les métriques que Claude
+  demande pendant la conversation.
+- **Le LLM de ton choix**, si tu colles un prompt de la page Coach IA : le contexte
+  affiché dans le prompt.
+
+**Tout effacer :**
+
+```bash
+docker compose down -v                                   # dev : cache, plan, jetons
+docker compose -f docker-compose.prod.yml down -v        # prod (+ certificats Caddy)
+rm -rf ~/.garminconnect-mcp                              # jetons du serveur MCP
+rm -rf ~/.cache/garmin-dashboard ~/.local/share/garmin-dashboard ~/.garminconnect  # hors Docker
+```
+
+Si tu héberges l'outil **pour quelqu'un d'autre**, ce sont des données de santé
+(article 9 du RGPD) : tu en deviens responsable de traitement.
+
+---
+
 ## Licence
 
 **Aucune licence n'est attachée à ce dépôt.** Le code reste donc, par défaut,
@@ -466,7 +649,6 @@ autre chose.
 
 Le projet s'appuie sur des bibliothèques open-source :
 [python-garminconnect](https://github.com/cyberjunky/python-garminconnect),
-[garth](https://github.com/matin/garth),
 [Streamlit](https://streamlit.io),
 [OpenRouteService](https://openrouteservice.org),
 [Plotly](https://plotly.com),

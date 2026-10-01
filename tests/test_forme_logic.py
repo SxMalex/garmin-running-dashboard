@@ -121,3 +121,56 @@ class TestRecommendSessionDowngrade:
         from next_session_logic import recommend_session
         rec = recommend_session(make_running_df(n=10, days_apart=3))
         assert rec["downgraded_from"] is None
+
+
+# ---------------------------------------------------------------------------
+# parse_recovery — lecture unique des payloads HRV / sommeil / stats
+# ---------------------------------------------------------------------------
+
+def test_parse_recovery_dicts_and_lists():
+    from forme_logic import parse_recovery
+    r = parse_recovery(
+        [{"hrvSummary": {"status": "BALANCED", "lastNightAvg": 52}}],
+        {"dailySleepDTO": {"sleepTimeSeconds": 27000, "sleepScores": {"overall": {"value": 81}}}},
+        [{"restingHeartRate": 48}],
+    )
+    assert (r["hrv_status"], r["hrv_last"], r["sleep_sec"], r["sleep_score"]) == ("BALANCED", 52, 27000, 81)
+    assert r["daily"]["restingHeartRate"] == 48
+
+
+def test_parse_recovery_empty_or_garbage():
+    from forme_logic import parse_recovery
+    for raw in (None, {}, [], "x", [None]):
+        r = parse_recovery(raw, raw, raw)
+        assert r["hrv_status"] is None and r["sleep_score"] is None and r["daily"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Statut HRV « NONE » (données réelles, septembre 2026)
+# ---------------------------------------------------------------------------
+def test_hrv_none_status_is_no_status():
+    """Garmin renvoie "NONE" sans baseline : ce n'est pas « HRV dans ta baseline »."""
+    from forme_logic import parse_recovery
+    rec = parse_recovery({"hrvSummary": {"status": "NONE", "lastNightAvg": 50}}, {})
+    assert rec["hrv_status"] is None and rec["hrv_last"] == 50
+    v = compute_forme_verdict(tsb=-5.0, hrv_status=rec["hrv_status"], sleep_score=None)
+    assert not any("HRV" in r for r in v["reasons"])
+    assert parse_recovery({"hrvSummary": {"status": "BALANCED"}}, {})["hrv_status"] == "BALANCED"
+
+
+def test_hrv_labels_are_french():
+    from forme_logic import hrv_label
+    assert hrv_label("BALANCED") == "équilibrée" and hrv_label("unbalanced") == "déséquilibrée"
+    assert hrv_label(None) is None and hrv_label("") is None
+    v = compute_forme_verdict(tsb=0.0, hrv_status="LOW", sleep_score=None)
+    assert "HRV basse" in v["reasons"][1]
+
+
+def test_tsb_label_is_the_same_everywhere_at_the_boundaries():
+    """Revue #1 : trois jeux de seuils en dur (Forme, onglet Charge, Accueil) donnaient trois verdicts."""
+    from forme_logic import TSB_FATIGUE, TSB_FRESH, tsb_metric_delta
+    assert tsb_metric_delta(TSB_FRESH + 0.1) == ("Bien reposé", "normal")
+    assert tsb_metric_delta(TSB_FRESH) == ("Charge normale", "off")
+    assert tsb_metric_delta(TSB_FATIGUE) == ("Charge normale", "off")
+    assert tsb_metric_delta(TSB_FATIGUE - 0.1) == ("Récupération nécessaire", "inverse")
+    assert tsb_metric_delta(30)[0] == "Bien reposé"            # plus de « Sous-entraîné » d'un seul onglet

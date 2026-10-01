@@ -4,39 +4,41 @@ basés sur les dernières activités et la charge d'entraînement.
 """
 
 import copy
+import json
 import os
 import requests
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from datetime import date, datetime, timedelta
+from datetime import date
 
 from coach_logic import (
-    hard_session_alert,
-    merge_coach_into_recommendation,
     target_label,
 )
-from formatting import map_zoom, seconds_to_pace_str, weekday_fr
-from forme_logic import forme_downgrade
-from next_session_logic import SESSION_TYPES as _SESSION_TYPES  # noqa: F401
+from formatting import map_zoom, md_escape, seconds_to_pace_str, weekday_fr
+from forme_logic import hrv_label, parse_recovery, tsb_metric_delta
 from next_session_logic import (
+    MIN_RUNS_FOR_SESSION,
     SESSION_TYPES,
-    compute_tsb as _compute_tsb,
-    recommend_session as _recommend_session,
     parse_ors_route as _parse_ors_route,
     build_gpx as _build_gpx,
+    todays_session,
 )
+from ui_mode import explain
 from ui_helpers import (
+    cache_nonce,
     cached_coach_context,
     cached_load_activities,
     get_garmin_client,
     render_elevation_profile,
-    render_refresh_button,
     render_garmin_attribution,
     get_athlete_id,
     require_login,
+    validated_plan_sessions,
 )
+
+import chart_theme as ct
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -123,7 +125,7 @@ def _render_route_map(route: dict, session_color: str) -> None:
         lat=[lats[0], lats[-1]],
         lon=[lons[0], lons[-1]],
         mode="markers",
-        marker=dict(size=16, color=["#0ca30c", "#d03b3b"]),
+        marker=dict(size=16, color=[ct.GOOD, ct.CRITICAL]),
         text=["Départ / Arrivée", "Arrivée"],
         hoverinfo="text",
         name="Points clés",
@@ -160,11 +162,11 @@ def _render_elevation_profile(route: dict, session_color: str) -> None:
 # UI principale
 # ---------------------------------------------------------------------------
 
-st.title("🗺️ Prochaine sortie")
+st.title("Prochaine sortie")
 st.caption(
-    "La séance de ton plan Garmin Run Coach, et un parcours inédit généré sur "
-    "OpenStreetMap pour la courir. Sans plan actif, la séance est déduite de ta "
-    "charge d'entraînement."
+    "La séance de ton plan Garmin Run Coach, sinon celle de ton plan Objectif validé, "
+    "sinon une séance déduite de ta charge d'entraînement — et un parcours inédit "
+    "généré sur OpenStreetMap pour la courir."
 )
 
 # Chargement
@@ -177,8 +179,8 @@ if df.empty:
     st.stop()
 
 running_df = df[df["activityType"] == "running"].copy()
-if len(running_df) < 3:
-    st.warning("Il faut au moins 3 sorties pour générer une recommandation.")
+if len(running_df) < MIN_RUNS_FOR_SESSION:
+    st.warning(f"Il faut au moins {MIN_RUNS_FOR_SESSION} courses pour générer une recommandation.")
     st.stop()
 
 # Clé ORS
@@ -187,19 +189,13 @@ ors_key = os.getenv("ORS_API_KEY", "")
 
 # Récupération du jour (HRV, sommeil) — module la recommandation
 @st.cache_data(ttl=3600, show_spinner=False)
-def _load_recovery(athlete_id: int, cdate: str) -> tuple:
+def _load_recovery(athlete_id: int, cdate: str, nonce: int) -> tuple:
     client = get_garmin_client()
-    hrv_raw = client.get_hrv(cdate)
-    hrv = hrv_raw[0] if isinstance(hrv_raw, list) and hrv_raw else (hrv_raw or {})
-    hrv_status = ((hrv.get("hrvSummary") or {}) if isinstance(hrv, dict) else {}).get("status")
-    sleep_raw = client.get_sleep(cdate) or {}
-    sleep_dto = (sleep_raw.get("dailySleepDTO") or {}) if isinstance(sleep_raw, dict) else {}
-    sleep_score = ((sleep_dto.get("sleepScores") or {}).get("overall") or {}).get("value")
-    return hrv_status, sleep_score
+    recovery = parse_recovery(client.get_hrv(cdate), client.get_sleep(cdate))
+    return recovery["hrv_status"], recovery["sleep_score"]
 
 
-_hrv_status, _sleep_score = _load_recovery(_athlete_id, date.today().isoformat())
-_downgrade = forme_downgrade(_hrv_status, _sleep_score)
+_hrv_status, _sleep_score = _load_recovery(_athlete_id, date.today().isoformat(), cache_nonce())
 
 # Plan Garmin Run Coach — quand il y en a un d'actif, c'est lui qui décide de la
 # séance ; la logique interne ne sert plus que de repli. Le chargement passe par
@@ -210,11 +206,23 @@ _coach = cached_coach_context(_athlete_id, _today.isoformat())
 # Recommandation calculée avant la sidebar pour alimenter les défauts
 # `load_df=df` : la fraîcheur qui choisit la séance intègre le sport croisé,
 # comme le TSB affiché sur l'Accueil et la page Forme.
-rec = _recommend_session(running_df, downgrade=_downgrade, load_df=df)
-rec = merge_coach_into_recommendation(rec, _coach)
-s = SESSION_TYPES[rec["session_key"]]
-rec["session"] = s
+_today_session = todays_session(df, _hrv_status, _sleep_score, _coach,
+                                validated_plan_sessions())
+rec = _today_session["rec"]
+if rec is None:
+    # Même règle que todays_session : des courses DATÉES (une sortie sans heure de
+    # départ ne compte pas) — la garde du nombre ci-dessus ne suffit pas.
+    st.warning(f"Il faut au moins {MIN_RUNS_FOR_SESSION} courses datées pour générer une "
+               "recommandation.")
+    st.stop()
+s = rec["session"]                     # posée par recommend_session / les fusions de plan
 _coach_task = rec.get("coach_task")
+if _today_session["coach_unknown"]:
+    # Même avis que l'Accueil : pendant une panne, ni Run Coach ni le plan
+    # Objectif ne sont annoncés à la place de ce que la montre suit.
+    st.info("Garmin n'a pas répondu sur ton plan Run Coach : séance calculée par le "
+            "dashboard. Si un plan Run Coach est en cours, c'est ta montre qui fait foi.",
+            icon=":material/cloud_off:")
 
 # Sidebar — paramètres
 with st.sidebar:
@@ -278,7 +286,6 @@ with st.sidebar:
         sidebar_start_lat = None
         sidebar_start_lon = None
 
-    render_refresh_button()
 
 # Paramètres finaux (valeurs sidebar ou recommandation par défaut)
 target_dist_km = custom_dist
@@ -289,7 +296,7 @@ duration_min = round(target_dist_km * rec["target_pace_sec"] / 60)
 if _coach:
     _plan = _coach["plan"]
     _phase = _coach["phase"]
-    _bits = [f"**{_plan['name']}**"]
+    _bits = [f"**{md_escape(_plan['name'])}**"]
     if _phase:
         _bits.append(f"phase **{_phase['label']}**")
     if _coach["days_to_event"] is not None and _coach["event_date"]:
@@ -301,15 +308,20 @@ if _coach:
 
 # ── Section 1 : Type de séance ─────────────────────────────────────────────
 if _coach_task:
-    st.markdown(f"## {s['icon']} {_coach_task['name']}")
+    st.markdown(f"## {s['icon']} {md_escape(_coach_task['name'])}")
     _when = (
         "aujourd'hui" if _coach_task["date"] == _today
         else f"{weekday_fr(_coach_task['date'])} {_coach_task['date'].strftime('%d/%m')}"
     )
     st.markdown(
         f"*Séance programmée par le coach Garmin pour **{_when}** — "
-        f"{target_label(_coach_task)}, {_coach_task['duration_min']} min.*"
+        f"{md_escape(target_label(_coach_task))}, {_coach_task['duration_min']} min.*"
     )
+elif rec.get("goal_session"):
+    _goal = rec["goal_session"]
+    st.markdown(f"## {s['icon']} {_goal['title']}")
+    st.markdown(f"*Séance de ton plan Objectif pour **{rec['suggested_date_str']}** — "
+                f"{_goal.get('target', '')}. {_goal.get('why', '')}*")
 else:
     st.markdown(f"## {s['icon']} {s['label']}")
     st.markdown(f"*{s['description']}*")
@@ -319,11 +331,11 @@ else:
             "viennent — recommandation calculée depuis ta charge d'entraînement."
         )
 
-_coach_alert = hard_session_alert(_coach, _downgrade)
+_coach_alert = _today_session["alert"]
 if _coach_alert:
     _causes = []
     if _hrv_status and _hrv_status.upper() != "BALANCED":
-        _causes.append(f"HRV {_hrv_status.lower()}")
+        _causes.append(f"HRV {hrv_label(_hrv_status)}")
     if _sleep_score is not None and _sleep_score < 60:
         _causes.append(f"sommeil dégradé (score {_sleep_score})")
     st.warning(
@@ -332,10 +344,10 @@ if _coach_alert:
     )
 
 if rec.get("downgraded_from"):
-    _from = _SESSION_TYPES[rec["downgraded_from"]]["label"]
+    _from = SESSION_TYPES[rec["downgraded_from"]]["label"]
     _causes = []
     if _hrv_status and _hrv_status.upper() != "BALANCED":
-        _causes.append(f"HRV {_hrv_status.lower()}")
+        _causes.append(f"HRV {hrv_label(_hrv_status)}")
     if _sleep_score is not None and _sleep_score < 60:
         _causes.append(f"sommeil dégradé (score {_sleep_score})")
     st.info(
@@ -352,15 +364,11 @@ col1.metric("CTL — Forme", f"{rec['ctl']:.1f}", help="Fitness chronique sur 42
 col2.metric("ATL — Fatigue", f"{rec['atl']:.1f}", help="Fatigue aiguë sur 7 jours")
 
 tsb = rec["tsb"]
-if tsb > 10:
-    tsb_delta, tsb_dc = "Bien reposé", "normal"
-elif tsb > -20:
-    tsb_delta, tsb_dc = "Charge normale", "off"
-else:
-    tsb_delta, tsb_dc = "Récupération nécessaire", "inverse"
+tsb_delta, tsb_dc = tsb_metric_delta(tsb)
 
 col3.metric("TSB — Fraîcheur", f"{tsb:.1f}", delta=tsb_delta, delta_color=tsb_dc)
 col4.metric("Repos depuis", f"{rec['days_since']} j", help="Jours depuis la dernière sortie")
+explain("tsb")
 
 st.divider()
 
@@ -392,6 +400,14 @@ if _coach_task:
         weekday_fr(_coach_task["date"]).capitalize() + _coach_task["date"].strftime(" %d/%m"),
         help=f"Effet visé : {_coach_task['effect'] or '—'}",
     )
+elif rec.get("goal_session"):
+    c1.metric("Distance cible", f"{target_dist_km} km", help="Distance prévue par ton plan Objectif")
+    c2.metric("Allure d'ensemble", rec["target_pace_str"],
+              help="Moyenne des allures de la séance pondérée par leur durée (échauffement, "
+                   "blocs, retour au calme) : c'est l'allure du parcours.")
+    c3.metric("Durée prévue", f"{duration_min} min")
+    c4.metric("D+ cible", f"{target_elev_m} m")
+    c5.metric("Date du plan", rec["suggested_date_str"])
 else:
     c1.metric("Distance cible", f"{target_dist_km} km",
               help=f"Moyenne récente : {rec['avg_dist']} km")
@@ -426,6 +442,9 @@ if _coach_task:
         )
     else:
         st.caption(f"Fourchette d'allure conseillée : **{pace_min}** → **{pace_max}**")
+elif rec.get("goal_session"):
+    st.caption(f"Cible de la séance : **{rec['goal_session'].get('target', '')}** · allure "
+               f"d'ensemble pour le parcours et le GPX : **{pace_min}** → **{pace_max}**")
 else:
     st.caption(f"Fourchette d'allure conseillée : **{pace_min}** → **{pace_max}**")
 
@@ -474,6 +493,35 @@ if sidebar_start_lat is None:
 
 start_lat, start_lon = sidebar_start_lat, sidebar_start_lon
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_ors_route(profile: str, body_json: str, ors_key: str, target_dist_km: float) -> dict | None:
+    """
+    Appel ORS mis en cache par (profil, point de départ, options, distance) : un
+    rerun de la page (n'importe quel widget) ne renvoie ni le point de départ —
+    souvent le domicile — ni ne consomme le quota gratuit. Une erreur n'est pas
+    mise en cache (st.cache_data) : elle sera réessayée.
+    """
+    url = f"{ORS_API_BASE}/directions/{profile}/geojson"
+    headers = {
+        "Authorization": ors_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json, application/geo+json",
+    }
+    body = json.loads(body_json)
+    resp = requests.post(url, json=body, headers=headers, timeout=30)
+    resp.raise_for_status()
+    route = _parse_ors_route(resp.json())
+    # Retry avec distance corrigée si l'écart dépasse 15 %
+    if route and abs(route["distance_km"] - target_dist_km) / target_dist_km > 0.15:
+        retry_body = copy.deepcopy(body)
+        retry_body["options"]["round_trip"]["length"] = int(
+            body["options"]["round_trip"]["length"] * target_dist_km / route["distance_km"])
+        resp2 = requests.post(url, json=retry_body, headers=headers, timeout=30)
+        resp2.raise_for_status()
+        route = _parse_ors_route(resp2.json()) or route
+    return route
+
+
 # Seed pour la variation du parcours
 if "route_seed" not in st.session_state:
     st.session_state["route_seed"] = 1
@@ -491,12 +539,6 @@ distance_m = int(target_dist_km * 1000)
 profile = "foot-hiking" if (prefer_trails or rec["session_key"] == "sortie_longue") else "foot-walking"
 
 with st.spinner("Génération du parcours en cours..."):
-    url = f"{ORS_API_BASE}/directions/{profile}/geojson"
-    headers = {
-        "Authorization": ors_key,
-        "Content-Type": "application/json",
-        "Accept": "application/json, application/geo+json",
-    }
     body = {
         "coordinates": [[start_lon, start_lat]],
         "options": _ors_options(
@@ -509,25 +551,12 @@ with st.spinner("Génération du parcours en cours..."):
         "instructions": False,
     }
     try:
-        resp = requests.post(url, json=body, headers=headers, timeout=30)
-        resp.raise_for_status()
-        route = _parse_ors_route(resp.json())
-
-        # Retry avec distance corrigée si l'écart dépasse 15 %
-        if route and abs(route["distance_km"] - target_dist_km) / target_dist_km > 0.15:
-            factor = target_dist_km / route["distance_km"]
-            retry_body = copy.deepcopy(body)
-            retry_body["options"]["round_trip"]["length"] = int(distance_m * factor)
-            resp2 = requests.post(url, json=retry_body, headers=headers, timeout=30)
-            resp2.raise_for_status()
-            corrected = _parse_ors_route(resp2.json())
-            if corrected:
-                route = corrected
+        route = _fetch_ors_route(profile, json.dumps(body, sort_keys=True), ors_key, target_dist_km)
     except requests.HTTPError as e:
-        st.error(f"Erreur ORS ({e.response.status_code}) : {e.response.text[:400]}")
+        st.error(f"Erreur ORS ({e.response.status_code}) : {md_escape(e.response.text[:400])}")
         route = None
     except Exception as e:
-        st.error(f"Erreur réseau : {e}")
+        st.error(f"Erreur réseau : {md_escape(e)}")
         route = None
 
 if route:
@@ -540,12 +569,12 @@ if route:
     r1.metric(
         "Distance réelle", f"{route['distance_km']} km",
         delta=f"{dist_delta:+.1f} km vs objectif",
-        delta_color="off",
+        delta_color="off", delta_arrow="off",
     )
     r2.metric(
         "D+ réel", f"{route['ascent_m']} m",
         delta=f"{elev_delta:+.0f} m vs objectif",
-        delta_color="off",
+        delta_color="off", delta_arrow="off",
     )
     r3.metric("Durée estimée", f"{duration_real} min")
 
@@ -558,6 +587,9 @@ if route:
 
     # Carte
     _render_route_map(route, s["color"])
+    st.caption("Itinéraire © [openrouteservice.org](https://openrouteservice.org) by HeiGIT · "
+               "données cartographiques © [OpenStreetMap](https://www.openstreetmap.org/copyright) "
+               "contributors")
 
     # Profil altimétrique
     if route["elevations"]:

@@ -96,7 +96,7 @@ def parse_personal_records(raw: list | None) -> list[dict]:
         if stamp:
             date_str = pd.to_datetime(stamp).strftime("%d/%m/%Y")
 
-        rows.append({
+        rows.append((type_id, {
             "group": group,
             "group_label": PR_GROUP_LABELS[group],
             "label": label,
@@ -104,12 +104,14 @@ def parse_personal_records(raw: list | None) -> list[dict]:
             "date_str": date_str,
             "activity_name": pr.get("activityName") or "",
             "activity_id": pr.get("activityId") or 0,
-        })
+        }))
 
     order = {g: i for i, g in enumerate(PR_GROUP_LABELS)}
+    # Ordre des typeId Garmin = ordre de distance croissante (cf. PR_TYPES) :
+    # trier par label alphabétique donnait ['1 km', '10 km', '5 km', ...].
     type_order = {tid: i for i, tid in enumerate(PR_TYPES)}
-    rows.sort(key=lambda r: (order[r["group"]], r["label"]))
-    return rows
+    rows.sort(key=lambda r: (order[r[1]["group"]], type_order[r[0]]))
+    return [row for _, row in rows]
 
 
 def riegel_estimates(running_df: pd.DataFrame) -> dict[str, float]:

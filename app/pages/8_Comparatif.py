@@ -33,13 +33,13 @@ from comparatif_logic import (
 from formatting import seconds_to_pace_str, weekday_fr
 from next_session_logic import compute_pmc_series, reference_threshold_sec
 from progression_logic import RACE_TARGETS, fmt_race_time
+from ui_mode import explain
 from ui_helpers import (
     cache_nonce,
     cached_load_activities,
     get_athlete_id,
     get_garmin_client,
     render_garmin_attribution,
-    render_refresh_button,
     require_login,
 )
 
@@ -167,7 +167,12 @@ def _render_annual_lines(
     en pointillé : la comparaison à date reste lisible sans masquer la fin des
     saisons passées.
     """
-    plot_df = df.dropna(subset=[value_col])
+    # Colonne absente = Garmin n'a renvoyé aucune ligne pour cette métrique
+    # (montre qui ne la mesure pas, compte récent) : même message que « vide ».
+    if value_col not in df.columns:
+        plot_df = df.iloc[0:0]
+    else:
+        plot_df = df.dropna(subset=[value_col])
     if plot_df.empty:
         st.info("Pas de données sur cette métrique pour les années sélectionnées.")
         return
@@ -251,7 +256,7 @@ def _render_snapshot(
     if not any(char in "123456789" for char in delta_text):
         container.metric(
             label, fmt(current),
-            delta=f"stable vs {reference_year}", delta_color="off", help=help_text,
+            delta=f"stable vs {reference_year}", delta_color="off", delta_arrow="off", help=help_text,
         )
         return
     # Le signe moins doit rester un tiret ASCII : Streamlit déduit le sens du
@@ -269,7 +274,7 @@ def _render_snapshot(
 # ---------------------------------------------------------------------------
 # Données de base
 # ---------------------------------------------------------------------------
-st.title("📆 Comparatif annuel")
+st.title("Année contre année")
 st.caption(
     "Ton année en cours superposée aux précédentes, alignées sur le jour de "
     "l'année — charge, volume, physiologie et récupération à la même date."
@@ -325,8 +330,6 @@ with st.sidebar:
         help="Moyenne glissante appliquée au VO2max, à la FC de repos, au "
              "sommeil et à la HRV — ces mesures sont bruitées au jour le jour.",
     )
-    st.divider()
-    render_refresh_button("🔄 Actualiser")
 
 if not selected_years:
     st.warning("Sélectionne au moins une année dans la barre latérale.")
@@ -439,7 +442,7 @@ st.divider()
 # ---------------------------------------------------------------------------
 st.subheader(f"🎯 La sortie du {today.strftime('%d/%m')}, année par année")
 
-day_rows = day_comparison(runs, today_doy)
+day_rows = day_comparison(runs, today)
 _day_by_year = {int(r["year"]): r for _, r in day_rows.iterrows()}
 
 if not _day_by_year:
@@ -514,6 +517,7 @@ st.caption(
     f"(**{seconds_to_pace_str(threshold_sec)}**) — sans quoi les TSS d'une année "
     "à l'autre ne seraient pas comparables."
 )
+explain("ctl")
 charge_metric = st.radio(
     "Métrique de charge",
     options=["CTL — Forme", "ATL — Fatigue", "TSB — Fraîcheur"],
@@ -583,6 +587,7 @@ st.divider()
 # 3. Physiologie
 # ---------------------------------------------------------------------------
 st.subheader("💨 Physiologie")
+explain("vo2max")
 
 physio_metric = st.radio(
     "Métrique physiologique",
@@ -638,6 +643,7 @@ st.divider()
 # 4. Récupération
 # ---------------------------------------------------------------------------
 st.subheader("😴 Récupération")
+explain("hrv")
 
 recup_metric = st.radio(
     "Métrique de récupération",

@@ -1,17 +1,23 @@
 """
-Page Activités — Liste filtrée et détails des sorties.
+Page Activités — explorateur des sorties (un indicateur, points cliquables),
+répartition de l'intensité (80/20), liste enrichie et détail d'une sortie.
 """
 
+import hashlib
 import math
-from datetime import datetime, timedelta, date
+from datetime import timedelta, date
 
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 from plotly.subplots import make_subplots
 
-from formatting import decimate, seconds_to_pace_str
+from activities_logic import METRICS, ZONE_LABELS, enrich, intensity_distribution, polarization
+from formatting import decimate, md_escape, seconds_to_pace_str
+from next_session_logic import reference_threshold_sec
+from physio_ui import render_physio_settings, render_signal_quality
+from ui_mode import explain
+from ui_theme import chip, esc, html_block
 from ui_helpers import (
     cached_load_activities,
     get_garmin_client,
@@ -20,6 +26,13 @@ from ui_helpers import (
     get_athlete_id,
     require_login,
 )
+
+import chart_theme as ct
+
+# Zones d'intensité : convention cardio bleu → rouge (ct.ZONE_HEAT). Jamais seule
+# porteuse de l'info : le nom de la zone est dans la légende et au survol.
+ZONE_COLORS = dict(zip(["recup", "endurance", "tempo", "seuil", "vma"], ct.ZONE_HEAT)) | {
+    "autre": ct.INK_MUTED}
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -31,24 +44,9 @@ st.set_page_config(
 )
 
 require_login()
+render_physio_settings()
 
 _athlete_id = get_athlete_id()
-
-st.markdown("""
-<style>
-    .activity-card {
-        background: linear-gradient(135deg, #161a23 0%, #1b2029 100%);
-        border: 1px solid #2a3040;
-        border-radius: 12px;
-        padding: 16px 20px;
-        margin-bottom: 8px;
-    }
-    .split-table th {
-        background: #1b2029;
-        color: #3987e5;
-    }
-</style>
-""", unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -105,9 +103,8 @@ def _render_streams(streams: dict, max_hr: int = 190) -> None:
     )
 
     axis_style = dict(
-        gridcolor="#232833",
-        tickfont=dict(color="#8b8f98", size=10),
-        title_font=dict(color="#8b8f98", size=11),
+        tickfont=dict(color=ct.INK_MUTED, size=10),
+        title_font=dict(color=ct.INK_MUTED, size=11),
         zeroline=False,
     )
 
@@ -126,8 +123,8 @@ def _render_streams(streams: dict, max_hr: int = 190) -> None:
             fig.add_trace(go.Scatter(
                 x=dist_km, y=alt,
                 fill="tozeroy",
-                fillcolor="rgba(144,133,233,0.16)",
-                line=dict(color="rgba(144,133,233,0.9)", width=1.5),
+                fillcolor=ct.rgba(ct.ALTITUDE, 0.16),
+                line=dict(color=ct.rgba(ct.ALTITUDE, 0.9), width=1.5),
                 name="Altitude",
                 customdata=customdata,
                 hovertemplate=(
@@ -154,7 +151,7 @@ def _render_streams(streams: dict, max_hr: int = 190) -> None:
             fig.add_trace(go.Scatter(
                 x=dist_km, y=clipped,
                 mode="lines",
-                line=dict(color="rgba(57,135,229,0.95)", width=1.5),
+                line=dict(color=ct.rgba(ct.PACE, 0.95), width=1.5),
                 name="Allure",
                 customdata=hover,
                 hovertemplate="%{x:.2f} km · %{customdata}<extra></extra>",
@@ -179,11 +176,11 @@ def _render_streams(streams: dict, max_hr: int = 190) -> None:
             hr = streams["heartrate"]
             # Bandes de zones FC en arrière-plan
             zone_bands = [
-                (0,              0.60 * max_hr, "rgba(57,135,229,0.07)"),
-                (0.60 * max_hr,  0.70 * max_hr, "rgba(25,158,112,0.08)"),
-                (0.70 * max_hr,  0.80 * max_hr, "rgba(201,133,0,0.10)"),
-                (0.80 * max_hr,  0.90 * max_hr, "rgba(217,89,38,0.10)"),
-                (0.90 * max_hr,  max_hr * 1.1,  "rgba(230,103,103,0.12)"),
+                (0,              0.60 * max_hr, ct.rgba(ct.ZONE_HEAT[0], 0.07)),
+                (0.60 * max_hr,  0.70 * max_hr, ct.rgba(ct.ZONE_HEAT[1], 0.08)),
+                (0.70 * max_hr,  0.80 * max_hr, ct.rgba(ct.ZONE_HEAT[2], 0.10)),
+                (0.80 * max_hr,  0.90 * max_hr, ct.rgba(ct.ZONE_HEAT[3], 0.10)),
+                (0.90 * max_hr,  max_hr * 1.1,  ct.rgba(ct.ZONE_HEAT[4], 0.12)),
             ]
             for y0, y1, color in zone_bands:
                 fig.add_hrect(y0=y0, y1=y1, fillcolor=color, line_width=0, row=row_idx, col=1)
@@ -191,9 +188,9 @@ def _render_streams(streams: dict, max_hr: int = 190) -> None:
             fig.add_trace(go.Scatter(
                 x=dist_km, y=hr,
                 mode="lines",
-                line=dict(color="rgba(230,103,103,0.9)", width=1.5),
+                line=dict(color=ct.rgba(ct.HR, 0.9), width=1.5),
                 fill="tozeroy",
-                fillcolor="rgba(230,103,103,0.08)",
+                fillcolor=ct.rgba(ct.HR, 0.08),
                 name="FC",
                 hovertemplate="%{x:.2f} km · %{y:.0f} bpm<extra></extra>",
             ), row=row_idx, col=1)
@@ -224,7 +221,6 @@ def _render_streams(streams: dict, max_hr: int = 190) -> None:
         height=chart_height,
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#c6c8ce"),
         margin=dict(l=0, r=0, t=5, b=0),
         hovermode="x unified",
         showlegend=False,
@@ -237,7 +233,7 @@ def _render_streams(streams: dict, max_hr: int = 190) -> None:
 # ---------------------------------------------------------------------------
 # Chargement
 # ---------------------------------------------------------------------------
-st.title("📋 Mes Activités")
+st.title("Activités")
 
 df, error = cached_load_activities(_athlete_id)
 
@@ -335,7 +331,7 @@ filtered = filtered[
 
 if search_name:
     filtered = filtered[
-        filtered["activityName"].str.contains(search_name, case=False, na=False)
+        filtered["activityName"].str.contains(search_name, case=False, na=False, regex=False)
     ]
 
 filtered = filtered.sort_values("startTimeLocal", ascending=False)
@@ -343,84 +339,214 @@ filtered = filtered.sort_values("startTimeLocal", ascending=False)
 # ---------------------------------------------------------------------------
 # Résumé des filtres
 # ---------------------------------------------------------------------------
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Activités trouvées", len(filtered))
-if not filtered.empty:
-    col2.metric("Volume total", f"{filtered['distance_km'].sum():.1f} km")
-    col3.metric("Durée totale", f"{filtered['duration_min'].sum() / 60:.1f} h")
-    pace_vals = filtered.loc[filtered["avgPace_sec"] > 0, "avgPace_sec"]
-    col4.metric(
-        "Allure moyenne",
-        seconds_to_pace_str(pace_vals.mean()) if not pace_vals.empty else "—"
-    )
-
-st.divider()
-
-# ---------------------------------------------------------------------------
-# Tableau des activités
-# ---------------------------------------------------------------------------
 if filtered.empty:
     st.info("Aucune activité ne correspond aux filtres sélectionnés.")
     st.stop()
 
-# Préparer l'affichage
-display = filtered[[
-    "startTimeLocal", "activityName", "activityType",
-    "distance_km", "duration_min", "avgPace",
-    "avgHR", "avgCadence", "calories", "elevationGain",
-]].copy()
+# Intensité et charge de chaque sortie : même allure seuil (et donc même TSS)
+# que la page Forme — calculée sur l'historique complet, pas sur le filtre.
+enriched = enrich(filtered, reference_threshold_sec(df), history=df)   # TSS = celui du PMC
 
+# Sélection (graphe ou liste) : chaque widget a une version dans sa clé. Quand
+# l'un choisit une sortie, l'autre est remis à zéro — on ne garde qu'un choix
+# visible, et recliquer une ligne ne la décoche pas en silence. (En revenant sur
+# la page, Streamlit a purgé les deux widgets : la sélection « change » vers
+# vide et le détail reste fermé — rien à faire de plus.)
+for _k in ("_act_chart_ver", "_act_table_ver"):
+    st.session_state.setdefault(_k, 0)
+_chart_key = f"act_explorer_chart_{st.session_state['_act_chart_ver']}"
+
+with st.container(key="card-act-kpi"):
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Activités", len(filtered))
+    col2.metric("Volume", f"{filtered['distance_km'].sum():.1f} km")
+    col3.metric("Durée", f"{filtered['duration_min'].sum() / 60:.1f} h")
+    pace_vals = filtered.loc[filtered["avgPace_sec"] > 0, "avgPace_sec"]
+    col4.metric("Allure moyenne", seconds_to_pace_str(pace_vals.mean()) if not pace_vals.empty else "—")
+    col5.metric("Charge (TSS)", f"{enriched['tss'].sum():.0f}",
+                help="Somme des charges de la période : même calcul que CTL/ATL sur la page Forme.")
+
+# ---------------------------------------------------------------------------
+# Explorateur : un indicateur, toutes les sorties, cliquables
+# ---------------------------------------------------------------------------
+_METRIC_LABELS = {"intensite": "Intensité", "fc": "FC", "allure": "Allure", "charge": "Charge",
+                  "calories": "Calories", "distance": "Distance", "cadence": "Cadence",
+                  "denivele": "Dénivelé"}
+if st.session_state.get("act_metric") not in _METRIC_LABELS:
+    st.session_state["act_metric"] = "intensite"
+metric_key = st.segmented_control("Indicateur", list(_METRIC_LABELS), format_func=_METRIC_LABELS.get,
+                                  key="act_metric", required=True)
+column, axis_label, hover_value, sense = METRICS[metric_key]
+plot_df = enriched.dropna(subset=[column]) if column in enriched else enriched.iloc[0:0]
+plot_df = plot_df[pd.to_numeric(plot_df[column], errors="coerce") > 0] if metric_key != "intensite" else plot_df
+
+_fig_sig = None                        # empreinte de la figure (aucune si pas de graphe)
+with st.container(key="card-act-explorer"):
+    if plot_df.empty:
+        st.info(f"Aucune sortie filtrée ne porte cette donnée ({axis_label.lower()}).")
+        chart_event = None
+    else:
+        plot_df = plot_df.sort_values("startTimeLocal")
+        size = 8 + 22 * (plot_df["distance_km"] / max(plot_df["distance_km"].max(), 1)).clip(0, 1)
+        fig = go.Figure()
+        for zone in [*ZONE_COLORS]:
+            part = plot_df[plot_df["zone"] == zone]
+            if part.empty:
+                continue
+            custom = pd.DataFrame({
+                "id": part["activityId"].astype("int64"),
+                # Plotly interprète le HTML du survol : nom Garmin échappé.
+                "name": part["activityName"].fillna("").astype(str).str.slice(0, 40).map(esc),
+                "pace": part["avgPace"].fillna("—").astype(str),
+                "dist": part["distance_km"].round(1),
+                "zone": ZONE_LABELS[zone],
+            })
+            fig.add_trace(go.Scatter(
+                x=part["startTimeLocal"], y=part[column], mode="markers", name=ZONE_LABELS[zone],
+                marker=dict(size=size[part.index], color=ZONE_COLORS[zone], opacity=0.9,
+                            line=dict(color=ct.SURFACE_2, width=1.5)),
+                customdata=custom.to_numpy(),
+                hovertemplate=("%{x|%a %d/%m} · %{customdata[1]}<br>" + hover_value
+                               + " · %{customdata[3]} km · %{customdata[4]}<extra></extra>"),
+            ))
+        # Tendance : médiane glissante sur 28 jours (robuste aux séances atypiques)
+        trend = (plot_df.set_index("startTimeLocal")[column].astype(float)
+                 .rolling("28D", min_periods=3).median())
+        if trend.notna().sum() >= 2:
+            fig.add_trace(go.Scatter(x=trend.index, y=trend.to_numpy(), mode="lines", name="Tendance 4 sem.",
+                                     line=dict(color=ct.INK_SECONDARY, width=2, dash="dot"),
+                                     hoverinfo="skip"))
+        if metric_key == "intensite":
+            fig.add_hline(y=100, line=dict(color=ct.BASELINE, width=1, dash="dash"),
+                          annotation_text="allure seuil", annotation_position="top left",
+                          annotation_font=dict(color=ct.INK_MUTED, size=11))
+        fig.update_layout(height=380, margin=dict(l=0, r=0, t=30, b=0),
+                          yaxis=dict(title=axis_label, autorange="reversed" if sense == "lower" else True),
+                          legend=dict(orientation="h", y=1.1), clickmode="event+select")
+        # Streamlit identifie le graphe par TOUTE la figure : une figure nouvelle
+        # (filtre, indicateur, Actualiser) repart sans sélection.
+        _fig_sig = hashlib.md5(fig.to_json().encode()).hexdigest()
+        chart_event = st.plotly_chart(fig, on_select="rerun", selection_mode="points",
+                                      key=_chart_key)
+        st.caption("Chaque point est une sortie (taille = distance, couleur = zone d'intensité). "
+                   "**Clique un point** pour ouvrir son détail en bas de page.")
+explain("intensite")
+
+# ---------------------------------------------------------------------------
+# Répartition de l'intensité (le 80/20)
+# ---------------------------------------------------------------------------
+dist = intensity_distribution(enriched)
+polar = polarization(enriched)
+if polar:
+    with st.container(key="card-act-polar"):
+        c_txt, c_chart = st.columns([1, 2], gap="large")
+        with c_txt:
+            html_block('<div class="gd-kicker">Répartition de l\'intensité</div>'
+                       f'<div><span class="gd-big">{polar["easy"]:.0%}</span> '
+                       f'{chip("en facile", polar["status"])}</div>')
+            st.write(polar["verdict"])
+            st.caption(f"Tempo {polar['grey']:.0%} · seuil et au-delà {polar['hard']:.0%} · "
+                       f"{polar['minutes'] / 60:.0f} h de course sur la période. Repère : ~80 % "
+                       "en facile (Seiler).")
+        with c_chart:
+            fig_d = go.Figure()
+            for zone, color in ZONE_COLORS.items():
+                part = dist[dist["zone"] == zone]
+                if zone == "autre" or part.empty:
+                    continue
+                fig_d.add_trace(go.Bar(x=part["week"], y=part["minutes"] / 60, name=ZONE_LABELS[zone],
+                                       marker_color=color,
+                                       hovertemplate="Semaine du %{x|%d/%m} · %{y:.1f} h<extra>"
+                                                     + ZONE_LABELS[zone] + "</extra>"))
+            fig_d.update_layout(barmode="stack", height=240, margin=dict(l=0, r=0, t=10, b=0),
+                                yaxis=dict(title="heures"), legend=dict(orientation="h", y=1.15))
+            st.plotly_chart(fig_d, config={"displayModeBar": False})
+
+# ---------------------------------------------------------------------------
+# Toutes les sorties (sélection possible aussi depuis la liste)
+# ---------------------------------------------------------------------------
+_rows_sig = hashlib.md5(",".join(map(str, enriched["activityId"])).encode()).hexdigest()[:10]
+display = enriched[[
+    "activityId", "startTimeLocal", "activityName", "activityType", "zone", "intensity_pct",
+    "distance_km", "duration_min", "avgPace", "avgHR", "tss", "calories", "elevationGain",
+]].copy()
 display["startTimeLocal"] = pd.to_datetime(display["startTimeLocal"]).dt.strftime("%d/%m/%Y %H:%M")
 display["activityType"] = display["activityType"].map(type_labels).fillna(display["activityType"])
-
-# Conserver les colonnes numériques comme nombres (NaN = cellule vide, pas "—")
-for col in ["avgHR", "avgCadence", "calories", "elevationGain"]:
+display["zone"] = display["zone"].map(ZONE_LABELS)
+for col in ["avgHR", "calories", "elevationGain", "tss", "intensity_pct"]:
     display[col] = pd.to_numeric(display[col], errors="coerce")
 
-display = display.rename(columns={
-    "startTimeLocal": "Date",
-    "activityName": "Nom",
-    "activityType": "Type",
-    "distance_km": "Distance (km)",
-    "duration_min": "Durée (min)",
-    "avgPace": "Allure",
-    "avgHR": "FC moy",
-    "avgCadence": "Cadence",
-    "calories": "Calories",
-    "elevationGain": "D+ (m)",
-})
+with st.expander(f"Toutes les sorties ({len(display)})", expanded=False, icon=":material/list:"):
+    _table_key = f"act_table_{_rows_sig}_{st.session_state['_act_table_ver']}"
+    selected_event = st.dataframe(
+        display.drop(columns=["activityId"]),
+        width="stretch", hide_index=True, on_select="rerun", selection_mode="single-row",
+        # Clé liée aux lignes affichées : un filtre change la liste, la sélection
+        # repart de zéro (l'ancien index pointait hors de la liste → iloc plantait,
+        # ou, pire, sur une autre sortie sans rien dire).
+        key=_table_key,
+        column_config={
+            "startTimeLocal": st.column_config.TextColumn("Date"),
+            "activityName": st.column_config.TextColumn("Nom"),
+            "activityType": st.column_config.TextColumn("Type"),
+            "zone": st.column_config.TextColumn("Zone"),
+            "intensity_pct": st.column_config.ProgressColumn(
+                "Intensité", help="Allure en % de ton allure seuil (100 % = seuil)",
+                format="%.0f %%", min_value=50, max_value=120),
+            "distance_km": st.column_config.ProgressColumn(
+                "Distance", format="%.1f km", min_value=0,
+                max_value=float(max(display["distance_km"].max(), 1))),
+            "duration_min": st.column_config.NumberColumn("Durée", format="%.0f min"),
+            "avgPace": st.column_config.TextColumn("Allure"),
+            "avgHR": st.column_config.NumberColumn("FC moy", format="%d bpm"),
+            "tss": st.column_config.ProgressColumn(
+                "Charge", format="%.0f", min_value=0,
+                max_value=float(max(display["tss"].max(skipna=True) or 1, 1))),
+            "calories": st.column_config.NumberColumn("Calories", format="%d kcal"),
+            "elevationGain": st.column_config.NumberColumn("D+", format="%d m"),
+        },
+    )
 
-# Sélection d'une ligne
-selected_event = st.dataframe(
-    display,
-    width='stretch',
-    hide_index=True,
-    on_select="rerun",
-    selection_mode="single-row",
-    column_config={
-        "Date":          st.column_config.TextColumn("📅 Date"),
-        "Nom":           st.column_config.TextColumn("🏃 Nom"),
-        "Type":          st.column_config.TextColumn("🏷️ Type"),
-        "Distance (km)": st.column_config.NumberColumn("📏 Distance (km)", format="%.2f"),
-        "Durée (min)":   st.column_config.NumberColumn("⏱️ Durée (min)",   format="%.0f"),
-        "Allure":        st.column_config.TextColumn("🐇 Allure"),
-        "FC moy":        st.column_config.NumberColumn("❤️ FC moy",        format="%d bpm"),
-        "Cadence":       st.column_config.NumberColumn("🦶 Cadence",        format="%d spm"),
-        "Calories":      st.column_config.NumberColumn("🔥 Calories",       format="%d kcal"),
-        "D+ (m)":        st.column_config.NumberColumn("⛰️ D+ (m)",         format="%d m"),
-    },
-)
+# Sortie choisie : le DERNIER geste, graphe ou liste (cf. versions de clés plus haut).
+_points = (getattr(getattr(chart_event, "selection", None), "points", None) or []) if chart_event else []
+_chart_sel = tuple(int(p["customdata"][0]) for p in _points if p.get("customdata"))
+_rows = [r for r in (selected_event.selection.rows or []) if 0 <= r < len(display)]
+_table_sel = tuple(int(display.iloc[r]["activityId"]) for r in _rows)
+_prev_chart, _prev_table = st.session_state.get("_act_last_sel", ((), ()))
+_prev_view = st.session_state.get("_act_last_view")
+_view = (_rows_sig, _fig_sig)
+if _prev_view is not None and _prev_view[0] != _view[0]:
+    _prev_table = ()     # nouvelle liste (filtre) : widget neuf et vide, pas une ligne décochée
+if _prev_view is not None and _prev_view[1] != _view[1]:
+    _prev_chart = ()     # nouvelle figure : sélection vidée par Streamlit, pas un point désélectionné
+st.session_state["_act_last_view"] = _view
+_picked_id = st.session_state.get("_act_picked")
+_reset = None
+if _chart_sel != _prev_chart:
+    # Le point AJOUTÉ (shift-clic : plusieurs points), sinon rien = désélection.
+    _added = [i for i in _chart_sel if i not in _prev_chart]
+    _picked_id = _added[-1] if _added else None
+    if _picked_id is not None and _table_sel:
+        _reset, _table_sel = "_act_table_ver", ()
+elif _table_sel != _prev_table:
+    _picked_id = _table_sel[0] if _table_sel else None           # ligne décochée : détail refermé
+    if _picked_id is not None and _chart_sel:
+        _reset, _chart_sel = "_act_chart_ver", ()
+st.session_state["_act_last_sel"] = (_chart_sel, _table_sel)
+st.session_state["_act_picked"] = _picked_id
+if _reset:
+    st.session_state[_reset] += 1        # l'autre widget repart vide au prochain run
+    st.rerun()
 
 # ---------------------------------------------------------------------------
 # Détails de l'activité sélectionnée
 # ---------------------------------------------------------------------------
-if selected_event.selection.rows:
-    selected_idx = selected_event.selection.rows[0]
-    selected_row = filtered.iloc[selected_idx]
+if _picked_id is not None and (filtered["activityId"] == _picked_id).any():
+    selected_row = filtered[filtered["activityId"] == _picked_id].iloc[0]
     activity_id = selected_row["activityId"]
 
     st.divider()
-    st.subheader(f"🔍 Détails — {selected_row.get('activityName', 'Activité')}")
+    st.subheader(f"🔍 Détails — {md_escape(selected_row.get('activityName', 'Activité'))}")
 
     date_fmt = pd.to_datetime(selected_row["startTimeLocal"]).strftime("%A %d %B %Y à %H:%M")
     st.caption(f"📅 {date_fmt}")
@@ -431,7 +557,10 @@ if selected_event.selection.rows:
     m2.metric("⏱️ Durée", f"{selected_row['duration_min']:.0f} min")
     m3.metric("🐇 Allure", selected_row["avgPace"])
     m4.metric("❤️ FC moy", f"{int(selected_row['avgHR'])} bpm" if pd.notna(selected_row.get("avgHR")) else "—")
-    m5.metric("🦶 Cadence", f"{int(selected_row['avgCadence'])} spm" if pd.notna(selected_row.get("avgCadence")) else "—")
+    # avgCadence est en pas/min pour la course, en tours/min pour le vélo
+    # (repli averageBikingCadenceInRevPerMinute de activity_row).
+    cad_unit = "rpm" if selected_row.get("activityType") == "cycling" else "spm"
+    m5.metric("🦶 Cadence", f"{int(selected_row['avgCadence'])} {cad_unit}" if pd.notna(selected_row.get("avgCadence")) else "—")
 
     m6, m7, m8, _, _ = st.columns(5)
     m6.metric("🔥 Calories", f"{int(selected_row['calories'])} kcal" if pd.notna(selected_row.get("calories")) else "—")
@@ -453,6 +582,8 @@ if selected_event.selection.rows:
         max_hr_act = int(selected_row.get("maxHR") or 190)
         max_hr_act = max(150, min(220, max_hr_act))
         _render_streams(streams, max_hr=max_hr_act)
+        if selected_row.get("activityType") == "running":
+            render_signal_quality(streams)
 
     if details and details.get("splits"):
         st.subheader("📊 Laps")
@@ -469,8 +600,8 @@ if selected_event.selection.rows:
                 y=splits_df["pace_sec"].apply(lambda s: s / 60 if s > 0 else None),
                 name="Allure (min/km)",
                 marker_color=[
-                    "rgba(12,163,12,0.9)" if p > 0 and p < avg_split_pace
-                    else "rgba(57,135,229,0.85)"
+                    ct.rgba(ct.GOOD, 0.9) if p > 0 and p < avg_split_pace
+                    else ct.rgba(ct.PACE, 0.85)
                     for p in splits_df["pace_sec"]
                 ],
                 hovertemplate="<b>Lap %{x}</b><br>Allure : %{customdata}<extra></extra>",
@@ -481,14 +612,11 @@ if selected_event.selection.rows:
                 height=280,
                 plot_bgcolor="rgba(0,0,0,0)",
                 paper_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#c6c8ce"),
                 xaxis=dict(
                     title="Lap",
-                    gridcolor="#232833",
                 ),
                 yaxis=dict(
                     title="Allure (min/km)",
-                    gridcolor="#232833",
                     tickformat=".1f",
                 ),
                 margin=dict(l=0, r=0, t=10, b=0),

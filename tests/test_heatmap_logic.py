@@ -5,6 +5,7 @@ Tests unitaires pour heatmap_logic — logique pure, sans I/O Strava.
 import math
 import numpy as np
 import pytest
+from pyproj import Transformer
 
 from heatmap_logic import (
     HeatmapConfig,
@@ -60,6 +61,19 @@ def test_detect_home_returns_dominant_cluster():
 def test_detect_home_empty_raises():
     with pytest.raises(ValueError):
         detect_home([])
+
+
+def test_detect_home_cluster_not_cut_by_grid_rounding():
+    """
+    Repro repro_home : un cluster à cheval sur la frontière `round(lat, 2)`
+    (ex. 45.7648 → 45.76 et 45.7652 → 45.77, séparés de 44 m) ne doit pas être
+    coupé en deux au profit d'un cluster plus petit mais entier.
+    """
+    home = [(45.7648, 4.83)] * 6 + [(45.7652, 4.83)] * 6  # même cluster, 44 m d'écart
+    club = [(45.90, 4.83)] * 8  # cluster entier mais plus petit (~15 km plus loin)
+    home_lat, home_lon, n = detect_home(home + club)
+    assert home_lat == pytest.approx(45.765, abs=0.001)
+    assert n == 12
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +183,43 @@ def test_rasterize_clip_excludes_far_tracks():
     lon_ne = grid_bounds_latlon(grids)[1][1]
     assert 2.3 < lon_sw < 2.4
     assert 2.3 < lon_ne < 2.5
+
+
+def test_rasterize_clip_does_not_paint_chord_across_gap():
+    """
+    Repro repro_heat_chord : le clip par rayon retire des points au milieu du
+    track (sortie hors rayon puis retour). Après compactage, les deux bouts du
+    trou ne doivent pas être reliés par une ligne droite fictive.
+    """
+    home_lat, home_lon = 45.0, 5.0
+    km_lat = 1 / 111.0
+    km_lon = 1 / (111.0 * math.cos(math.radians(45)))
+    pts = []
+    for i in range(0, 1500):  # 0 -> 15 km est le long de y=0
+        pts.append((home_lat, home_lon + i / 100 * km_lon, 3.0, 150, 200))
+    for i in range(0, 1000):  # 15 km est -> 10 km nord (hors rayon)
+        pts.append((home_lat + i / 100 * km_lat, home_lon + 15 * km_lon, 3.0, 150, 200))
+    for i in range(1500, 0, -1):  # retour vers x=0 à y=10 km
+        pts.append((home_lat + 10 * km_lat, home_lon + i / 100 * km_lon, 3.0, 150, 200))
+    cfg = HeatmapConfig()  # clip 12 km, 5 m/px (défauts de la page)
+    grids = rasterize([("t", pts)], home_lat, home_lon, cfg)
+
+    to_wm = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+
+    def pix(lat, lon):
+        x, y = to_wm.transform(lon, lat)
+        return int(round((grids.y_max_wm - y) / cfg.meters_per_pixel)), \
+            int(round((x - grids.x_min_wm) / cfg.meters_per_pixel))
+
+    # Milieu de la corde reliant le dernier point gardé sur y=0 (x=12 km, la
+    # limite du clip) au premier point gardé sur y=10 km (x=sqrt(12²-10²)≈6,63
+    # km) : personne n'a couru là.
+    mid_lat = home_lat + 5 * km_lat
+    mid_lon = home_lon + (12 + 6.63) / 2 * km_lon
+    r, c = pix(mid_lat, mid_lon)
+    window = grids.speed_n[max(r - 20, 0):r + 20, max(c - 20, 0):c + 20]
+    assert window.sum() == 0
+    assert grids.count[max(r - 20, 0):r + 20, max(c - 20, 0):c + 20].sum() == 0
 
 
 # ---------------------------------------------------------------------------

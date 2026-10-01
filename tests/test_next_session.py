@@ -35,6 +35,11 @@ from next_session_logic import (
 # _parse_ors_route
 # ===========================================================================
 
+
+def _displayed_tsb(row) -> float:
+    """TSB = différence des CTL/ATL arrondis au dixième (la seule définition)."""
+    return round(round(float(row["ctl"]), 1) - round(float(row["atl"]), 1), 1)
+
 class TestParseOrsRoute:
     def test_valid_response(self, sample_ors_geojson):
         result = _parse_ors_route(sample_ors_geojson)
@@ -140,6 +145,30 @@ class TestBuildGpx:
     def test_pace_in_description(self, sample_route):
         gpx = _build_gpx(sample_route, "Tempo", "4:45/km")
         assert "4:45/km" in gpx
+
+    def test_session_label_with_ampersand_is_escaped(self, sample_route):
+        """Un nom de séance avec un caractère XML spécial ne doit pas casser le
+        GPX (ex. « Tempo & Strides » depuis parse_workout_target)."""
+        gpx = _build_gpx(sample_route, "Tempo & Strides", "4:45/km")
+        assert "Tempo & Strides" not in gpx  # non échappé tel quel
+        assert "Tempo &amp; Strides" in gpx
+        ET.fromstring(gpx)  # toujours un XML bien formé
+
+    def test_ors_attribution_in_metadata(self, sample_route):
+        """Conformité CGU ORS / licence ODbL OpenStreetMap : attribution dans
+        les métadonnées du GPX exporté (le parcours vient toujours d'ORS)."""
+        ns = {"gpx": "http://www.topografix.com/GPX/1/1"}
+        gpx = _build_gpx(sample_route, "Endurance", "5:30/km")
+        root = ET.fromstring(gpx)
+        metadata = root.find("gpx:metadata", ns)
+        assert metadata is not None
+        copyright_el = metadata.find("gpx:copyright", ns)
+        assert copyright_el is not None
+        assert copyright_el.attrib["author"] == "OpenStreetMap contributors"
+        desc = metadata.find("gpx:desc", ns)
+        assert desc is not None
+        assert "openrouteservice.org" in desc.text
+        assert "OpenStreetMap" in desc.text
 
 
 # ===========================================================================
@@ -349,6 +378,31 @@ class TestRecommendSession:
             result = _recommend_session(df)
         assert result["session_key"] == "endurance"
 
+    def test_days_since_is_calendar_based_not_24h_blocks(self):
+        """Repro fuzz repro_days_since : une sortie d'hier doit compter « il y a
+        1 jour » qu'on la consulte tôt le matin ou tard le soir — days_since se
+        calcule en jours calendaires, pas en blocs de 24 h."""
+        today = date.today()
+        yesterday_19h = (
+            datetime.combine(today - timedelta(days=1), datetime.min.time())
+            + timedelta(hours=19)
+        )
+        rows = [{
+            "startTimeLocal": yesterday_19h, "activityType": "running",
+            "distance_km": 10.0, "duration_min": 55.0, "avgPace_sec": 330.0,
+            "avgHR": 148.0, "elevationGain": 60.0, "activityName": "Run",
+            "startLat": 48.85, "startLon": 2.35, "activityId": 1,
+        }]
+        df = pd.DataFrame(rows)
+        df["startTimeLocal"] = pd.to_datetime(df["startTimeLocal"])
+        morning = datetime.combine(today, datetime.min.time()) + timedelta(hours=8)
+        evening = datetime.combine(today, datetime.min.time()) + timedelta(hours=20)
+        with patch.object(logic, "compute_tsb", return_value=(50.0, 38.0, 0.0)):
+            seen_morning = _recommend_session(df, now=morning)
+            seen_evening = _recommend_session(df, now=evening)
+        assert seen_morning["days_since"] == 1
+        assert seen_evening["days_since"] == 1
+
     def test_endurance_normal_tsb(self, make_running_df):
         df = make_running_df()
         with patch.object(logic, "compute_tsb", return_value=(40.0, 42.0, -2.0)):
@@ -517,9 +571,7 @@ class TestComputePmcSeries:
         # IF=1, duration_h=1 → tss=100
         assert result.iloc[0]["tss"] == pytest.approx(100.0)
         # TSB = CTL - ATL sur la même ligne : négatif le jour d'une séance
-        assert result.iloc[0]["tsb"] == pytest.approx(
-            result.iloc[0]["ctl"] - result.iloc[0]["atl"]
-        )
+        assert result.iloc[0]["tsb"] == _displayed_tsb(result.iloc[0])
         assert result.iloc[0]["tsb"] < 0
         # Après la TSS, ATL et CTL sont strictement positifs
         assert result.iloc[0]["ctl"] > 0
@@ -527,18 +579,65 @@ class TestComputePmcSeries:
         # ATL réagit plus vite que CTL (k_atl < k_ctl → pondération nouvelle TSS plus forte)
         assert result.iloc[0]["atl"] > result.iloc[0]["ctl"]
 
+    def test_future_dated_activity_not_dropped(self):
+        """
+        Fuzz f_next2 : une activité datée de demain (montre en avance, fuseau
+        horaire) ne doit pas disparaître de la réindexation (qui s'arrêtait à
+        aujourd'hui). Elle doit rester la dernière ligne de la série, avec
+        l'invariant TSB = CTL - ATL comme toutes les autres.
+        """
+        tomorrow = (
+            datetime.combine(date.today() + timedelta(days=1), datetime.min.time())
+            + timedelta(hours=8)
+        )
+        df = pd.DataFrame([{
+            "startTimeLocal": tomorrow,
+            "activityType": "running",
+            "distance_km": 10.0,
+            "duration_min": 55.0,
+            "avgPace_sec": 330.0,
+            "avgHR": 148.0,
+            "elevationGain": 60.0,
+        }])
+        df["startTimeLocal"] = pd.to_datetime(df["startTimeLocal"])
+        result = _compute_pmc_series(df, threshold_sec=330.0)
+        assert not result.empty
+        assert result.iloc[-1]["date"] == pd.Timestamp(tomorrow).normalize()
+        assert result.iloc[-1]["tss"] > 0
+        assert result.iloc[-1]["tsb"] == _displayed_tsb(result.iloc[-1])
+
     def test_tsb_est_toujours_ctl_moins_atl(self, make_running_df):
         """
         Invariant de la seule définition du TSB dans l'app : sur CHAQUE jour de
-        la série, tsb == ctl - atl. C'est ce qui garantit un chiffre unique
-        entre la métrique du haut de la page Forme, celle de tab_charge, la
-        courbe PMC et la page Comparatif — et que le TSB tracé soit bien
-        l'écart vertical entre les courbes CTL et ATL.
+        la série, tsb == round(ctl, 1) - round(atl, 1) — la soustraction des
+        deux chiffres affichés. C'est ce qui garantit un chiffre unique entre la
+        métrique du haut de la page Forme, celle de tab_charge, la courbe PMC et
+        la page Comparatif ; l'écart à ctl - atl brut reste sous 0,1.
         """
         df = make_running_df(n=25, days_apart=2, with_location=False)
         result = _compute_pmc_series(df, threshold_sec=330.0)
         assert not result.empty
-        assert ((result["tsb"] - (result["ctl"] - result["atl"])).abs() < 1e-9).all()
+        assert all(r["tsb"] == _displayed_tsb(r) for _, r in result.iterrows())
+        assert ((result["tsb"] - (result["ctl"] - result["atl"])).abs() <= 0.1 + 1e-9).all()
+
+    def test_tsb_du_haut_de_page_egale_celui_de_l_onglet_charge(self, monkeypatch):
+        """
+        Revue #1 : sur une limite d'arrondi, compute_tsb (soustraction des arrondis)
+        et tab_charge (last["tsb"] brut) donnaient deux chiffres. La série est
+        construite pour tomber sur cette limite : le test échoue si l'une des deux
+        définitions revient.
+        """
+        import next_session_logic
+        from pmc_edge import rounding_edge_daily
+        daily, c, a = rounding_edge_daily(pd.Timestamp.now())
+        monkeypatch.setattr(next_session_logic, "daily_tss", lambda df, thr: daily.copy())
+        df = pd.DataFrame([{"startTimeLocal": pd.Timestamp.now(), "activityType": "running",
+                            "distance_km": 10.0, "duration_min": 55.0, "avgPace_sec": 330.0}])
+        last = _compute_pmc_series(df, 330).iloc[-1]
+        ctl, atl, tsb = _compute_tsb(df)
+        assert (ctl, atl) == (round(c, 1), round(a, 1))
+        assert tsb == last["tsb"] == round(round(c, 1) - round(a, 1), 1)
+        assert tsb != round(c - a, 1)                    # la série est bien sur la limite
 
     def test_compute_tsb_reprend_le_tsb_de_la_serie(self, make_running_df):
         """compute_tsb ne doit pas recalculer sa propre fraîcheur."""
@@ -791,7 +890,7 @@ class TestPmcAvecSportCroise:
         assert (pmc["tss"] == pmc["tss_run"] + pmc["tss_cross"]).all()
         assert pmc["tss_cross"].sum() > 0
         # Le TSB reste l'écart vertical exact entre CTL et ATL
-        assert (pmc["tsb"] - (pmc["ctl"] - pmc["atl"])).abs().max() < 1e-9
+        assert all(r["tsb"] == _displayed_tsb(r) for _, r in pmc.iterrows())
 
     def test_seuil_de_reference_ignore_les_autres_sports(self, make_running_df):
         """Une sortie vélo de 8 km ne doit pas déplacer l'allure seuil."""
@@ -818,3 +917,203 @@ class TestPmcAvecSportCroise:
         """Contrat historique : sans `load_df`, le comportement est identique."""
         runs = make_running_df(n=20, days_apart=3, with_location=False)
         assert _recommend_session(runs)["tsb"] == _recommend_session(runs, load_df=runs)["tsb"]
+
+
+# ---------------------------------------------------------------------------
+# load_risk (ACWR, monotonie)
+# ---------------------------------------------------------------------------
+
+def _pmc(daily_values):
+    import pandas as _pd
+    days = _pd.date_range("2026-01-01", periods=len(daily_values), freq="D")
+    return _pd.DataFrame({"date": days, "tss": daily_values})
+
+
+def test_load_risk_steady_is_optimal():
+    from next_session_logic import load_risk
+    r = load_risk(_pmc([50, 0] * 14))
+    assert r["acwr"] == pytest.approx(150 / 7 / 25, abs=0.01)   # 3 séances sur les 7 derniers jours
+    assert r["acwr_zone"] == "optimal"
+    assert r["monotony"] is not None and not r["monotony_high"]
+
+
+def test_load_risk_spike_flagged():
+    from next_session_logic import load_risk
+    r = load_risk(_pmc([30] * 21 + [120] * 7))
+    assert r["acwr"] > 1.5 and r["acwr_zone"] == "risque"
+
+
+def test_load_risk_counts_days_not_activities():
+    """Revue : 7 lignes = 7 jours ; une semaine sans séance fait baisser l'aigu."""
+    from next_session_logic import load_risk
+    r = load_risk(_pmc([60] * 21 + [0] * 7))
+    assert r["acute"] == 0 and r["acwr_zone"] == "sous_charge"
+    assert r["monotony"] is None and r["strain"] is None   # écart-type nul
+
+
+def test_load_risk_short_history():
+    from next_session_logic import load_risk
+    assert load_risk(_pmc([50] * 10)) == {}
+    assert load_risk(None) == {}
+
+
+def test_load_risk_on_real_pmc_series(sample_running_df):
+    from next_session_logic import compute_pmc_series, load_risk
+    r = load_risk(compute_pmc_series(sample_running_df, 330))
+    assert set(r) >= {"acwr", "monotony", "strain"} or r == {}
+
+
+# ---------------------------------------------------------------------------
+# Plan Objectif dans la séance du jour (merge_goal_plan_into_recommendation)
+# ---------------------------------------------------------------------------
+
+def _goal_sessions(first_kind="tempo", day_offset=1):
+    from datetime import date as _d, timedelta as _td
+    base_day = _d.today() + _td(days=day_offset)
+    tempo = {"date": base_day.isoformat(), "kind": first_kind, "title": "Seuil", "distance_km": 8.0,
+             "duration_min": 50, "target": "2 × 8′ à 5:00–5:10/km", "why": "Seuil",
+             "steps": [{"type": "warmup", "duration_s": 900, "pace_fast": 400, "pace_slow": 420},
+                       {"type": "repeat", "count": 2, "steps": [
+                           {"type": "interval", "duration_s": 480, "pace_fast": 300, "pace_slow": 310},
+                           {"type": "recovery", "duration_s": 120, "pace_fast": None, "pace_slow": None}]},
+                       {"type": "cooldown", "duration_s": 600, "pace_fast": 400, "pace_slow": 420}]}
+    strength = {"date": base_day.isoformat(), "kind": "strength", "title": "Renfo", "distance_km": 0,
+                "duration_min": 40, "steps": []}
+    return [strength, tempo]
+
+
+def test_goal_session_uses_overall_pace_not_warmup(sample_running_df):
+    from next_session_logic import todays_session
+    rec = todays_session(sample_running_df, "BALANCED", 80, None, _goal_sessions())["rec"]
+    assert rec["goal_session"]["title"] == "Seuil" and rec["session_key"] == "tempo"
+    expected = (1500 * 410 + 960 * 305) / (1500 + 960)
+    assert rec["target_pace_sec"] == pytest.approx(expected)
+
+
+def test_run_coach_active_without_next_run_keeps_priority(sample_running_df):
+    """Revue : Run Coach actif sans séance à venir → PAS le plan Objectif."""
+    from next_session_logic import todays_session
+    coach = {"plan": {"name": "Run Coach"}, "next_run": None, "phase": None, "days_to_event": None}
+    rec = todays_session(sample_running_df, "BALANCED", 80, coach, _goal_sessions())["rec"]
+    assert rec.get("goal_session") is None
+
+
+@pytest.mark.parametrize("sessions", [None, [], [_goal_sessions()[0]]])
+def test_no_goal_run_falls_back_to_internal(sample_running_df, sessions):
+    from next_session_logic import recommend_session, todays_session
+    rec = todays_session(sample_running_df, "BALANCED", 80, None, sessions)["rec"]
+    assert rec.get("goal_session") is None
+    assert rec["session_key"] == recommend_session(
+        sample_running_df[sample_running_df["activityType"] == "running"],
+        downgrade=0, load_df=sample_running_df)["session_key"]
+
+
+def test_race_day_pace_and_alert(sample_running_df):
+    from next_session_logic import todays_session
+    race = [{"date": (__import__("datetime").date.today()).isoformat(), "kind": "race",
+             "title": "🏁 Semi-marathon", "distance_km": 21.1, "duration_min": 110,
+             "target": "5:14/km", "pace_sec": 314.0, "steps": []}]
+    df = sample_running_df.copy()
+    df["startTimeLocal"] = df["startTimeLocal"] - pd.Timedelta(days=1)   # pas de course aujourd'hui
+    out = todays_session(df, "UNBALANCED", 40, None, race)
+    assert out["rec"]["target_pace_sec"] == 314.0
+    assert "jour de la course" in out["alert"] and "décaler" not in out["alert"]
+
+
+def test_todays_plan_session_skipped_once_run(sample_running_df):
+    from next_session_logic import todays_session
+    df = sample_running_df.copy()
+    df.loc[df.index[0], "startTimeLocal"] = pd.Timestamp.now().normalize() + pd.Timedelta(hours=7)
+    sessions = _goal_sessions(day_offset=0) + [dict(_goal_sessions(day_offset=2)[1], title="Plus tard")]
+    rec = todays_session(df, "BALANCED", 80, None, sessions)["rec"]
+    assert rec["goal_session"]["title"] == "Plus tard"
+
+
+def test_validated_sessions_only_when_current(tmp_path, monkeypatch):
+    from datetime import date as _d, timedelta as _td
+    import goal_store
+    from race_plan_logic import athlete_baseline, build_race_plan
+    from workout_export import plan_id_of
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    goal = {"distance": "10 km", "race_date": (_d.today() + _td(weeks=6)).isoformat()}
+    prefs = {"runs_per_week": 4}
+    plan = build_race_plan(_d.fromisoformat(goal["race_date"]), "10 km",
+                           athlete_baseline(None, _d.today()), _d.today())
+    goal_store.save_goal(1, goal, prefs)
+    assert goal_store.validated_sessions(1) is None                    # pas validé
+    goal_store.validate_plan(1, plan_id_of(goal, prefs), plan)
+    assert goal_store.validated_sessions(1)                             # validé et à jour
+    goal_store.save_goal(1, goal, {"runs_per_week": 5})
+    assert goal_store.validated_sessions(1) is None                    # préférences changées
+    goal_store.save_goal(1, dict(goal, race_date="2020-01-01"), prefs)
+    assert goal_store.validated_sessions(1) is None                    # course passée
+
+
+# ---------------------------------------------------------------------------
+# Revue PR 1 (lot L) : todays_session sans course, Run Coach inconnu, contrat
+# de la reco fusionnée (allure affichée et fiche de séance).
+# ---------------------------------------------------------------------------
+
+def _cross(n=5):
+    now = pd.Timestamp.now().normalize()
+    return pd.DataFrame([{"startTimeLocal": now - pd.Timedelta(days=2 * i), "activityType": "cycling",
+                          "distance_km": 30.0, "duration_min": 60.0, "avgPace_sec": 0.0,
+                          "avgHR": 130.0, "elevationGain": 100.0, "trainingLoad": 80.0}
+                         for i in range(n)])
+
+
+@pytest.mark.parametrize("df", [None, pd.DataFrame()], ids=["none", "vide"])
+def test_todays_session_sans_historique_ne_plante_pas(df):
+    from next_session_logic import todays_session
+    out = todays_session(df, "LOW", 50, None, _goal_sessions())
+    assert out["rec"] is None and out["alert"] is None and out["downgrade"] > 0
+    assert out["coach_unknown"] is False
+
+
+def test_todays_session_sport_croise_seul_ne_plante_pas():
+    """Repro revue : vélo seul → TypeError sur une date NaT."""
+    from next_session_logic import todays_session
+    assert todays_session(_cross(), "BALANCED", 80, None, _goal_sessions())["rec"] is None
+
+
+def test_todays_session_sous_le_minimum_de_courses(make_running_df):
+    from next_session_logic import MIN_RUNS_FOR_SESSION, todays_session
+    runs = make_running_df(n=MIN_RUNS_FOR_SESSION)
+    assert todays_session(pd.concat([runs.iloc[:-1], _cross()]), None, None, None)["rec"] is None
+    assert todays_session(pd.concat([runs, _cross()]), None, None, None)["rec"] is not None
+
+
+def test_todays_session_courses_sans_date_ignorees(make_running_df):
+    """3 courses dont une sans date : 2 courses datées → pas de séance (et pas d'erreur)."""
+    from next_session_logic import todays_session
+    df = make_running_df(n=3)
+    df.loc[df.index[0], "startTimeLocal"] = pd.NaT
+    assert todays_session(df, None, None, None)["rec"] is None
+    df = pd.concat([make_running_df(n=3), df.iloc[[0]]], ignore_index=True)
+    assert todays_session(df, None, None, None)["rec"]["days_since"] == 0
+
+
+def test_todays_session_coach_inconnu_n_annonce_pas_le_plan_objectif(sample_running_df):
+    """
+    Revue : un échec passager de get_training_plans (contexte None, mis en cache
+    1 h) faisait annoncer le plan Objectif à la place de Run Coach.
+    """
+    from coach_logic import COACH_UNKNOWN
+    from next_session_logic import recommend_session, todays_session
+    out = todays_session(sample_running_df, "BALANCED", 80, COACH_UNKNOWN, _goal_sessions())
+    assert out["coach_unknown"] is True
+    assert out["rec"].get("goal_session") is None and out["rec"]["coach"] is None
+    assert out["rec"]["session_key"] == recommend_session(
+        sample_running_df, load_df=sample_running_df)["session_key"]
+    # « aucun plan » (None) : le plan Objectif reprend la main, comme avant.
+    known = todays_session(sample_running_df, "BALANCED", 80, None, _goal_sessions())
+    assert known["coach_unknown"] is False and known["rec"]["goal_session"]["title"] == "Seuil"
+
+
+def test_todays_session_goal_plan_met_a_jour_la_fiche_de_seance(sample_running_df):
+    """Revue : rec["session"] restait celle de la logique interne (seule la page la recalculait)."""
+    from next_session_logic import SESSION_TYPES, todays_session
+    rec = todays_session(sample_running_df, "BALANCED", 80, None,
+                         _goal_sessions(first_kind="long"))["rec"]
+    assert rec["session_key"] == "sortie_longue"
+    assert rec["session"] is SESSION_TYPES["sortie_longue"]

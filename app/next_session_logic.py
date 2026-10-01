@@ -6,8 +6,9 @@ sans dépendance à Streamlit.
 import numpy as np
 import pandas as pd
 from datetime import date, datetime, timedelta, timezone
+from xml.sax.saxutils import escape as xml_escape
 from formatting import seconds_to_pace_str
-from forme_logic import downgrade_session
+from forme_logic import downgrade_session, forme_downgrade
 
 _JOURS_FR = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
 _MOIS_FR = ["jan.", "fév.", "mars", "avr.", "mai", "juin",
@@ -38,7 +39,7 @@ SESSION_TYPES = {
     "endurance": {
         "label": "Endurance fondamentale",
         "icon": "🏃",
-        "color": "#199e70",
+        "color": "#189a6d",          # chart_theme.AQUA
         "description": "Séance clé du coureur. Allure confortable, conversation possible. Développe le moteur aérobie.",
         "dist_factor": 1.00,
         "pace_factor": 1.05,
@@ -56,7 +57,7 @@ SESSION_TYPES = {
     "sortie_longue": {
         "label": "Sortie longue",
         "icon": "🏔️",
-        "color": "#9085e9",
+        "color": "#867ae7",          # chart_theme.VIOLET
         "description": "Excellente fraîcheur. C'est le moment idéal pour une longue sortie et construire ton endurance.",
         "dist_factor": 1.40,
         "pace_factor": 1.10,
@@ -221,6 +222,38 @@ def cross_training_factor(activities_df: pd.DataFrame, threshold_sec: float) -> 
     return min(max(k, CROSS_TRAINING_K_MIN), CROSS_TRAINING_K_MAX)
 
 
+def activity_tss(activities_df: pd.DataFrame, threshold_sec: float,
+                 calibration_df: pd.DataFrame | None = None) -> pd.Series:
+    """
+    TSS de CHAQUE activité, tel que le PMC le compte (même index que
+    `activities_df`) : course à l'allure (courses sans allure exclues), sport
+    croisé par sa charge Garmin × facteur, plafonnés à `_MAX_TSS_PER_ACTIVITY` ;
+    NaN pour ce que le PMC ignore.
+
+    `calibration_df` = l'historique sur lequel calibrer le facteur du sport
+    croisé. Une page qui affiche une vue filtrée DOIT passer l'historique
+    complet : calibré sur le filtre (« wing » seul → aucune course → facteur
+    de repli), une séance valait 50 ici et 200 dans le PMC.
+    """
+    if activities_df is None:
+        return pd.Series(dtype=float)
+    # Calcul par POSITION, index d'origine remis à la fin : un index dupliqué
+    # (concat sans ignore_index) mélangeait sinon les valeurs de deux activités.
+    frame = activities_df.reset_index(drop=True)
+    out = pd.Series(np.nan, index=frame.index, dtype=float)
+    if frame.empty:
+        return out.set_axis(activities_df.index)
+    runs = _running_rows(frame)
+    if not runs.empty:
+        out.loc[runs.index] = _pace_tss(runs, threshold_sec)
+    cross = _cross_training_rows(frame)
+    if not cross.empty:
+        k = cross_training_factor(frame if calibration_df is None else calibration_df, threshold_sec)
+        out.loc[cross.index] = (pd.to_numeric(cross["trainingLoad"], errors="coerce") * k).clip(
+            upper=_MAX_TSS_PER_ACTIVITY)
+    return out.set_axis(activities_df.index)
+
+
 def daily_tss(activities_df: pd.DataFrame, threshold_sec: float) -> pd.DataFrame:
     """
     TSS quotidien, décomposé en course et sport croisé.
@@ -231,24 +264,27 @@ def daily_tss(activities_df: pd.DataFrame, threshold_sec: float) -> pd.DataFrame
     l'application (Accueil, Forme, Prochaine sortie, Coach IA, Comparatif).
     """
     columns = ["day", "tss_run", "tss_cross", "tss"]
+    if activities_df is None or activities_df.empty:
+        return pd.DataFrame(columns=columns)
+    # Par position (index remis à plat), comme activity_tss : un index dupliqué
+    # ne doit ni lever ni additionner deux activités.
+    activities_df = activities_df.reset_index(drop=True)
     runs = _running_rows(activities_df)
     cross = _cross_training_rows(activities_df)
+    # Une seule formule par activité (activity_tss), partagée avec la page Activités.
+    per_activity = activity_tss(activities_df, threshold_sec) if not (runs.empty and cross.empty) else None
 
     parts = []
     if not runs.empty:
         parts.append(
-            _pace_tss(runs, threshold_sec)
+            per_activity.loc[runs.index]
             .groupby(runs["startTimeLocal"].dt.normalize())
             .sum()
             .rename("tss_run")
         )
     if not cross.empty:
-        k = cross_training_factor(activities_df, threshold_sec)
-        converted = (
-            pd.to_numeric(cross["trainingLoad"], errors="coerce") * k
-        ).clip(upper=_MAX_TSS_PER_ACTIVITY)
         parts.append(
-            converted
+            per_activity.loc[cross.index]
             .groupby(cross["startTimeLocal"].dt.normalize())
             .sum()
             .rename("tss_cross")
@@ -277,7 +313,8 @@ def compute_pmc_series(activities_df: pd.DataFrame, threshold_sec: float) -> pd.
     semaine.
 
     Conventions : `ctl`, `atl` et `tsb` sont les valeurs en fin de journée
-    (après TSS du jour), et `tsb` vaut exactement `ctl - atl` sur la même ligne.
+    (après TSS du jour), et `tsb` vaut exactement `round(ctl, 1) - round(atl, 1)`
+    sur la même ligne — la soustraction des deux chiffres affichés.
     C'est la SEULE définition du TSB dans l'application : `compute_tsb` en
     dérive, la courbe de `tab_charge` la trace (le TSB est donc bien l'écart
     vertical entre les courbes CTL et ATL) et la page Comparatif la reprend.
@@ -293,7 +330,11 @@ def compute_pmc_series(activities_df: pd.DataFrame, threshold_sec: float) -> pd.
 
     daily = daily.set_index("day")
     today_ts = pd.Timestamp(datetime.now().date())
-    full_range = pd.date_range(daily.index.min(), today_ts, freq="D")
+    # Une activité datée de demain (montre en avance, fuseau horaire) ne doit
+    # pas être ignorée : on réindexe jusqu'à la dernière date connue si elle
+    # dépasse aujourd'hui, pas jusqu'à aujourd'hui seul.
+    end_ts = max(today_ts, daily.index.max())
+    full_range = pd.date_range(daily.index.min(), end_ts, freq="D")
     if len(full_range) == 0:
         return pd.DataFrame(columns=columns)
     frame = daily.reindex(full_range).fillna(0.0)
@@ -309,10 +350,54 @@ def compute_pmc_series(activities_df: pd.DataFrame, threshold_sec: float) -> pd.
         records.append({
             "date": d, "tss": tss,
             "tss_run": float(row["tss_run"]), "tss_cross": float(row["tss_cross"]),
-            "ctl": ctl_v, "atl": atl_v, "tsb": ctl_v - atl_v,
+            # TSB = différence des CTL/ATL ARRONDIS affichés : c'est l'unique
+            # définition, relue telle quelle par compute_tsb, tab_charge, le
+            # Comparatif et le Calendrier (sinon 40,04 / 30,05 donnait +9,9 ici
+            # et 10,0 là).
+            "ctl": ctl_v, "atl": atl_v, "tsb": round(round(ctl_v, 1) - round(atl_v, 1), 1),
         })
 
     return pd.DataFrame(records)
+
+
+# Zones ACWR (Gabbett, Br J Sports Med 2016) — indicateur discuté
+# (Impellizzeri et al. 2020) : signal d'alerte, pas prédiction de blessure.
+ACWR_ZONES = [(0.8, "sous_charge"), (1.3, "optimal"), (1.5, "vigilance"), (float("inf"), "risque")]
+MONOTONY_HIGH = 2.0  # Foster 1998
+
+
+def load_risk(pmc: pd.DataFrame) -> dict:
+    """
+    Indicateurs avancés de gestion de charge, sur la série `compute_pmc_series`
+    (déjà réindexée jour par jour, jours sans séance à 0 — sinon une fenêtre
+    de 7 lignes compterait 7 activités et non 7 jours).
+
+    - `acwr` : TSS moyen des 7 derniers jours ÷ TSS moyen des 28 derniers ;
+    - `monotony` (Foster) : moyenne ÷ écart-type du TSS quotidien sur 7 jours
+      (None si l'écart-type est nul : 7 jours identiques, typiquement 7 × 0) ;
+    - `strain` : charge de la semaine × monotonie.
+    Retourne {} si moins de 28 jours d'historique.
+    """
+    if pmc is None or len(pmc) < 28:
+        return {}
+    tss = pmc["tss"].astype(float)
+    acute = float(tss.iloc[-7:].mean())
+    chronic = float(tss.iloc[-28:].mean())
+    acwr = acute / chronic if chronic > 0 else None
+    sd = float(tss.iloc[-7:].std(ddof=0))
+    monotony = acute / sd if sd > 0 else None
+    zone = None
+    if acwr is not None:
+        zone = next(name for limit, name in ACWR_ZONES if acwr < limit)
+    return {
+        "acute": round(acute, 1),
+        "chronic": round(chronic, 1),
+        "acwr": round(acwr, 2) if acwr is not None else None,
+        "acwr_zone": zone,
+        "monotony": round(monotony, 2) if monotony is not None else None,
+        "monotony_high": monotony is not None and monotony > MONOTONY_HIGH,
+        "strain": round(float(tss.iloc[-7:].sum()) * monotony) if monotony is not None else None,
+    }
 
 
 def reference_threshold_sec(activities_df: pd.DataFrame) -> int:
@@ -354,19 +439,16 @@ def compute_tsb(activities_df: pd.DataFrame) -> tuple[float, float, float]:
     if pmc.empty:
         return 0.0, 0.0, 0.0
     last = pmc.iloc[-1]
-    # On lit le TSB de la série plutôt que de le recalculer : un seul chiffre
-    # de fraîcheur entre cette fonction, la courbe PMC et la page Comparatif.
-    return (
-        round(float(last["ctl"]), 1),
-        round(float(last["atl"]), 1),
-        round(float(last["tsb"]), 1),
-    )
+    # Le TSB est RELU dans la série, jamais recalculé : compute_pmc_series le
+    # pose déjà comme la différence des CTL/ATL arrondis (82 / 30,0 → 52,0).
+    return round(float(last["ctl"]), 1), round(float(last["atl"]), 1), float(last["tsb"])
 
 
 def recommend_session(
     running_df: pd.DataFrame,
     downgrade: int = 0,
     load_df: pd.DataFrame | None = None,
+    now: datetime | None = None,
 ) -> dict:
     """
     Analyse les dernières sorties et retourne un dict de recommandations.
@@ -382,6 +464,12 @@ def recommend_session(
     filtré, pour que la fraîcheur qui choisit la séance soit celle affichée
     ailleurs dans l'application. Par défaut, `running_df` sert aussi de source
     de charge — le contrat de sortie est inchangé dans les deux cas.
+
+    `now` : horodatage de référence, par défaut l'instant présent — permet aux
+    tests d'injecter une heure fixe. `days_since` et `days_since_long` se
+    comptent en jours calendaires (dates locales), pas en blocs de 24 h : une
+    sortie d'hier reste « il y a 1 jour » qu'on regarde à 8 h ou à 20 h
+    aujourd'hui.
     """
     recent = running_df.sort_values("startTimeLocal", ascending=False).head(20)
 
@@ -389,12 +477,13 @@ def recommend_session(
     avg_pace_sec = recent.loc[recent["avgPace_sec"] > 0, "avgPace_sec"].mean()
     avg_elev = recent["elevationGain"].dropna().mean()
 
+    today = (now or datetime.now()).date()
     last_run_date = recent["startTimeLocal"].max()
-    days_since = (datetime.now() - last_run_date).days
+    days_since = (today - last_run_date.date()).days
 
     long_runs = recent[recent["distance_km"] >= avg_dist * 1.2]
     days_since_long = (
-        (datetime.now() - long_runs["startTimeLocal"].max()).days
+        (today - long_runs["startTimeLocal"].max().date()).days
         if not long_runs.empty else 999
     )
 
@@ -471,17 +560,34 @@ def parse_ors_route(geojson: dict) -> dict | None:
         return None
 
 
+# Attribution requise par les CGU d'openrouteservice et la licence ODbL des
+# données OpenStreetMap qu'il sert — seule source de parcours de cette page.
+GPX_ORS_ATTRIBUTION = (
+    "Itinéraire © openrouteservice.org by HeiGIT | Map data © OpenStreetMap contributors"
+)
+
+
 def build_gpx(route: dict, session_label: str, target_pace_str: str) -> str:
-    """Génère un fichier GPX (course) compatible Garmin Connect."""
+    """
+    Génère un fichier GPX (course) compatible Garmin Connect.
+
+    `session_label` est échappé XML (un nom de séance peut contenir « & »,
+    « < »… — cf. `coach_logic.parse_workout_target`) : sans ça, un caractère
+    spécial produit un GPX invalide. Le parcours vient toujours d'ORS : les
+    métadonnées portent `<copyright>` et `<desc>` d'attribution ORS/OSM.
+    """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    name = f"Prochaine sortie — {session_label}"
+    name = xml_escape(f"Prochaine sortie — {session_label}")
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<gpx version="1.1" creator="Running Dashboard"',
         '     xmlns="http://www.topografix.com/GPX/1/1"',
         '     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"',
         '     xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd">',
-        f'  <metadata><name>{name}</name><time>{now}</time></metadata>',
+        # Ordre imposé par le schéma GPX 1.1 (metadataType) : name, desc,
+        # author?, copyright, link*, time.
+        f'  <metadata><name>{name}</name><desc>{xml_escape(GPX_ORS_ATTRIBUTION)}</desc>'
+        f'<copyright author="OpenStreetMap contributors" /><time>{now}</time></metadata>',
         '  <trk>',
         f'    <name>{name}</name>',
         f'    <desc>Allure cible : {target_pace_str} — {route["distance_km"]:.2f} km · D+ {route["ascent_m"]} m</desc>',
@@ -492,3 +598,127 @@ def build_gpx(route: dict, session_label: str, target_pace_str: str) -> str:
         lines.append(f'      <trkpt lat="{lat:.6f}" lon="{lon:.6f}">{ele_tag}</trkpt>')
     lines += ["    </trkseg>", "  </trk>", "</gpx>"]
     return "\n".join(lines)
+
+
+# Plan Objectif validé → contrat de recommend_session. La page Objectif est la
+# seule à écrire ce plan dans le calendrier : une fois envoyé, c'est lui que la
+# montre affiche, donc lui que l'Accueil doit annoncer.
+_GOAL_KIND_TO_SESSION = {
+    "easy": "endurance", "strides": "endurance", "shakeout": "recuperation",
+    "long": "sortie_longue", "tempo": "tempo", "interval": "tempo",
+    "race_pace": "tempo", "race": "tempo",
+}
+_GOAL_KEY_KINDS = {"tempo", "interval", "race_pace", "long", "race"}
+
+
+def session_overall_pace(session: dict) -> float | None:
+    """
+    Allure d'ensemble (s/km) d'une séance du plan : moyenne des allures de ses
+    étapes pondérée par leur durée (répétitions déroulées, récupérations sans
+    cible ignorées). C'est l'allure du parcours, comme pour Run Coach ; la
+    cible de répétition reste dans `session["target"]`. Pour la course :
+    l'allure de course.
+    """
+    if session.get("pace_sec"):
+        return float(session["pace_sec"])
+    total_s = weighted = 0.0
+
+    def walk(steps, times):
+        nonlocal total_s, weighted
+        for step in steps or []:
+            if step.get("type") == "repeat":
+                walk(step.get("steps"), times * int(step.get("count") or 1))
+            elif step.get("pace_fast") and step.get("pace_slow"):
+                dur = float(step.get("duration_s") or 0) * times
+                total_s += dur
+                weighted += dur * (step["pace_fast"] + step["pace_slow"]) / 2
+
+    walk(session.get("steps"), 1)
+    return weighted / total_s if total_s else None
+
+
+def merge_goal_plan_into_recommendation(rec: dict, sessions: list[dict] | None,
+                                        today: date | None = None,
+                                        ran_today: bool = False) -> dict:
+    """
+    Fait piloter la recommandation par la prochaine séance de course du plan
+    Objectif validé (même contrat que `recommend_session`, comme
+    `merge_coach_into_recommendation`). La séance du jour est ignorée si une
+    course a déjà été enregistrée aujourd'hui. Sans plan ou sans course à
+    venir, `rec` est renvoyé tel quel avec `goal_session=None`.
+    """
+    today = today or date.today()
+    runs = [s for s in sessions or []
+            if s.get("kind") in _GOAL_KIND_TO_SESSION
+            and (date.fromisoformat(s["date"]) > today
+                 or (date.fromisoformat(s["date"]) == today and not ran_today))]
+    if not runs:
+        return dict(rec, goal_session=None)
+    s = min(runs, key=lambda x: x["date"])
+    day = date.fromisoformat(s["date"])
+    pace = session_overall_pace(s) or rec.get("target_pace_sec")
+    merged = dict(rec)
+    merged.update(
+        session_key=_GOAL_KIND_TO_SESSION[s["kind"]],
+        session=SESSION_TYPES[_GOAL_KIND_TO_SESSION[s["kind"]]],
+        goal_session=s,
+        target_dist_km=s.get("distance_km") or rec.get("target_dist_km"),
+        duration_min=s.get("duration_min") or rec.get("duration_min"),
+        target_pace_sec=pace,
+        target_pace_str=seconds_to_pace_str(pace) if pace else rec.get("target_pace_str"),
+        suggested_date=day,
+        suggested_date_str=format_date_fr(day),
+        downgraded_from=None,
+    )
+    return merged
+
+
+# Sous ce nombre de courses datées, les moyennes récentes (distance, allure)
+# qui dimensionnent la séance ne veulent rien dire : aucune séance annoncée.
+MIN_RUNS_FOR_SESSION = 3
+
+
+def todays_session(activities_df: pd.DataFrame | None, hrv_status, sleep_score,
+                   coach_context: dict | None, goal_sessions: list[dict] | None = None) -> dict:
+    """
+    Séance du jour telle que l'annonce toute l'app : plan Garmin Run Coach s'il
+    est actif (même sans séance de course à venir : la montre le suit), sinon
+    le plan Objectif validé du dashboard, sinon la logique interne, modulée par
+    la récupération (HRV, sommeil). Retourne {"rec", "downgrade", "alert",
+    "coach_unknown"}. Accueil, Prochaine sortie et serveur MCP passent tous par
+    ici — une page qui recomposerait ces appels risquerait d'annoncer une autre
+    séance.
+
+    `rec` vaut None sous `MIN_RUNS_FOR_SESSION` courses datées (historique vide
+    ou None, sport croisé seul). `coach_context` = `coach_logic.COACH_UNKNOWN`
+    (Garmin n'a pas répondu) : `coach_unknown` est vrai et le plan Objectif
+    n'est PAS annoncé — un Run Coach peut être actif, la séance reste celle de
+    la logique interne en attendant que Garmin réponde.
+    """
+    from coach_logic import coach_unknown, hard_session_alert, merge_coach_into_recommendation
+
+    downgrade = forme_downgrade(hrv_status, sleep_score)
+    unknown = coach_unknown(coach_context)
+    out = {"rec": None, "downgrade": downgrade, "alert": None, "coach_unknown": unknown}
+    if activities_df is None or activities_df.empty or "activityType" not in activities_df:
+        return out
+    running = activities_df[activities_df["activityType"] == RUNNING_TYPE]
+    running = running[pd.to_datetime(running["startTimeLocal"], errors="coerce").notna()]
+    if len(running) < MIN_RUNS_FOR_SESSION:
+        return out
+    base = recommend_session(running, downgrade=downgrade, load_df=activities_df)
+    rec = merge_coach_into_recommendation(base, coach_context)
+    alert = hard_session_alert(coach_context, downgrade)
+    if coach_context is None and goal_sessions:
+        ran_today = bool((pd.to_datetime(running["startTimeLocal"]).dt.date == date.today()).any())
+        rec = merge_goal_plan_into_recommendation(base, goal_sessions, ran_today=ran_today)
+        rec["coach"] = rec["coach_task"] = None
+        goal = rec.get("goal_session")
+        if goal and downgrade and goal["kind"] == "race":
+            alert = ("Récupération dégradée (HRV ou sommeil) le jour de la course : pars "
+                     "prudemment, à l'allure travaillée, et ne cherche pas à rattraper un "
+                     "départ lent.")
+        elif goal and downgrade and goal["kind"] in _GOAL_KEY_KINDS:
+            alert = ("Récupération dégradée (HRV ou sommeil) et séance clé au programme de "
+                     "ton plan Objectif : écoute tes sensations, quitte à la décaler d'un jour.")
+    return dict(out, rec=rec, alert=alert)

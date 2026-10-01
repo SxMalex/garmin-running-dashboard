@@ -1,15 +1,24 @@
 """Serveur MCP exposant Garmin Connect à un client IA (Claude Code, Claude Desktop…).
 
 Architecture :
+  - des *tools* « raisonnement » (`insights.py`) qui exposent les métriques et
+    verdicts CALCULÉS par le dashboard — fraîcheur, séance du jour, dérive
+    cardiaque, plan vers un objectif — en réutilisant la logique de `app/` ;
   - quelques *tools* curés pour les usages fréquents (pas, sommeil, FC, stress…),
-  - un *tool* passe-plat `garmin_call(method, params)` qui donne accès aux ~130
-    méthodes de la lib `garminconnect` sans toutes les redéclarer,
+  - un *tool* passe-plat `garmin_call(method, params)` qui donne accès aux ~100
+    méthodes de lecture de la lib `garminconnect` sans toutes les redéclarer,
   - un *tool* `garmin_list_methods()` qui retourne le catalogue (nom + signature
     + docstring) pour que le modèle sache quoi appeler via le passe-plat.
 
-Le client `Garmin` est connecté paresseusement à la première utilisation, en
-réutilisant le même pattern de cache de session que `test_connection.py`
-(tokens OAuth garth dans le tokenstore, refresh proactif, MFA si requis).
+Le client `Garmin` est connecté paresseusement à la première utilisation, par
+les tokens du tokenstore (amorcé une fois par `test_connection.py`, MFA
+compris). Tokenstore PROPRE au serveur (`~/.garminconnect-mcp`), distinct de
+celui du dashboard : deux processus qui rafraîchissent le même jeton se
+l'invalideraient mutuellement.
+
+Serveur en lecture seule : liste blanche de méthodes (`get_`, `count_`,
+`download_`), pas de liste noire — une nouvelle méthode d'écriture de la lib
+ne passe pas par défaut.
 
 Transport : stdio (lancé en sous-processus par le client MCP).
 """
@@ -18,31 +27,49 @@ from __future__ import annotations
 
 import inspect
 import os
+import sys
+import time
+from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-from garminconnect import Garmin
-from mcp.server.fastmcp import FastMCP
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "app"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-DEFAULT_TOKENSTORE = "~/.garminconnect"
+from dotenv import load_dotenv  # noqa: E402
+from garminconnect import Garmin  # noqa: E402
+from mcp.server.fastmcp import FastMCP  # noqa: E402
+
+import insights  # noqa: E402
+from garmin_client import GarminClient, _purge_legacy_tokens  # noqa: E402
+
+DEFAULT_TOKENSTORE = "~/.garminconnect-mcp"  # ≠ dashboard hors Docker (~/.garminconnect)
 
 # Méthodes du cycle d'authentification : on ne les expose pas via le passe-plat,
 # le serveur gère la session lui-même.
 _AUTH_METHODS = {"login", "logout", "resume_login"}
 
-# Serveur en lecture seule : on bloque toute méthode susceptible de modifier le
-# compte Garmin. Filtrage par préfixe (1er token) du nom de méthode.
-_WRITE_PREFIXES = frozenset(
-    {"add", "set", "delete", "remove", "upload", "import", "create",
-     "schedule", "unschedule"}
-)
-# Méthodes à effet de bord ne suivant pas la convention de préfixe ci-dessus.
-_WRITE_METHODS = frozenset({"request_reload"})
+# Serveur en lecture seule : LISTE BLANCHE. `connectapi` / `connectwebproxy`
+# sont codés en GET dans la lib ; `query_garmin_graphql` (POST, mutations
+# possibles) et tout le reste sont refusés.
+_READ_PREFIXES = ("get_", "count_", "download_")
+_READ_METHODS = frozenset({"connectapi", "connectwebproxy"})
+
+# `connectapi`/`connectwebproxy` acceptent **kwargs relayés tels quels jusqu'à
+# `requests.Session.request` (cf. garminconnect.client._run_request) : sans
+# liste blanche, `proxies`/`verify=False`/`cookies`/`auth`/`files`… partiraient
+# avec le Bearer du tokenstore vers un tiers. Seul `path` (déjà positionnel) et
+# `params` (query string, seul kwarg utilisé par app/garmin_client.py) sont
+# nécessaires en lecture seule.
+_CONNECTAPI_ALLOWED_KWARGS = frozenset({"path", "params"})
 
 
-def _is_destructive(method: str) -> bool:
-    """Vrai si la méthode modifie le compte (écriture/suppression/upload…)."""
-    return method.split("_")[0] in _WRITE_PREFIXES or method in _WRITE_METHODS
+def _is_allowed(method: str) -> bool:
+    """Vrai si la méthode ne fait que lire (liste blanche)."""
+    if method.startswith("_") or method in _AUTH_METHODS:
+        return False
+    return method.startswith(_READ_PREFIXES) or method in _READ_METHODS
+
 
 mcp = FastMCP("garmin")
 
@@ -50,37 +77,130 @@ _client: Garmin | None = None
 
 
 def _get_client() -> Garmin:
-    """Retourne un client Garmin connecté (connexion paresseuse + cache session)."""
+    """
+    Client Garmin connecté (paresseux). Les tokens du tokenstore suffisent ;
+    email/mot de passe ne servent qu'à amorcer une session absente (le
+    dashboard conseille de laisser GARMIN_PASSWORD vide : ce n'est pas bloquant).
+    """
     global _client
     if _client is not None:
         return _client
 
     # .env du projet, résolu par rapport à ce fichier (indépendant du cwd).
-    load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
-    email = os.environ.get("GARMIN_EMAIL")
-    password = os.environ.get("GARMIN_PASSWORD")
-    tokenstore = os.environ.get("GARMIN_TOKENSTORE", DEFAULT_TOKENSTORE)
-
-    if not email or not password:
-        raise RuntimeError(
-            "GARMIN_EMAIL et GARMIN_PASSWORD doivent être définis (fichier .env)."
-        )
-
-    client = Garmin(
-        email,
-        password,
-        # En contexte serveur (stdio), pas de saisie interactive possible :
-        # le MFA doit avoir été fait une fois pour amorcer le tokenstore.
-        prompt_mfa=lambda: (_ for _ in ()).throw(
-            RuntimeError(
-                "MFA requis mais session non amorcée. Lance d'abord "
-                "`python test_connection.py` une fois pour créer le cache."
-            )
-        ),
+    load_dotenv(ROOT / ".env")
+    tokenstore = os.environ.get("GARMIN_TOKENSTORE_MCP") or DEFAULT_TOKENSTORE
+    mfa_error = RuntimeError(
+        "MFA requis mais session non amorcée. Lance d'abord "
+        "`python test_connection.py` une fois pour créer le tokenstore."
     )
-    client.login(tokenstore)
+
+    # Mise à jour depuis garth : anciens jetons (secret OAuth1 longue durée) inutiles.
+    _purge_legacy_tokens(tokenstore)
+    try:
+        client = Garmin()
+        client.login(tokenstore)
+    except Exception as token_error:
+        email = os.environ.get("GARMIN_EMAIL")
+        password = os.environ.get("GARMIN_PASSWORD")
+        if not email or not password:
+            raise RuntimeError(
+                f"Pas de session dans {tokenstore} ({token_error}). Lance une fois "
+                "`python test_connection.py` : il demande email, mot de passe (sauf "
+                "s'ils sont dans .env) et code MFA, puis enregistre les tokens du "
+                "serveur MCP."
+            ) from token_error
+        client = Garmin(email, password,
+                        prompt_mfa=lambda: (_ for _ in ()).throw(mfa_error))
+        client.login(tokenstore)
     _client = client
     return _client
+
+
+_gc: GarminClient | None = None
+_gc_built_at = 0.0
+GC_RECHECK_S = 60.0
+
+
+def _get_gc() -> GarminClient:
+    """
+    GarminClient du dashboard (cache disque, streams, contrat DataFrame). Un id
+    d'athlète de repli (Garmin muet au démarrage) est retenté au plus une fois
+    par minute : sinon le MCP lisait l'objectif et le plan dans un autre dossier
+    jusqu'à son redémarrage.
+    """
+    global _gc, _gc_built_at
+    if _gc is None or (not _gc.athlete_id_reliable
+                       and time.monotonic() - _gc_built_at >= GC_RECHECK_S):
+        _use_dashboard_data_dir()
+        _gc = GarminClient(_get_client())
+        _gc_built_at = time.monotonic()
+    return _gc
+
+
+def _use_dashboard_data_dir() -> None:
+    """
+    Objectif et plan validé : ceux du dashboard de dev (bind mount app/.data).
+    Au premier usage et non à l'import : importer le module (tests) ne doit
+    pas rediriger DATA_DIR de tout le process vers les vraies données.
+    """
+    if not os.environ.get("DATA_DIR") and (ROOT / "app" / ".data").is_dir():
+        os.environ["DATA_DIR"] = str(ROOT / "app" / ".data")
+
+
+# --------------------------------------------------------------------------- #
+# Tools « raisonnement » — les calculs du dashboard, prêts à discuter.
+# --------------------------------------------------------------------------- #
+
+
+@mcp.tool()
+def daily_briefing() -> dict[str, Any]:
+    """Verdict du jour : fraîcheur (CTL/ATL/TSB), récupération (HRV, sommeil),
+    séance recommandée (plan Garmin Run Coach s'il est actif, sinon plan
+    Objectif validé du dashboard, sinon logique interne modulée par la récupération) et indicateurs de risque (ACWR,
+    monotonie). À appeler pour « dois-je m'entraîner dur aujourd'hui ? »."""
+    return insights.daily_briefing(_get_gc())
+
+
+@mcp.tool()
+def training_load(days: int = 90) -> dict[str, Any]:
+    """Charge d'entraînement hebdomadaire (TSS, CTL, ATL, TSB) sur `days` jours,
+    sport croisé inclus, avec l'allure seuil et le facteur de calibration."""
+    return insights.training_load(_get_gc(), days)
+
+
+@mcp.tool()
+def activity_analysis(activity_id: int) -> dict[str, Any]:
+    """Analyse d'une sortie : FC optique calée sur la cadence (faux relevés) et
+    dérive cardiaque (Pa:HR), avec la raison si elle n'est pas mesurable."""
+    return insights.activity_analysis(_get_gc(), activity_id)
+
+
+@mcp.tool()
+def aerobic_trend() -> dict[str, Any]:
+    """Progression de l'endurance : efficacité aérobie (vitesse ÷ FC) et dérive
+    cardiaque des sorties longues récentes."""
+    return insights.aerobic_trend(_get_gc())
+
+
+@mcp.tool()
+def race_plan_preview(
+    distance: str, race_date: str, runs_per_week: int = 4, long_run_weekday: int = 6,
+    target_time: str | None = None, include_strength: bool = True,
+) -> dict[str, Any]:
+    """Plan course + renforcement vers une course (distance : « 5 km », « 10 km »,
+    « Semi-marathon », « Marathon » ; race_date YYYY-MM-DD ; long_run_weekday
+    0=lundi…6=dimanche ; target_time « 1:55:00 »). Aperçu en lecture seule :
+    rien n'est enregistré ni envoyé à Garmin. Chaque séance porte son « why »."""
+    return insights.race_plan_preview(_get_gc(), distance, race_date, runs_per_week,
+                                      long_run_weekday, target_time, include_strength)
+
+
+@mcp.tool()
+def current_goal() -> dict[str, Any]:
+    """Objectif de course enregistré dans le dashboard et son plan actuel. Pour
+    modifier l'objectif ou envoyer des séances à la montre : page Objectif du
+    dashboard (le serveur MCP ne modifie rien)."""
+    return insights.current_goal(_get_gc())
 
 
 # --------------------------------------------------------------------------- #
@@ -188,7 +308,7 @@ def garmin_list_methods(filter: str | None = None) -> list[dict[str, str]]:
     """
     out: list[dict[str, str]] = []
     for name, fn in inspect.getmembers(Garmin, predicate=inspect.isfunction):
-        if name.startswith("_") or name in _AUTH_METHODS or _is_destructive(name):
+        if not _is_allowed(name):
             continue
         if filter and filter.lower() not in name.lower():
             continue
@@ -214,12 +334,18 @@ def garmin_call(method: str, params: dict[str, Any] | None = None) -> Any:
     Une réponse vide de Garmin est retournée comme `{"empty": true, …}` explicite
     (métrique non supportée par la montre, ou pas encore calculée).
     """
-    if method.startswith("_") or method in _AUTH_METHODS:
-        raise ValueError(f"Méthode non autorisée : {method}")
-    if _is_destructive(method):
+    if not _is_allowed(method):
         raise ValueError(
-            f"Refusé : « {method} » modifie le compte (serveur en lecture seule)."
+            f"Refusé : « {method} » n'est pas une méthode de lecture (serveur en "
+            "lecture seule : get_*, count_*, download_*, connectapi en GET)."
         )
+    if method in _READ_METHODS:
+        extra = set(params or {}) - _CONNECTAPI_ALLOWED_KWARGS
+        if extra:
+            raise ValueError(
+                f"Refusé : arguments non autorisés pour « {method} » : {sorted(extra)} "
+                "(liste blanche : path, params — serveur en lecture seule)."
+            )
     c = _get_client()
     fn = getattr(c, method, None)
     if fn is None or not callable(fn):

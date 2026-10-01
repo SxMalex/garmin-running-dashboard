@@ -29,7 +29,7 @@ from coach_logic import (
 TODAY = date(2026, 8, 13)
 
 
-def _plan(status="Scheduled", plan_id=46843176, start="2026-05-11T00:00:00.0", name="Programme Marseille-Cassis"):
+def _plan(status="Scheduled", plan_id=90000001, start="2026-05-11T00:00:00.0", name="Programme test"):
     return {
         "trainingPlanId": plan_id,
         "name": name,
@@ -46,7 +46,7 @@ def _plan(status="Scheduled", plan_id=46843176, start="2026-05-11T00:00:00.0", n
 def _task(cdate, name, sport="running", effect="AEROBIC_BASE", description="",
           duration=2520, rest=False, status="NOT_COMPLETE", week=14):
     return {
-        "trainingPlanId": 46843176,
+        "trainingPlanId": 90000001,
         "weekId": week,
         "calendarDate": cdate,
         "taskWorkout": {
@@ -110,8 +110,8 @@ def plan_detail():
 class TestActivePlan:
     def test_ignore_les_plans_termines(self, plans_raw):
         plan = active_plan(plans_raw)
-        assert plan["plan_id"] == 46843176
-        assert plan["name"] == "Programme Marseille-Cassis"
+        assert plan["plan_id"] == 90000001
+        assert plan["name"] == "Programme test"
         assert plan["start_date"] == date(2026, 5, 11)
 
     def test_prend_le_plus_recent_si_plusieurs_actifs(self):
@@ -130,7 +130,7 @@ class TestActivePlan:
         assert active_plan(raw) is None
 
     def test_accepte_une_liste_brute(self):
-        assert active_plan([_plan()])["plan_id"] == 46843176
+        assert active_plan([_plan()])["plan_id"] == 90000001
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +305,7 @@ class TestWeekSchedule:
 class TestCoachPlanContext:
     def test_contexte(self, plans_raw, plan_detail):
         ctx = coach_plan_context(plans_raw, plan_detail, TODAY)
-        assert ctx["plan"]["plan_id"] == 46843176
+        assert ctx["plan"]["plan_id"] == 90000001
         assert ctx["phase"]["phase"] == "BUILD"
         assert ctx["event_date"] == date(2026, 10, 25)
         assert ctx["days_to_event"] == 73
@@ -437,3 +437,169 @@ class TestNutritionFocus:
         """Chaque type de séance du dashboard doit avoir son axe nutritionnel."""
         from next_session_logic import SESSION_TYPES
         assert set(SESSION_TYPES) <= set(NUTRITION_FOCUS)
+
+
+# ---------------------------------------------------------------------------
+# load_coach_context / todays_session — chemin unique pages + MCP
+# ---------------------------------------------------------------------------
+
+class _PlansClient:
+    def __init__(self, plans, detail=None):
+        self.plans, self.detail, self.detail_calls = plans, detail or {}, 0
+
+    def get_training_plans(self, strict=False, use_cache=None):
+        return self.plans
+
+    def get_adaptive_plan(self, plan_id, strict=False):
+        self.detail_calls += 1
+        return self.detail
+
+
+def test_load_coach_context_none_without_active_plan():
+    from datetime import date
+    from coach_logic import load_coach_context
+    client = _PlansClient({"trainingPlanList": []})
+    assert load_coach_context(client, date(2026, 9, 24)) is None
+    assert client.detail_calls == 0
+
+
+def test_todays_session_matches_legacy_composition(sample_running_df):
+    """Même résultat que l'ancien enchaînement des pages (non-régression)."""
+    from coach_logic import hard_session_alert, merge_coach_into_recommendation
+    from forme_logic import forme_downgrade
+    from next_session_logic import recommend_session, todays_session
+    for hrv, sleep in [("BALANCED", 80), ("LOW", 50), (None, None)]:
+        got = todays_session(sample_running_df, hrv, sleep, None)
+        n = forme_downgrade(hrv, sleep)
+        legacy = merge_coach_into_recommendation(
+            recommend_session(sample_running_df, downgrade=n, load_df=sample_running_df), None)
+        assert got["rec"] == legacy and got["downgrade"] == n
+        assert got["alert"] == hard_session_alert(None, n)
+
+
+# ---------------------------------------------------------------------------
+# Revue PR 1 (lot L) : « aucun plan » ≠ « Garmin n'a pas répondu », et la reco
+# fusionnée affiche l'allure et la fiche de séance de Run Coach.
+# ---------------------------------------------------------------------------
+
+class _FlakyPlansClient:
+    """Une seule lecture, stricte avec cache (cf. load_coach_context) → `answer` (valeur ou exception)."""
+
+    def __init__(self, answer, detail=None):
+        self.answer, self.detail, self.calls = answer, detail or {}, []
+
+    def get_training_plans(self, strict=False, use_cache=None):
+        self.calls.append((strict, use_cache))
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+    def get_adaptive_plan(self, plan_id, strict=False):
+        return self.detail
+
+
+@pytest.mark.parametrize("error", [RuntimeError("API Error 429"), RuntimeError("API Error 503"),
+                                   ConnectionError("réseau coupé")], ids=["429", "503", "reseau"])
+def test_load_coach_context_panne_releve_au_lieu_de_dire_aucun_plan(error):
+    """Revue : l'échec tolérant ({}) donnait None = « pas de plan », mis en cache 1 h."""
+    from coach_logic import load_coach_context
+    client = _FlakyPlansClient(error)
+    with pytest.raises(type(error)):
+        load_coach_context(client, TODAY)
+    assert client.calls == [(True, True)]              # une lecture, pas deux délais d'attente
+
+
+def test_load_coach_context_vide_confirme_en_strict():
+    """Garmin répond vraiment « rien » : aucun plan (None), comme avant."""
+    from coach_logic import load_coach_context
+    assert load_coach_context(_FlakyPlansClient({}), TODAY) is None
+    assert load_coach_context(_FlakyPlansClient({"trainingPlanList": []}), TODAY) is None
+
+
+def test_load_coach_context_plan_actif(plans_raw, plan_detail):
+    from coach_logic import load_coach_context
+    ctx = load_coach_context(_FlakyPlansClient(plans_raw, plan_detail), TODAY)
+    assert ctx["plan"]["name"] == "Programme test"
+
+
+def test_load_coach_context_panne_du_detail_releve(plans_raw, plan_detail, tmp_path, monkeypatch):
+    """Revue #1 : le détail du plan actif lu en tolérant donnait {} → « Run Coach
+    actif sans séance », mis en cache 1 h (l'Accueil annonçait la logique interne)."""
+    import garmin_client as gcm
+    from coach_logic import load_coach_context
+    monkeypatch.setattr(gcm, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(gcm, "API_COOLDOWN_S", 0)
+
+    class Api:
+        fail = True
+        def get_training_plans(self):
+            return plans_raw
+        def get_adaptive_training_plan_by_id(self, plan_id):
+            if Api.fail:
+                raise RuntimeError("API Error 503")
+            return plan_detail
+
+    client = gcm.GarminClient(api=Api(), athlete_id=1)
+    with pytest.raises(RuntimeError, match="503"):
+        load_coach_context(client, TODAY)
+    Api.fail = False                                       # Garmin revient : rien n'était mis en cache
+    assert load_coach_context(client, TODAY)["plan"]["name"] == "Programme test"
+
+
+def test_coach_unknown_est_faux_mais_distinct_de_none():
+    from coach_logic import COACH_UNKNOWN, coach_unknown, hard_session_alert
+    assert not COACH_UNKNOWN and coach_unknown(COACH_UNKNOWN)
+    assert not coach_unknown(None) and not coach_unknown({})
+    assert merge_coach_into_recommendation(_rec(), COACH_UNKNOWN)["coach"] is None
+    assert hard_session_alert(COACH_UNKNOWN, 2) is None
+
+
+def test_merge_coach_met_a_jour_allure_affichee_et_fiche(plans_raw, plan_detail):
+    """Revue : target_pace_str gardait l'allure de la logique interne (MCP, GPX)."""
+    from next_session_logic import SESSION_TYPES
+    merged = merge_coach_into_recommendation(_rec(), coach_plan_context(plans_raw, plan_detail, TODAY))
+    assert merged["target_pace_sec"] == 379.0
+    assert merged["target_pace_str"] == "6:19/km"          # et non « 6:38/km »
+    assert merged["session"] is SESSION_TYPES["tempo"]
+
+
+def test_merge_coach_sans_allure_de_reference(plans_raw, plan_detail):
+    """Aucune allure connue : « — », jamais une allure inventée."""
+    rec = dict(_rec(), avg_pace_sec=None, target_pace_sec=None)
+    merged = merge_coach_into_recommendation(rec, coach_plan_context(plans_raw, plan_detail, TODAY))
+    assert merged["target_pace_str"] == "—"
+
+
+# --- Revue : une seule lecture, et seule une panne Garmin devient « inconnu » ---------
+class _StrictPlansClient:
+    def __init__(self, outcomes):
+        self.outcomes, self.calls = list(outcomes), []
+
+    def get_training_plans(self, strict=False, use_cache=False):
+        self.calls.append((strict, use_cache))
+        out = self.outcomes.pop(0)
+        if isinstance(out, Exception):
+            raise out
+        return out
+
+
+def test_coach_context_reads_plans_once_even_during_an_outage():
+    """Revue : lecture tolérante PUIS stricte = deux délais d'attente pendant une panne."""
+    from datetime import date
+    from coach_logic import load_coach_context
+    client = _StrictPlansClient([RuntimeError("API Error 503")])
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError):
+        load_coach_context(client, date(2026, 9, 29))
+    assert client.calls == [(True, True)]                     # strict ET cache autorisé : un appel
+    no_plan = _StrictPlansClient([{"trainingPlanList": []}])
+    assert load_coach_context(no_plan, date(2026, 9, 29)) is None and len(no_plan.calls) == 1
+
+
+def test_merged_recommendation_date_text_follows_the_coach_task(sample_running_df, plans_raw, plan_detail):
+    """Contre-validation : suggested_date suivait Run Coach, suggested_date_str restait « Demain »."""
+    from coach_logic import load_coach_context, merge_coach_into_recommendation
+    from next_session_logic import format_date_fr, recommend_session
+    ctx = load_coach_context(_FlakyPlansClient(plans_raw, plan_detail), TODAY)
+    rec = merge_coach_into_recommendation(recommend_session(sample_running_df), ctx)
+    assert rec["suggested_date_str"] == format_date_fr(rec["suggested_date"])

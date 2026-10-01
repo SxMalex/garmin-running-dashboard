@@ -4,6 +4,10 @@
 # Variables d'env attendues (cf. .env) :
 #   PUBLIC_DOMAIN   ex. running.exemple.com
 #   ACME_EMAIL      adresse pour les notifications de certificat
+#   BASIC_AUTH_USER identifiant de connexion au dashboard
+#   BASIC_AUTH_HASH hash bcrypt du mot de passe :
+#                   docker run --rm caddy:2-alpine caddy hash-password --plaintext '<mdp>'
+#                   (dans .env, entourer la valeur de quotes simples : elle contient des $)
 
 {
 	email {$ACME_EMAIL}
@@ -12,6 +16,15 @@
 {$PUBLIC_DOMAIN} {
 	encode gzip
 
+	# Authentification OBLIGATOIRE : l'app n'en a aucune et reprend la session
+	# Garmin depuis le tokenstore — sans ce bloc, tout visiteur verrait les
+	# données du propriétaire (et pourrait écrire dans son calendrier Garmin).
+	# Variables vides → Caddy démarre mais répond 401 à tout (échec fermé) ;
+	# docker-compose.prod.yml refuse déjà de démarrer sans elles (`:?`).
+	basic_auth {
+		{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+	}
+
 	# Headers de sécurité
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
@@ -19,7 +32,15 @@
 		X-Content-Type-Options     "nosniff"
 		Referrer-Policy            "strict-origin-when-cross-origin"
 		Permissions-Policy         "geolocation=(), microphone=(), camera=(), interest-cohort=()"
-		Content-Security-Policy    "frame-ancestors 'none'"
+		# Pas de `script-src` restrictif : Streamlit (composants React inline,
+		# WebSocket) et Folium (le rendu Leaflet embarqué charge ses JS/CSS
+		# depuis des CDN publics, cdnjs/unpkg selon les versions) en ont besoin ;
+		# un `script-src` strict casserait la carte de la page Heatmap sans gain
+		# réel ici (l'app n'accepte aucun contenu utilisateur exécutable).
+		# `img-src` couvre les fonds de carte utilisés par l'app (Plotly
+		# `open-street-map` et le fond Esri de la page Heatmap) ; `data:`/`blob:`
+		# couvrent les images générées côté client (heatmap PNG, cartes Plotly).
+		Content-Security-Policy    "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; img-src 'self' data: blob: https://*.tile.openstreetmap.org https://server.arcgisonline.com"
 		# Cache l'identité du serveur upstream
 		-Server
 	}

@@ -7,6 +7,8 @@ Convention d'alignement : le jour de l'année est corrigé des années bissextil
 pour que le 1er mars vaille toujours 60, quelle que soit l'année comparée.
 """
 
+from datetime import date
+
 import numpy as np
 import pandas as pd
 
@@ -248,7 +250,7 @@ def _column(df: pd.DataFrame, name: str) -> pd.Series:
     return pd.Series(np.nan, index=df.index)
 
 
-def day_comparison(running_df: pd.DataFrame, doy: int) -> pd.DataFrame:
+def day_comparison(running_df: pd.DataFrame, day: date) -> pd.DataFrame:
     """
     Ce qui a été couru le même jour calendaire, année par année.
 
@@ -257,6 +259,13 @@ def day_comparison(running_df: pd.DataFrame, doy: int) -> pd.DataFrame:
     journée à plusieurs sorties est agrégée : distances, durées, D+, charge et
     calories sommés, allure recalculée sur les totaux, FC et cadence moyennées au
     prorata de la durée, FC max prise au maximum.
+
+    Le filtre se fait sur le (mois, jour) RÉEL de `day`, pas sur un doy aligné :
+    celui-ci fait exprès retomber le 29 février sur la même valeur que le 28
+    (cf. `aligned_doy`) pour superposer les courbes, si bien qu'aucun doy ne
+    désigne le 29 février — le 29/02/2028, on comparerait le 28. Le 29 février
+    ne trouve donc que les autres 29 février (années bissextiles), et le 28
+    n'agrège jamais le 29.
     """
     columns = [
         "year", "date", "start_time", "sorties", "km", "minutes", "pace_sec",
@@ -265,13 +274,16 @@ def day_comparison(running_df: pd.DataFrame, doy: int) -> pd.DataFrame:
     if running_df.empty or "startTimeLocal" not in running_df.columns:
         return pd.DataFrame(columns=columns)
 
-    day = add_year_doy(running_df.copy(), "startTimeLocal")
-    day = day[day["doy"] == doy]
-    if day.empty:
+    runs = running_df.copy()
+    runs["startTimeLocal"] = pd.to_datetime(runs["startTimeLocal"])
+    runs = runs[(runs["startTimeLocal"].dt.month == day.month)
+                & (runs["startTimeLocal"].dt.day == day.day)]
+    if runs.empty:
         return pd.DataFrame(columns=columns)
+    runs["year"] = runs["startTimeLocal"].dt.year.astype(int)
 
     rows = []
-    for year, grp in day.groupby("year"):
+    for year, grp in runs.groupby("year"):
         grp = grp.sort_values("startTimeLocal")
         km = float(pd.to_numeric(_column(grp, "distance_km"), errors="coerce").fillna(0).sum())
         minutes = float(pd.to_numeric(_column(grp, "duration_min"), errors="coerce").fillna(0).sum())

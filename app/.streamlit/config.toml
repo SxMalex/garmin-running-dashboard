@@ -4,6 +4,21 @@
 # Ne les désactiver QUE pour des cas spécifiques (embedding, dev local
 # avec proxy custom). En déploiement public, garder ces flags à `true`.
 #
+# `server.allowedHosts` protège contre le DNS rebinding (Host header arbitraire
+# sur la poignée de main WebSocket) : valeurs dev ici (localhost/127.0.0.1) ;
+# en prod, le domaine public via la variable d'env STREAMLIT_SERVER_ALLOWED_HOSTS
+# dérivée de PUBLIC_DOMAIN (docker-compose.prod.yml) — nécessite Streamlit ≥ 1.61.
+#
+# `address` : contre-intuitif, le défaut interne de Streamlit quand l'option
+# n'est PAS définie n'est PAS localhost mais 0.0.0.0/toutes les interfaces
+# (vérifié sur streamlit.web.server.starlette.starlette_server_config.
+# DEFAULT_SERVER_ADDRESS, et déjà le cas en 1.52 via Tornado
+# `http_server.listen(port, address=None)`). Sans le fixer ici, un
+# `streamlit run` hors Docker exposerait donc l'app au LAN malgré tout. En
+# conteneur, le Dockerfile impose `--server.address=0.0.0.0` en argument CLI
+# (ligne de commande = priorité la plus haute dans Streamlit, prime sur ce
+# fichier), donc cette valeur ne s'applique qu'en dehors de Docker.
+#
 # `browser.serverAddress` est l'hôte annoncé au navigateur. Par défaut
 # `localhost` pour le dev. En production, remplacer par le hostname public
 # (ex. "running.exemple.com") via la variable d'env STREAMLIT_BROWSER_SERVER_ADDRESS.
@@ -11,9 +26,18 @@
 [server]
 headless = true
 port = 8501
-address = "0.0.0.0"
+address = "localhost"
+allowedHosts = ["localhost", "127.0.0.1"]
 enableXsrfProtection = true
 enableCORS = true
+# Sert app/static/ (polices embarquées) : aucune police chargée depuis un CDN,
+# donc aucune requête vers un tiers à l'ouverture du dashboard.
+enableStaticServing = true
+
+[client]
+# Pas de menu « Deploy » ni d'options de développement : l'en-tête du
+# dashboard porte ses propres actions (Actualiser, Compte).
+toolbarMode = "minimal"
 
 [browser]
 gatherUsageStats = false
@@ -21,8 +45,67 @@ serverAddress = "localhost"
 serverPort = 8501
 
 [theme]
-base = "dark"
-primaryColor = "#3987e5"
-backgroundColor = "#0e1117"
-secondaryBackgroundColor = "#161a23"
-textColor = "#e6e8ee"
+# Système « Piste claire » : fond papier, cartes blanches, encre presque noire,
+# un seul accent « volt » (#D2F53C) posé en aplat par ui_theme.py — jamais en
+# texte, illisible sur clair. Les tokens vivent dans chart_theme.py.
+base = "light"
+primaryColor = "#15171C"
+backgroundColor = "#F5F4EF"
+secondaryBackgroundColor = "#EFEDE6"
+textColor = "#15171C"
+linkColor = "#1F66D1"
+borderColor = "#E4E1D8"
+dataframeBorderColor = "#E4E1D8"
+dataframeHeaderBackgroundColor = "#F5F4EF"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "12px"
+buttonRadius = "12px"
+# Condensée athlétique (chronos, titres) + Barlow pour le texte courant : une
+# seule famille, servie localement. Licence OFL : app/static/fonts/OFL.txt.
+font = "Barlow"
+headingFont = "Barlow Condensed"
+headingFontWeights = [700, 700, 700, 700, 600, 600]
+metricValueFontWeight = 700
+chartCategoricalColors = ["#3987e5", "#008300", "#d55181", "#ba7b00", "#189a6d", "#d95926", "#867ae7", "#e45a5a"]
+# Pastilles d'état (st.success/warning/error/info, badges) alignées sur
+# chart_theme.STATUS_TEXT / STATUS_BG.
+greenTextColor = "#13622E"
+greenBackgroundColor = "#E3F4E7"
+orangeTextColor = "#8A4B00"
+orangeBackgroundColor = "#FFF4E5"
+yellowTextColor = "#8A4B00"
+yellowBackgroundColor = "#FFF4E5"
+redTextColor = "#A42424"
+redBackgroundColor = "#FBE3E3"
+blueTextColor = "#1F4FA3"
+blueBackgroundColor = "#E6EEFB"
+
+[theme.sidebar]
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F4EF"
+
+[[theme.fontFaces]]
+family = "Barlow"
+url = "app/static/fonts/Barlow-Regular.ttf"
+weight = 400
+
+[[theme.fontFaces]]
+family = "Barlow"
+url = "app/static/fonts/Barlow-Medium.ttf"
+weight = 500
+
+[[theme.fontFaces]]
+family = "Barlow"
+url = "app/static/fonts/Barlow-SemiBold.ttf"
+weight = 600
+
+[[theme.fontFaces]]
+family = "Barlow Condensed"
+url = "app/static/fonts/BarlowCondensed-SemiBold.ttf"
+weight = 600
+
+[[theme.fontFaces]]
+family = "Barlow Condensed"
+url = "app/static/fonts/BarlowCondensed-Bold.ttf"
+weight = 700

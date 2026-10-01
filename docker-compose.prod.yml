@@ -3,7 +3,9 @@
 # Démarrage :
 #   docker compose -f docker-compose.prod.yml up -d --build
 #
-# Pré-requis : .env contient PUBLIC_DOMAIN, ACME_EMAIL et les identifiants Garmin.
+# Pré-requis : .env contient PUBLIC_DOMAIN, ACME_EMAIL, STREAMLIT_BROWSER_SERVER_ADDRESS,
+# BASIC_AUTH_USER et BASIC_AUTH_HASH (authentification Caddy obligatoire).
+# Le login Garmin se fait dans l'interface : GARMIN_PASSWORD est inutile ici.
 # Les ports 80 et 443 doivent être ouverts (challenge Let's Encrypt + HTTPS).
 #
 # Différences vs docker-compose.yml (dev) :
@@ -17,9 +19,24 @@ services:
     build: ./app
     image: garmin-dashboard:latest
     env_file: .env
+    environment:
+      # Le dashboard ne lit jamais le mot de passe : il n'a rien à faire dans
+      # l'environnement d'un conteneur exposé (docker inspect, /proc/1/environ).
+      GARMIN_PASSWORD: ""
+      # « Aujourd'hui » dans le fuseau de l'athlète (le conteneur est en UTC).
+      TZ: ${TZ:-Europe/Paris}
+      # Anti DNS-rebinding : seul le domaine public passe la poignée de main
+      # WebSocket (Streamlit ≥ 1.61, cf. app/.streamlit/config.toml).
+      STREAMLIT_SERVER_ALLOWED_HOSTS: ${PUBLIC_DOMAIN}
+      # Pas de trace ni de stacktrace dans le navigateur en prod (seulement les
+      # logs serveur) : le dashboard est exposé publiquement derrière Caddy.
+      STREAMLIT_CLIENT_SHOW_ERROR_DETAILS: none
     volumes:
       - app_cache:/app/.cache
       - garmin_tokens:/app/.garmin
+      # Objectif, plan validé et journal des séances poussées : à conserver
+      # entre deux rebuilds (sinon « retirer du calendrier » perd sa mémoire).
+      - app_data:/app/.data
     expose:
       - "8501"
     networks:
@@ -34,7 +51,14 @@ services:
 
   caddy:
     image: caddy:2-alpine
-    env_file: .env
+    # Uniquement les variables du Caddyfile : un `env_file: .env` donnerait
+    # aussi les identifiants Garmin au conteneur exposé sur Internet. Le `:?`
+    # fait échouer `docker compose up` si l'authentification n'est pas définie.
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER:?BASIC_AUTH_USER requis (cf. Caddyfile)}
+      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH:?BASIC_AUTH_HASH requis (cf. Caddyfile)}
     ports:
       - "80:80"
       - "443:443"
@@ -54,6 +78,7 @@ networks:
 
 volumes:
   app_cache:
+  app_data:
   garmin_tokens:
   caddy_data:
   caddy_config:

@@ -1,5 +1,6 @@
 """Helpers d'affichage Streamlit partagés entre pages."""
 
+import logging
 from datetime import date
 from typing import Sequence
 
@@ -7,53 +8,59 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-import chart_theme  # active le template Plotly gar_dark
-from coach_logic import active_plan, coach_plan_context
+import chart_theme as ct  # active le template Plotly gar
+from coach_logic import COACH_UNKNOWN, load_coach_context
 from formatting import map_zoom
 from garmin_client import (
+    ACTIVITY_HISTORY_LIMIT,
     GarminClient,
-    athlete_id_of,
-    resume_session,
+    adopt_session,
+    is_garmin_failure,
+    shared_athlete_id,
+    shared_session,
     safe_load_activities,
 )
 
-ACCENT_COLOR = chart_theme.PACE  # la couleur suit l'entité (allure/tracé)
+logger = logging.getLogger(__name__)
 
-# Profondeur d'historique commune à toutes les pages. Une seule valeur partagée,
-# pour deux raisons :
-# - les métriques de charge (CTL/ATL/TSB et l'allure seuil de référence dont elles
-#   dépendent) sont fonction de l'historique chargé : deux limites différentes
-#   affichaient deux TSB différents d'une page à l'autre ;
-# - le cache disque est indexé par `activities_{limit}` — une valeur unique veut
-#   dire un seul fetch partagé par toutes les pages au lieu d'un par limite.
-# Volontairement au-delà de tout historique réaliste : la pagination Garmin
-# s'arrête d'elle-même quand il n'y a plus d'activités (cf. get_activities).
-ACTIVITY_HISTORY_LIMIT = 1500
+OSM_ATTRIBUTION = ("Fond de carte © [OpenStreetMap](https://www.openstreetmap.org/copyright) "
+                   "contributors")
+
+ACCENT_COLOR = ct.PACE  # la couleur suit l'entité (allure/tracé)
+
+# Profondeur d'historique commune (définie dans garmin_client, sans Streamlit,
+# pour que le serveur MCP charge exactement le même historique que les pages).
 
 
 def get_session_api():
     """
-    Retourne l'objet Garmin de la session courante, en le reprenant depuis le
-    tokenstore si besoin. Retourne None si aucune session valide n'existe
-    (→ la page d'accueil affiche alors le formulaire de connexion).
+    La session Garmin du process (partagée par tous les onglets, cf.
+    `garmin_client.shared_session`), reprise du tokenstore au besoin. None si
+    aucune session valide (→ formulaire de connexion). Relue à chaque run :
+    une déconnexion faite dans un autre onglet s'applique ici aussi.
     """
-    if "garmin_api" in st.session_state:
-        return st.session_state["garmin_api"]
-    api = resume_session()
-    if api is not None:
-        store_session(api)
+    api = shared_session()
+    if api is None:
+        drop_session()
+        return None
+    if (st.session_state.get("garmin_api") is not api
+            or not st.session_state.get("garmin_athlete_id_reliable")):
+        athlete_id, reliable = shared_athlete_id()       # (un id de repli est retenté)
+        st.session_state["garmin_api"] = api
+        st.session_state["garmin_athlete_id"] = athlete_id
+        st.session_state["garmin_athlete_id_reliable"] = reliable
     return api
 
 
 def store_session(api) -> None:
-    """Enregistre une session Garmin fraîchement connectée."""
-    st.session_state["garmin_api"] = api
-    st.session_state["garmin_athlete_id"] = athlete_id_of(api)
+    """Enregistre une session Garmin fraîchement connectée (pour tout le process)."""
+    adopt_session(api)
+    get_session_api()
 
 
 def drop_session() -> None:
     """Vide la session Streamlit (sans toucher au tokenstore)."""
-    for key in ("garmin_api", "garmin_athlete_id"):
+    for key in ("garmin_api", "garmin_athlete_id", "garmin_athlete_id_reliable"):
         st.session_state.pop(key, None)
 
 
@@ -61,20 +68,42 @@ def get_athlete_id() -> int:
     return st.session_state.get("garmin_athlete_id", 0)
 
 
+def validated_plan_sessions():
+    """
+    Séances du plan Objectif validé pour la session — le seul chemin des pages.
+    Sous un id de repli (Garmin n'a pas confirmé le compte), le plan serait lu
+    dans un autre dossier : None, et un avis le dit (la séance du jour retombe
+    alors sur la logique interne, sans prétendre suivre le plan).
+    """
+    import goal_store
+
+    if not athlete_id_is_reliable():
+        st.caption(":material/sync_problem: Plan Objectif non lu : Garmin n'a pas encore confirmé "
+                   "ton compte. Réessai automatique dans la minute.")
+        return None
+    return goal_store.validated_sessions(get_athlete_id())
+
+
+def athlete_id_is_reliable() -> bool:
+    """
+    False quand l'id vient du repli (Garmin n'a pas donné le profileId) : il
+    ne faut alors RIEN écrire de durable (objectif, plan validé, journal), qui
+    partirait dans un autre dossier que celui relu au prochain démarrage.
+    """
+    return bool(st.session_state.get("garmin_athlete_id_reliable", False))
+
+
 def require_login() -> None:
     """
-    Garde à appeler en haut des sous-pages : si aucune session Garmin n'est
-    disponible, on affiche un message + un lien vers l'accueil (où vit le
-    formulaire de connexion) et on arrête le rendu de la page courante.
+    Garde à appeler en haut des pages. Le routeur (`main.py`) n'enregistre les
+    pages qu'une fois connecté : ce chemin ne sert que si la session tombe
+    entre deux runs. Le formulaire de connexion vit dans le routeur.
     """
     if get_session_api() is not None:
         return
-    st.title("🔒 Connexion requise")
-    st.warning(
-        "Tu dois d'abord connecter ton compte Garmin pour accéder à cette page.",
-        icon="🔑",
-    )
-    st.page_link("main.py", label="Aller à la page de connexion", icon="🏠")
+    st.title("Connexion requise")
+    st.warning("Ta session Garmin a expiré : recharge la page pour te reconnecter.",
+               icon=":material/key:")
     st.stop()
 
 
@@ -86,6 +115,7 @@ def get_garmin_client() -> GarminClient:
     return GarminClient(
         api=st.session_state["garmin_api"],
         athlete_id=get_athlete_id(),
+        athlete_id_reliable=athlete_id_is_reliable(),
     )
 
 
@@ -94,7 +124,7 @@ def render_garmin_attribution() -> None:
     st.markdown(
         """
         <div style="text-align: center; margin: 24px 0 8px 0;">
-            <span style="color: #888; font-size: 0.8rem;">
+            <span style="color: #62666F; font-size: 0.8rem;">
                 Données Garmin Connect — projet personnel non affilié à Garmin
             </span>
         </div>
@@ -107,7 +137,7 @@ def cache_nonce() -> int:
     """
     Compteur d'invalidation per-session. À passer en argument à toute fonction
     `@st.cache_data` qui doit pouvoir être invalidée explicitement par
-    `render_refresh_button`.
+    `refresh_data`.
     """
     return st.session_state.get("_cache_nonce", 0)
 
@@ -138,43 +168,38 @@ def cached_load_activities(
 def _cached_coach_context_impl(athlete_id: int, cdate: str, nonce: int):
     """Le `nonce` est dans la signature pour servir de clé de cache per-session."""
     del nonce  # uniquement pour la cache key
-    client = get_garmin_client()
-    plans = client.get_training_plans()
-    plan = active_plan(plans)
-    if plan is None:
-        return None
-    detail = client.get_adaptive_plan(plan["plan_id"])
-    return coach_plan_context(plans, detail, date.fromisoformat(cdate))
+    return load_coach_context(get_garmin_client(), date.fromisoformat(cdate))
 
 
 def cached_coach_context(athlete_id: int, cdate: str | None = None):
     """
-    Contexte du plan Garmin Run Coach (séances à venir, phase, objectif), ou None
-    si aucun plan n'est actif.
+    Contexte du plan Garmin Run Coach (séances à venir, phase, objectif), None
+    si aucun plan n'est actif, `coach_logic.COACH_UNKNOWN` si Garmin n'a pas
+    répondu — un échec n'est pas mis en cache (st.cache_data ne garde pas une
+    exception) : il est retenté au prochain rendu, pas dans une heure.
 
     Partagé par l'accueil et la page Prochaine sortie : les deux doivent annoncer
     la même séance, donc lire le plan par le même chemin.
     """
     day = cdate or date.today().isoformat()
-    return _cached_coach_context_impl(athlete_id, day, cache_nonce())
+    try:
+        return _cached_coach_context_impl(athlete_id, day, cache_nonce())
+    except Exception as exc:
+        if not is_garmin_failure(exc):
+            raise                  # bug de lecture : visible, pas une fausse « panne » permanente
+        logger.warning("Garmin n'a pas répondu sur le plan Run Coach : état inconnu", exc_info=True)
+        return COACH_UNKNOWN
 
 
-def render_refresh_button(label: str = "🔄 Actualiser les données", *, stretch: bool = True) -> None:
+def refresh_data() -> None:
     """
-    Bouton de rafraîchissement standard : invalide le cache disque + bump du
-    nonce per-session pour invalider les caches Streamlit `@st.cache_data`.
+    Actualiser (bouton de l'en-tête) : invalide le cache disque + bump du nonce
+    per-session pour invalider les caches Streamlit `@st.cache_data`.
+    Ne pas utiliser `st.cache_data.clear()` (global à tous les utilisateurs).
     """
-    if st.button(label, width="stretch" if stretch else "content"):
-        get_garmin_client().invalidate_cache()
-        st.session_state["_cache_nonce"] = cache_nonce() + 1
-        st.rerun()
-
-
-def hex_to_rgba(hex_color: str, alpha: float) -> str:
-    """Convertit un hex `#rrggbb` en chaîne CSS `rgba(r,g,b,a)`."""
-    h = hex_color.lstrip("#")
-    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-    return f"rgba({r},{g},{b},{alpha})"
+    get_garmin_client().invalidate_cache()
+    st.session_state["_cache_nonce"] = cache_nonce() + 1
+    st.rerun()
 
 
 def render_elevation_profile(
@@ -187,8 +212,7 @@ def render_elevation_profile(
 ) -> None:
     """
     Profil altimétrique générique : reçoit deux séries alignées et trace
-    un Plotly Scatter avec fill. Utilisé par main.py (depuis streams Garmin)
-    et 4_Next_Session.py (depuis route ORS).
+    un Plotly Scatter avec fill.
     """
     if not elevations or not distances_km:
         st.caption("Profil altimétrique non disponible.")
@@ -198,16 +222,15 @@ def render_elevation_profile(
         x=list(distances_km), y=list(elevations),
         mode="lines",
         fill="tozeroy",
-        fillcolor=hex_to_rgba(color, fill_alpha),
+        fillcolor=ct.rgba(color, fill_alpha),
         line=dict(color=color, width=2),
         hovertemplate="<b>%{x:.2f} km</b><br>Altitude : %{y:.0f} m<extra></extra>",
     ))
     fig.update_layout(
         height=height,
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#c6c8ce"),
-        xaxis=dict(title="Distance (km)", gridcolor="#232833"),
-        yaxis=dict(title="Altitude (m)", gridcolor="#232833"),
+        xaxis=dict(title="Distance (km)"),
+        yaxis=dict(title="Altitude (m)"),
         margin=dict(l=0, r=0, t=10, b=0), showlegend=False,
     )
     st.plotly_chart(fig)
@@ -237,7 +260,7 @@ def render_activity_map(streams: dict, height: int = 420) -> None:
     fig.add_trace(go.Scattermap(
         lat=[lats[0], lats[-1]], lon=[lons[0], lons[-1]],
         mode="markers",
-        marker=dict(size=14, color=["#0ca30c", "#d03b3b"]),
+        marker=dict(size=14, color=[ct.GOOD, ct.CRITICAL]),
         text=["Départ", "Arrivée"],
         hoverinfo="text",
     ))
@@ -252,3 +275,5 @@ def render_activity_map(streams: dict, height: int = 420) -> None:
         showlegend=False,
     )
     st.plotly_chart(fig)
+    # Politique des tuiles OSM : attribution visible (celle de Plotly est repliée).
+    st.caption(OSM_ATTRIBUTION)

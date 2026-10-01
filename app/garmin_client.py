@@ -15,6 +15,7 @@ import time
 import shutil
 import hashlib
 import logging
+import threading
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Callable, Optional
@@ -29,6 +30,7 @@ from garminconnect import (
 )
 
 from formatting import (
+    md_escape,
     normalize_activity_type,
     seconds_to_pace_str,
     speed_to_pace,
@@ -49,6 +51,17 @@ def _default_cache_dir() -> Path:
 CACHE_DIR = _default_cache_dir()
 CACHE_TTL = int(os.getenv("CACHE_TTL", "3600"))
 
+# Profondeur d'historique commune à toutes les pages. Une seule valeur partagée,
+# pour deux raisons :
+# - les métriques de charge (CTL/ATL/TSB et l'allure seuil de référence dont elles
+#   dépendent) sont fonction de l'historique chargé : deux limites différentes
+#   affichaient deux TSB différents d'une page à l'autre ;
+# - le cache disque est indexé par `activities_{limit}` — une valeur unique veut
+#   dire un seul fetch partagé par toutes les pages au lieu d'un par limite.
+# Volontairement au-delà de tout historique réaliste : la pagination Garmin
+# s'arrête d'elle-même quand il n'y a plus d'activités (cf. get_activities).
+ACTIVITY_HISTORY_LIMIT = 1500
+
 # Délai appliqué après chaque appel API réel (cache miss) : Garmin n'a pas de
 # rate limit documenté mais bannit temporairement les clients trop agressifs.
 API_COOLDOWN_S = 0.4
@@ -60,6 +73,10 @@ SLEEP_WINDOW_DAYS = 28
 RESTING_HR_WINDOW_DAYS = 28
 HRV_WINDOW_DAYS = 365
 VO2MAX_WINDOW_DAYS = 365
+
+# Réconciliation : une séance déplacée d'au plus une semaine dans Garmin Connect
+# est encore retrouvée au calendrier (cf. GarminClient.find_schedule).
+SCHEDULE_SEARCH_DAYS = 7
 
 
 def default_tokenstore() -> str:
@@ -75,11 +92,35 @@ def default_tokenstore() -> str:
 # Authentification (pattern officiel python-garminconnect, compatible MFA web)
 # ---------------------------------------------------------------------------
 
+# Jetons de garth (garminconnect < 0.3) : 0.3.6 ne lit plus que
+# `garmin_tokens.json`. Restés sur le disque, ils ne servent plus à rien mais
+# gardent le secret OAuth1 longue durée du compte.
+LEGACY_TOKEN_FILES = ("oauth1_token.json", "oauth2_token.json")
+
+
+def _purge_legacy_tokens(tokenstore: Optional[str] = None) -> None:
+    """Supprime les jetons garth hérités d'un tokenstore (le dashboard par défaut,
+    celui du MCP sinon) ; jamais bloquant."""
+    folder = Path(tokenstore or default_tokenstore()).expanduser()
+    if not folder.is_dir():
+        return
+    for name in LEGACY_TOKEN_FILES:
+        try:
+            (folder / name).unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("Jeton hérité %s non supprimé : %s", name, e)
+
+
 def resume_session() -> Optional[Garmin]:
     """
     Reprend une session depuis le tokenstore, sans identifiants.
     Retourne None si aucun token valide n'est disponible.
+
+    Toute reprise (démarrage, fin de connexion ou de MFA) purge d'abord les
+    jetons garth hérités : illisibles par cette version, la mise à jour
+    impose de toute façon une reconnexion (cf. README).
     """
+    _purge_legacy_tokens()
     try:
         api = Garmin()
         api.login(default_tokenstore())
@@ -90,8 +131,8 @@ def resume_session() -> Optional[Garmin]:
 
 
 def _dump_tokens(api: Garmin) -> None:
-    """Persiste les tokens garth dans le tokenstore (le mode return_on_mfa
-    de garminconnect ne le fait pas lui-même)."""
+    """Persiste les jetons dans le tokenstore (`garmin_tokens.json`) : le mode
+    return_on_mfa de garminconnect ne le fait pas lui-même."""
     path = Path(default_tokenstore()).expanduser()
     path.mkdir(parents=True, exist_ok=True)
     api.client.dump(str(path))
@@ -130,46 +171,328 @@ def complete_mfa(pending, mfa_code: str) -> Garmin:
 
 
 def clear_tokens() -> None:
-    """Déconnexion : supprime le tokenstore garth."""
+    """Déconnexion : supprime le tokenstore (client interne, plus de garth)."""
     path = Path(default_tokenstore()).expanduser()
     if path.exists():
         shutil.rmtree(path, ignore_errors=True)
 
 
-def athlete_id_of(api: Garmin) -> int:
-    """profileId Garmin de la session — sert à cloisonner le cache disque."""
+# ---------------------------------------------------------------------------
+# Session partagée par le process (le dashboard est mono-utilisateur)
+# ---------------------------------------------------------------------------
+# Un objet Garmin par onglet posait deux problèmes (revue PR #1) :
+# - garminconnect 0.3.6 réécrit garmin_tokens.json à chaque rafraîchissement
+#   (`_tokenstore_path`) : un onglet resté ouvert recréait le fichier après une
+#   déconnexion, et le visiteur suivant était reconnecté ;
+# - chaque onglet rafraîchissait le même refresh token de son côté.
+# D'où UNE session par process : les onglets la partagent, son rafraîchissement
+# est sérialisé, et la déconnexion la neutralise (plus de chemin de réécriture,
+# plus de jetons en mémoire) avant d'effacer le tokenstore.
+# Aucun appel réseau n'a lieu sous `_SESSION_LOCK` (le dictionnaire seulement) :
+# sinon un onglet qui reprend ou revérifie la session figeait tous les autres.
+ATHLETE_ID_ATTEMPTS = 3
+ATHLETE_ID_RETRY_S = 1.0
+ATHLETE_ID_RECHECK_S = 60.0     # un id de repli est retenté (en arrière-plan) au plus 1×/min
+RESUME_RETRY_S = 10.0           # une reprise en échec (Garmin injoignable) n'est pas rejouée à chaque run
+_SESSION_LOCK = threading.RLock()
+_RESUME_LOCK = threading.Lock()
+# `generation` : incrémentée à chaque déconnexion. Une reprise lancée avant ne
+# peut plus s'installer après (elle serait une session vivante, jamais
+# neutralisée, qui recréerait le tokenstore au prochain rafraîchissement).
+_SESSION: dict = {"api": None, "athlete_id": 0, "reliable": False, "checked_at": 0.0,
+                  "resume_failed_at": None, "recheck": None, "generation": 0}
+
+
+def _wipe_tokens(client) -> None:
+    # Le chemin d'abord : un dump concurrent n'a alors plus où écrire.
+    for attr in ("_tokenstore_path", "di_token", "di_refresh_token", "jwt_web"):
+        try:
+            setattr(client, attr, None)
+        except Exception:
+            pass
+
+
+def _serialize_refresh(api) -> None:
+    """
+    Un seul rafraîchissement de jetons à la fois sur l'objet partagé, et un
+    seul par expiration : un fil qui attendait le verrou pendant qu'un autre
+    rafraîchissait trouve un jeton neuf et n'en redemande pas (six onglets à
+    l'expiration = un appel, pas six). Après une déconnexion, plus rien.
+    """
+    client = getattr(api, "client", None)
+    original = getattr(client, "_refresh_session", None) if client is not None else None
+    if original is None or getattr(client, "_gd_refresh_lock", None) is not None:
+        return
+    lock = threading.Lock()
+
+    def _locked(*args, **kwargs):
+        before = getattr(client, "di_token", None)
+        with lock:
+            if getattr(client, "_gd_neutralized", False):
+                return None
+            if before is not None and getattr(client, "di_token", None) != before:
+                return None                     # un autre fil vient de le faire
+            path = getattr(client, "_tokenstore_path", None)
+            refresh_tokens = {getattr(client, "di_refresh_token", None)}
+            result = original(*args, **kwargs)
+            if getattr(client, "_gd_neutralized", False):
+                # Déconnexion survenue PENDANT l'appel : la bibliothèque a pu lire le
+                # chemin avant qu'on l'efface et réécrire le fichier après le rmtree.
+                refresh_tokens.add(getattr(client, "di_refresh_token", None))
+                _wipe_tokens(client)
+                _remove_tokens_of(path, refresh_tokens)
+            return result
+
+    client._refresh_session = _locked
+    client._gd_refresh_lock = lock
+
+
+def _remove_tokens_of(path: Optional[str], refresh_tokens: set) -> None:
+    """
+    Supprime le fichier de jetons s'il appartient à la session abandonnée (jeton
+    vide ou l'un des siens) — jamais celui d'une reconnexion faite entre-temps.
+    """
+    if not path:
+        return
+    p = Path(path).expanduser()
+    if p.is_dir() or not p.name.endswith(".json"):
+        p = p / "garmin_tokens.json"
     try:
-        profile = api.client.connectapi("/userprofile-service/socialProfile") or {}
-        for key in ("profileId", "id", "userProfileId"):
-            if profile.get(key):
-                return int(profile[key])
+        written = json.loads(p.read_text()).get("di_refresh_token")
+    except (OSError, ValueError, AttributeError):
+        return
+    if written is None or written in refresh_tokens:
+        try:
+            p.unlink()
+        except OSError as e:
+            logger.warning("Jetons de la session fermée non supprimés : %s", e)
+
+
+def _neutralize(api) -> None:
+    """
+    Coupe tout ce qu'un objet Garmin abandonné pourrait encore écrire ou envoyer,
+    SANS attendre : le drapeau et le chemin du tokenstore tombent tout de suite ;
+    un rafraîchissement en vol efface ses jetons neufs à son retour (wrapper de
+    `_serialize_refresh`). Attendre son verrou figeait l'onglet jusqu'à 30 s et
+    ouvrait une fenêtre où une reprise relisait le tokenstore encore présent.
+    """
+    client = getattr(api, "client", None)
+    if client is None:
+        return
+    try:
+        client._gd_neutralized = True
     except Exception:
         pass
-    # Repli stable : hash du display_name (UUID) de la session
+    _wipe_tokens(client)
+
+
+def _athlete_ids_path() -> Path:
+    import goal_store                   # DATA_DIR relu à chaque appel (tests, MCP)
+    return goal_store.data_dir() / "athlete_ids.json"
+
+
+def _read_athlete_ids() -> dict:
+    """Fichier absent ou corrompu (écriture interrompue) → {} : il sera réécrit sain."""
+    try:
+        data = json.loads(_athlete_ids_path().read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _remember_athlete_id(display_name: str, athlete_id: int) -> None:
+    if not display_name:
+        return
+    try:
+        known = _read_athlete_ids()
+        if known.get(display_name) != athlete_id:
+            known[display_name] = athlete_id
+            path = _athlete_ids_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Atomique : le fichier est partagé avec le serveur MCP (même DATA_DIR).
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            tmp.write_text(json.dumps(known))
+            os.replace(tmp, path)
+    except Exception as e:                      # jamais bloquant
+        logger.warning("Identifiant d'athlète non mémorisé : %s", e)
+
+
+def _known_athlete_id(display_name: str) -> Optional[int]:
+    try:
+        value = _read_athlete_ids().get(display_name)
+        return int(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def resolve_athlete_id(api: Garmin) -> tuple[int, bool]:
+    """
+    (profileId Garmin, fiable ?). Plusieurs tentatives, puis l'id déjà résolu
+    pour ce compte lors d'une connexion précédente ; en dernier recours le hash
+    du display_name, marqué NON fiable : il ne doit pas servir à ranger des
+    données durables (objectif, plan, journal), qui partiraient dans un autre
+    dossier qu'au prochain démarrage. Réseau : à appeler hors `_SESSION_LOCK`.
+    """
     display_name = getattr(api, "display_name", "") or ""
+    for attempt in range(ATHLETE_ID_ATTEMPTS):
+        try:
+            profile = api.client.connectapi("/userprofile-service/socialProfile") or {}
+            for key in ("profileId", "id", "userProfileId"):
+                if profile.get(key):
+                    athlete_id = int(profile[key])
+                    _remember_athlete_id(display_name, athlete_id)
+                    return athlete_id, True
+            break                               # réponse sans id : réessayer n'y changera rien
+        except Exception as e:
+            logger.info("socialProfile indisponible (essai %d) : %s", attempt + 1, e)
+            if attempt < ATHLETE_ID_ATTEMPTS - 1:
+                time.sleep(ATHLETE_ID_RETRY_S * (attempt + 1))
+    known = _known_athlete_id(display_name)
+    if known:
+        return known, True
     if display_name:
-        return int(hashlib.md5(display_name.encode()).hexdigest()[:8], 16)
-    return 0
+        return int(hashlib.md5(display_name.encode()).hexdigest()[:8], 16), False
+    return 0, False
+
+
+def adopt_session(api: Garmin, generation: Optional[int] = None) -> bool:
+    """
+    Fait d'`api` LA session du process. `generation` (reprise) : la génération
+    lue avant de relire le tokenstore — si une déconnexion est passée entre-temps,
+    la reprise est refusée et l'objet neutralisé. Connexion explicite : None.
+    Retourne True si la session est installée.
+    """
+    _serialize_refresh(api)
+    athlete_id, reliable = resolve_athlete_id(api)          # réseau : hors verrou
+    with _SESSION_LOCK:
+        if generation is not None and generation != _SESSION["generation"]:
+            stale, old = api, None
+        else:
+            stale, old = None, _SESSION["api"]
+            _SESSION.update(api=api, athlete_id=athlete_id, reliable=reliable,
+                            checked_at=time.monotonic(), resume_failed_at=None)
+    if stale is not None:
+        # `login()` a pu rafraîchir (jeton proche de l'expiration) et réécrire le
+        # tokenstore après la déconnexion : ce fichier-là part avec l'objet.
+        client = getattr(stale, "client", None)
+        path = getattr(client, "_tokenstore_path", None)
+        refresh_tokens = {getattr(client, "di_refresh_token", None)}
+        _neutralize(stale)
+        _remove_tokens_of(path, refresh_tokens)
+        return False
+    if old is not None and old is not api:
+        _neutralize(old)
+    return True
+
+
+def shared_session() -> Optional[Garmin]:
+    """
+    La session du process, reprise du tokenstore au premier besoin ; None si
+    aucune. Session en place : aucune attente. Reprise : une seule à la fois
+    (les autres onglets l'attendent, ils n'ont rien à afficher sans elle) ;
+    en échec, pas de nouvel essai avant `RESUME_RETRY_S`.
+    """
+    with _SESSION_LOCK:
+        if _SESSION["api"] is not None:
+            return _SESSION["api"]
+        failed_at = _SESSION["resume_failed_at"]
+    if failed_at is not None and time.monotonic() - failed_at < RESUME_RETRY_S:
+        return None
+    with _RESUME_LOCK:
+        with _SESSION_LOCK:
+            if _SESSION["api"] is not None:                # reprise faite par un autre onglet
+                return _SESSION["api"]
+            generation = _SESSION["generation"]
+        api = resume_session()
+        if api is None:
+            with _SESSION_LOCK:
+                _SESSION["resume_failed_at"] = time.monotonic()
+            return None
+        return api if adopt_session(api, generation) else None
+
+
+def _recheck_athlete_id(api) -> None:
+    try:
+        athlete_id, reliable = resolve_athlete_id(api)
+        with _SESSION_LOCK:
+            if reliable and _SESSION["api"] is api:       # la session n'a pas changé entre-temps
+                _SESSION.update(athlete_id=athlete_id, reliable=True)
+    finally:
+        with _SESSION_LOCK:
+            if _SESSION["recheck"] is threading.current_thread():   # pas celui d'une session plus récente
+                _SESSION["recheck"] = None
+
+
+def shared_athlete_id() -> tuple[int, bool]:
+    """
+    (id, fiable) de la session, sans jamais attendre le réseau : un id de repli
+    est retenté en arrière-plan au plus une fois par minute, et les pages
+    retrouvent le bon dossier dès que Garmin répond.
+    """
+    with _SESSION_LOCK:
+        api = _SESSION["api"]
+        if (api is not None and not _SESSION["reliable"] and _SESSION["recheck"] is None
+                and time.monotonic() - _SESSION["checked_at"] >= ATHLETE_ID_RECHECK_S):
+            _SESSION["checked_at"] = time.monotonic()
+            thread = threading.Thread(target=_recheck_athlete_id, args=(api,), daemon=True,
+                                      name="athlete-id-recheck")
+            _SESSION["recheck"] = thread
+            thread.start()
+        return _SESSION["athlete_id"], _SESSION["reliable"]
+
+
+def reset_session_state() -> None:
+    """Oublie la session du process sans rien neutraliser (tests)."""
+    with _SESSION_LOCK:
+        _SESSION.update(api=None, athlete_id=0, reliable=False, checked_at=0.0,
+                        resume_failed_at=None, recheck=None, generation=0)
+
+
+def end_session() -> None:
+    """
+    Déconnexion pour tous les onglets, dans cet ordre et sous le verrou : plus de
+    session, génération suivante (toute reprise en vol sera refusée), objet
+    neutralisé, tokenstore effacé. Rien d'autre ne peut s'intercaler.
+    """
+    with _SESSION_LOCK:
+        api = _SESSION["api"]
+        _SESSION.update(api=None, athlete_id=0, reliable=False, resume_failed_at=None,
+                        generation=_SESSION["generation"] + 1)
+        if api is not None:
+            _neutralize(api)
+        clear_tokens()
 
 
 # ---------------------------------------------------------------------------
 # Utilitaires de cache disque (cloisonné par athlete_id)
 # ---------------------------------------------------------------------------
 
-def _cache_path(athlete_id: int, key: str) -> Path:
+# Les streams d'une activité passée ne changent (quasiment) plus : ils ont leur
+# propre dossier, un TTL long, et survivent au bouton « Actualiser » — sinon la
+# tendance de dérive re-téléchargerait N activités à chaque rafraîchissement.
+STREAMS_BUCKET = "streams"
+STREAMS_TTL = int(os.getenv("STREAMS_CACHE_TTL", str(30 * 86400)))
+
+
+def _cache_path(athlete_id: int, key: str, bucket: Optional[str] = None) -> Path:
     """Cache file path under a per-athlete subdirectory."""
     safe_key = hashlib.md5(key.encode()).hexdigest()
-    return CACHE_DIR / str(athlete_id) / f"{safe_key}.json"
+    base = CACHE_DIR / str(athlete_id)
+    if bucket:
+        base = base / bucket
+    return base / f"{safe_key}.json"
 
 
-def _cache_get(athlete_id: int, key: str) -> Optional[object]:
-    path = _cache_path(athlete_id, key)
+def _cache_get(
+    athlete_id: int, key: str, ttl: Optional[int] = None, bucket: Optional[str] = None
+) -> Optional[object]:
+    path = _cache_path(athlete_id, key, bucket)
     if not path.exists():
         return None
     try:
         with open(path, "r", encoding="utf-8") as f:
             entry = json.load(f)
-        if time.time() - entry["timestamp"] < CACHE_TTL:
+        if time.time() - entry["timestamp"] < (CACHE_TTL if ttl is None else ttl):
             return entry["data"]
         path.unlink(missing_ok=True)
     except (json.JSONDecodeError, KeyError, OSError) as e:
@@ -177,13 +500,23 @@ def _cache_get(athlete_id: int, key: str) -> Optional[object]:
     return None
 
 
-def _cache_set(athlete_id: int, key: str, data: object) -> None:
-    path = _cache_path(athlete_id, key)
+def _cache_set(
+    athlete_id: int, key: str, data: object, bucket: Optional[str] = None
+) -> None:
+    path = _cache_path(athlete_id, key, bucket)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"timestamp": time.time(), "data": data}, f, default=str)
-    except OSError as e:
+        # Écriture atomique : un lecteur concurrent (autre session, serveur
+        # MCP) ne doit jamais lire un fichier à moitié écrit. Les sessions
+        # Streamlit sont des threads d'un même process : pid ET thread.
+        tmp = path.with_suffix(f".{os.getpid()}-{threading.get_ident()}.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"timestamp": time.time(), "data": data}, f, default=str)
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+    except (OSError, TypeError, ValueError) as e:
         logger.warning("Impossible d'écrire le cache : %s", e)
 
 
@@ -495,9 +828,15 @@ class GarminClient:
     les pages et la logique métier restent inchangées.
     """
 
-    def __init__(self, api: Garmin, athlete_id: Optional[int] = None):
+    def __init__(self, api: Garmin, athlete_id: Optional[int] = None,
+                 athlete_id_reliable: bool = True):
         self.api = api
-        self.athlete_id = athlete_id if athlete_id is not None else athlete_id_of(api)
+        if athlete_id is not None:
+            # L'appelant qui fournit l'id dit s'il est fiable (id de repli de la session ?)
+            self.athlete_id, self.athlete_id_reliable = athlete_id, athlete_id_reliable
+        else:
+            # False = id de repli : ne rien ranger de durable dessous (cf. resolve_athlete_id)
+            self.athlete_id, self.athlete_id_reliable = resolve_athlete_id(api)
 
     # ------------------------------------------------------------------
     # Activités
@@ -526,13 +865,16 @@ class GarminClient:
         while len(activities) < limit:
             want = min(batch_size, limit - len(activities))
             batch = self.api.get_activities(start=start, limit=want)
+            # Cooldown après CHAQUE appel réel (pas seulement à la fin de la
+            # pagination) : un historique long fait plusieurs appels à la
+            # suite sans lui, contournant la protection anti-bannissement.
+            time.sleep(API_COOLDOWN_S)
             if not batch:
                 break
             activities.extend(batch)
             if len(batch) < want:
                 break
             start += len(batch)
-        time.sleep(API_COOLDOWN_S)
 
         rows = [activity_row(act) for act in activities[:limit]]
         _cache_set(self.athlete_id, cache_key, rows)
@@ -579,14 +921,18 @@ class GarminClient:
         time.sleep(API_COOLDOWN_S)
         return result
 
-    def get_streams(self, activity_id: int) -> dict[str, list]:
+    def get_streams(self, activity_id: int, strict: bool = False) -> dict[str, list]:
         """
         Streams haute résolution d'une activité, format Strava :
         time, distance, latlng, heartrate, altitude, velocity_smooth,
         cadence, grade_smooth.
+
+        `strict=True` relève l'erreur API au lieu de renvoyer `{}` : une boucle
+        sur plusieurs activités doit pouvoir s'arrêter au premier refus (429)
+        plutôt que de marteler Garmin.
         """
-        cache_key = f"streams_v1_{activity_id}"
-        cached = _cache_get(self.athlete_id, cache_key)
+        cache_key = f"streams_v2_{activity_id}"
+        cached = _cache_get(self.athlete_id, cache_key, ttl=STREAMS_TTL, bucket=STREAMS_BUCKET)
         if cached is not None:
             return cached
 
@@ -594,14 +940,26 @@ class GarminClient:
             raw = self.api.get_activity_details(
                 str(activity_id), maxchart=2000, maxpoly=4000
             )
-            result = build_streams(raw)
-            _cache_set(self.athlete_id, cache_key, result)
-            time.sleep(API_COOLDOWN_S)
-            return result
         except Exception as e:
+            if strict:
+                time.sleep(API_COOLDOWN_S)      # un refus reste un appel réel : pas de rafale
+                raise
             logger.warning("Streams indisponibles pour l'activité %s : %s", activity_id, e)
             time.sleep(1.0)
             return {}
+        try:
+            result = build_streams(raw)
+        except Exception as e:
+            # Réponse inattendue : ce n'est pas un refus de Garmin, pas la
+            # peine d'arrêter une boucle ni de planter la page.
+            logger.warning("Streams illisibles pour l'activité %s : %s", activity_id, e)
+            return {}
+        # Un stream vide peut être transitoire (activité en cours de synchro) :
+        # on ne le fige pas pour 30 jours.
+        if result:
+            _cache_set(self.athlete_id, cache_key, result, bucket=STREAMS_BUCKET)
+        time.sleep(API_COOLDOWN_S)
+        return result
 
     def get_splits_aggregate(self, activity_ids: list[int]) -> pd.DataFrame:
         """
@@ -694,49 +1052,6 @@ class GarminClient:
             rows.append({"zone": label, "nb_activites": int(mask.sum())})
 
         return pd.DataFrame(rows)
-
-    def get_summary_metrics(self, df: pd.DataFrame) -> dict:
-        """Retourne les métriques résumées pour la semaine et le mois courants."""
-        if df.empty:
-            return {
-                "km_semaine": 0, "km_mois": 0,
-                "pace_moyen": "—", "hr_moyen": "—",
-                "nb_sorties_semaine": 0, "nb_sorties_mois": 0,
-            }
-
-        running = df[df["activityType"] == "running"].copy()
-        from datetime import datetime, timedelta
-        now = datetime.now()
-        start_of_week = now - timedelta(days=now.weekday())
-        start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
-        start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-        week_mask = running["startTimeLocal"] >= start_of_week
-        month_mask = running["startTimeLocal"] >= start_of_month
-
-        km_semaine = running.loc[week_mask, "distance_km"].sum()
-        km_mois = running.loc[month_mask, "distance_km"].sum()
-        nb_semaine = week_mask.sum()
-        nb_mois = month_mask.sum()
-
-        pace_vals = running.loc[running["avgPace_sec"] > 0, "avgPace_sec"]
-        pace_moyen = seconds_to_pace_str(pace_vals.mean()) if not pace_vals.empty else "—"
-
-        hr_vals = running["avgHR"].dropna()
-        hr_moyen = f"{int(hr_vals.mean())} bpm" if not hr_vals.empty else "—"
-
-        return {
-            "km_semaine": round(km_semaine, 1),
-            "km_mois": round(km_mois, 1),
-            "pace_moyen": pace_moyen,
-            "hr_moyen": hr_moyen,
-            "nb_sorties_semaine": int(nb_semaine),
-            "nb_sorties_mois": int(nb_mois),
-        }
-
-    # ------------------------------------------------------------------
-    # Profil, zones FC, matériel, prédictions
-    # ------------------------------------------------------------------
 
     def get_full_name(self) -> str:
         try:
@@ -841,13 +1156,22 @@ class GarminClient:
             logger.warning("Prédictions de course indisponibles : %s", e)
             return {}
 
-    def get_training_plans(self) -> dict:
+    def get_training_plans(self, strict: bool = False, use_cache: Optional[bool] = None) -> dict:
         """
         Plans d'entraînement Garmin du compte (Garmin Run Coach compris), bruts.
-        Retourne {} si l'endpoint n'est pas disponible.
+        Retourne {} si l'endpoint n'est pas disponible — sauf `strict=True`
+        qui relève l'erreur : une garde « pas de plan Garmin actif » ne doit
+        pas confondre « aucun plan » et « Garmin n'a pas répondu ».
+
+        `use_cache` (défaut : pas en strict) : la garde avant une ÉCRITURE lit
+        frais (un plan Run Coach démarré depuis moins d'une heure doit être vu) ;
+        le contexte coach des pages lit en strict AVEC cache — une vraie réponse
+        sert une heure, une panne relève sans double appel.
         """
         cache_key = "training_plans"
-        cached = _cache_get(self.athlete_id, cache_key)
+        if use_cache is None:
+            use_cache = not strict
+        cached = _cache_get(self.athlete_id, cache_key) if use_cache else None
         if cached is not None:
             return cached
         try:
@@ -856,15 +1180,20 @@ class GarminClient:
             time.sleep(API_COOLDOWN_S)
             return data
         except Exception as e:
+            time.sleep(API_COOLDOWN_S)          # un refus reste un appel réel
+            if strict:
+                raise
             logger.warning("Plans d'entraînement indisponibles : %s", e)
             return {}
 
-    def get_adaptive_plan(self, plan_id: int) -> dict:
+    def get_adaptive_plan(self, plan_id: int, strict: bool = False) -> dict:
         """
         Détail d'un plan adaptatif : séances programmées (`taskList`) et phases.
 
         Le plan se réajuste côté Garmin après chaque séance — le TTL de cache
         habituel suffit, le bouton d'actualisation force la relecture.
+        `strict=True` relève l'erreur au lieu de renvoyer {} : le contexte coach
+        en ferait un « Run Coach actif sans séance », gardé une heure.
         """
         cache_key = f"adaptive_plan_{plan_id}"
         cached = _cache_get(self.athlete_id, cache_key)
@@ -876,6 +1205,9 @@ class GarminClient:
             time.sleep(API_COOLDOWN_S)
             return data
         except Exception as e:
+            time.sleep(API_COOLDOWN_S)          # un refus reste un appel réel
+            if strict:
+                raise
             logger.warning("Plan adaptatif %s indisponible : %s", plan_id, e)
             return {}
 
@@ -934,12 +1266,6 @@ class GarminClient:
 
     def get_sleep(self, cdate: str):
         return self._daily("get_sleep_data", cdate, "sleep")
-
-    def get_training_readiness(self, cdate: str):
-        return self._daily("get_training_readiness", cdate, "readiness")
-
-    def get_training_status(self, cdate: str):
-        return self._daily("get_training_status", cdate, "training_status")
 
     def get_daily_stats(self, cdate: str):
         return self._daily("get_stats", cdate, "daily_stats")
@@ -1043,15 +1369,266 @@ class GarminClient:
         )
 
     # ------------------------------------------------------------------
+    # Écriture : séances du plan dans le calendrier Garmin
+    # ------------------------------------------------------------------
+    # Chaque appel (lecture de la bibliothèque comprise) passe par `_paced` :
+    # retirer 10 séances, c'est ~40 requêtes, dont des POST/DELETE — sans pause
+    # entre elles, c'est la rafale que le cooldown de get_activities évite.
+
+    def _paced(self, call: Callable, *args):
+        """Un appel Garmin réel suivi du cooldown, y compris s'il échoue (429)."""
+        try:
+            return call(*args)
+        finally:
+            time.sleep(API_COOLDOWN_S)
+
+    def push_workout(self, payload: dict, date_str: str) -> dict:
+        """
+        Crée la séance puis la planifie. Si la planification échoue, la séance
+        créée est supprimée (pas d'orpheline dans la bibliothèque) et l'erreur
+        est relevée. Retourne {"workout_id", "schedule_id"}.
+        """
+        created = self._paced(self.api.upload_workout, payload) or {}
+        workout_id = created.get("workoutId")
+        if not workout_id:
+            raise RuntimeError(f"Garmin n'a pas renvoyé d'identifiant de séance : {created}")
+        try:
+            scheduled = self._paced(self.api.schedule_workout, workout_id, date_str) or {}
+        except Exception:
+            try:
+                self._paced(self.api.delete_workout, workout_id)
+            except Exception as cleanup:
+                logger.warning("Séance %s orpheline (suppression impossible) : %s",
+                               workout_id, cleanup)
+            raise
+        schedule_id = (scheduled.get("workoutScheduleId") or scheduled.get("scheduleId")
+                       or scheduled.get("id"))
+        return {"workout_id": int(workout_id),
+                "schedule_id": int(schedule_id) if schedule_id else None}
+
+    def remove_workout(self, workout_id: int, schedule_id: Optional[int] = None,
+                       required_tag: Optional[str] = None) -> bool:
+        """
+        Retire une séance poussée : déplanifie puis supprime le modèle. Une
+        séance déjà supprimée côté Garmin (404) n'est pas une erreur.
+
+        `required_tag` : la séance n'est supprimée que si son nom le contient
+        (étiquette du dashboard) — garde-fou contre un journal corrompu qui
+        pointerait vers une séance de l'utilisateur. Le `schedule_id` du
+        journal est vérifié de la même façon (lecture du schedule) avant tout
+        `unschedule` : un identifiant de planification corrompu ne doit jamais
+        faire retirer une séance qui n'est pas la nôtre, même si `workout_id`
+        est valide. Si le workout est déjà 404, seule cette lecture du
+        schedule permet encore de vérifier l'étiquette. Retourne False si
+        refusé (rien n'est alors envoyé à Garmin).
+        """
+        current = None
+        if required_tag:
+            try:
+                current = self._paced(self.api.get_workout_by_id, workout_id) or {}
+            except Exception as e:
+                if _http_status(e) != 404:
+                    raise
+                current = None  # déjà supprimée
+            if current is not None and required_tag not in (current.get("workoutName") or ""):
+                logger.warning("Séance %s non retirée : étiquette %s absente", workout_id, required_tag)
+                return False
+
+        if schedule_id:
+            try:
+                scheduled = self._paced(self.api.get_scheduled_workout_by_id, schedule_id) or {}
+            except Exception as e:
+                if _http_status(e) != 404:
+                    raise
+                scheduled = None  # déjà déplanifiée : rien à vérifier ni à retirer
+            if scheduled is None:
+                schedule_id = None
+            else:
+                nested = scheduled.get("workout") if isinstance(scheduled.get("workout"), dict) else {}
+                sched_workout_id = scheduled.get("workoutId") or nested.get("workoutId")
+                sched_name = scheduled.get("workoutName") or nested.get("workoutName") or ""
+                # Signal fort : le schedule pointe explicitement vers un AUTRE
+                # workout (journal corrompu). Un schedule sans workoutId
+                # embarqué ne prouve rien (forme non garantie côté Garmin) :
+                # on ne refuse pas sur une absence d'info.
+                if sched_workout_id is not None and int(sched_workout_id) != int(workout_id):
+                    logger.warning(
+                        "Schedule %s non retiré : appartient au workout %s, pas %s "
+                        "(journal corrompu ?)", schedule_id, sched_workout_id, workout_id,
+                    )
+                    return False
+                # Le workout a déjà disparu (404) : c'est la seule preuve
+                # d'étiquette qu'il nous reste, on l'exige explicitement.
+                if required_tag and current is None and required_tag not in sched_name:
+                    logger.warning(
+                        "Schedule %s non retiré : étiquette %s introuvable (workout %s "
+                        "déjà supprimé)", schedule_id, required_tag, workout_id,
+                    )
+                    return False
+
+        for call, arg in ((self.api.unschedule_workout, schedule_id),
+                          (self.api.delete_workout, workout_id)):
+            if not arg:
+                continue
+            try:
+                self._paced(call, arg)
+            except Exception as e:
+                if _http_status(e) != 404:
+                    raise
+        return True
+
+    def find_schedule(self, workout_id: int, date_str: str) -> Optional[int]:
+        """
+        Identifiant de planification de `workout_id`, ou None s'il n'est pas au
+        calendrier. Cherché d'abord dans le mois de `date_str`, puis dans les
+        mois voisins (lus en entier) qu'atteint un déplacement d'au plus
+        SCHEDULE_SEARCH_DAYS jours : une séance que l'utilisateur a décalée d'un jour dans Garmin
+        Connect (du 30 au 1er compris) reste la nôtre — la replanifier la
+        mettrait deux fois sur la montre. Chaque séance du dashboard ne sert
+        qu'un créneau : toute planification trouvée compte ; s'il y en a
+        plusieurs, la plus proche de `date_str` dans le premier mois lu qui en
+        contient. Une erreur Garmin remonte (jamais lue comme « absente »).
+        Le format de `get_scheduled_workouts` n'est pas documenté : on cherche
+        récursivement les entrées qui portent ce workoutId et une date.
+        """
+        target = date.fromisoformat(date_str)
+        around = [target + timedelta(days=d) for d in (-SCHEDULE_SEARCH_DAYS, SCHEDULE_SEARCH_DAYS)]
+        months = [(target.year, target.month)]
+        months += sorted({(d.year, d.month) for d in around} - set(months))
+        found: list[tuple[int, int]] = []           # (écart en jours, schedule_id)
+
+        def walk(node):
+            if isinstance(node, dict):
+                wid = node.get("workoutId") or (node.get("workout") or {}).get("workoutId")
+                sid = node.get("workoutScheduleId") or node.get("scheduleId") or node.get("id")
+                day = str(node.get("date") or node.get("calendarDate")
+                          or node.get("scheduledDate") or "")[:10]
+                if wid and sid and int(wid) == int(workout_id):
+                    try:
+                        found.append((abs((date.fromisoformat(day) - target).days), int(sid)))
+                    except ValueError:
+                        pass                        # sans date lisible : pas une planification
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        for year, month in months:
+            walk(self._paced(self.api.get_scheduled_workouts, year, month) or {})
+            if found:
+                return min(found)[1]
+        return None
+
+    def ensure_scheduled(self, workout_id: int, date_str: str) -> Optional[int]:
+        """
+        Réconciliation : une séance retrouvée dans la bibliothèque n'est pas
+        forcément au calendrier (création réussie mais réponse perdue, puis
+        planification jamais faite). La planifie si elle n'y est nulle part
+        (cf. find_schedule : déplacée, elle n'est pas replanifiée), retourne l'id.
+        """
+        existing = self.find_schedule(workout_id, date_str)
+        if existing:
+            return existing
+        scheduled = self._paced(self.api.schedule_workout, workout_id, date_str) or {}
+        sid = (scheduled.get("workoutScheduleId") or scheduled.get("scheduleId")
+               or scheduled.get("id"))
+        return int(sid) if sid else None
+
+    def get_workout(self, workout_id: int) -> dict:
+        """Séance complète (étapes et cibles), non cachée : la réconciliation compare son contenu."""
+        return self._paced(self.api.get_workout_by_id, workout_id) or {}
+
+    def list_workouts(self, page_size: int = 100, max_items: int = 2000) -> list[dict]:
+        """Bibliothèque de séances complète, paginée (non cachée : réconciliation)."""
+        out: list[dict] = []
+        start = 0
+        while start < max_items:
+            page = self._paced(self.api.get_workouts, start, page_size) or []
+            if not isinstance(page, list) or not page:
+                break
+            out.extend(page)
+            if len(page) < page_size:
+                break
+            start += page_size
+        return out
+
+    # ------------------------------------------------------------------
     # Cache
     # ------------------------------------------------------------------
 
-    def invalidate_cache(self) -> None:
-        """Supprime le cache disque de cet athlète uniquement."""
+    def invalidate_cache(self, include_streams: bool = False) -> None:
+        """
+        Supprime le cache disque de cet athlète uniquement. Les streams
+        (immuables, coûteux à re-télécharger) sont conservés sauf demande
+        explicite.
+        """
         athlete_dir = CACHE_DIR / str(self.athlete_id)
-        if athlete_dir.exists():
-            shutil.rmtree(athlete_dir, ignore_errors=True)
+        if not athlete_dir.exists():
+            return
+        for child in athlete_dir.iterdir():
+            if child.name == STREAMS_BUCKET and not include_streams:
+                _sweep_streams(child)
+                continue
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
         logger.info("Cache invalidé pour l'athlète %s.", self.athlete_id)
+
+
+def _http_status(exc: BaseException) -> Optional[int]:
+    """
+    Code HTTP d'une erreur garminconnect : attribut `status_code` /
+    `response.status_code`, sinon motif « API Error NNN » / « HTTP NNN » en
+    tête du message — jamais un « 404 » trouvé n'importe où (une URL
+    `/workout/9404` dans une erreur 500 n'est pas un 404).
+    """
+    for obj in (exc, getattr(exc, "response", None)):
+        status = getattr(obj, "status_code", None)
+        if isinstance(status, int):
+            return status
+    import re
+    match = re.search(r"\b(?:API Error|HTTP)\s+(\d{3})\b", str(exc))
+    return int(match.group(1)) if match else None
+
+
+# Refus propres à UNE activité (supprimée) : on la saute et la boucle continue.
+# Tout le reste arrête une boucle multi-activités au premier refus — 400 (porte
+# sur la requête, pas l'activité), 401/403 (jetons révoqués, blocage), 429, 5xx,
+# réseau. Et deux refus « sautables » d'affilée arrêtent aussi : c'est alors
+# l'endpoint qui manque, pas une activité (sinon 12 refus à chaque rendu).
+SKIPPABLE_ACTIVITY_STATUSES = frozenset({404, 410})
+MAX_SKIPPED_IN_ROW = 2
+
+
+def is_garmin_failure(exc: BaseException) -> bool:
+    """
+    Panne Garmin ou réseau (réponse HTTP en erreur, exception garminconnect,
+    coupure, délai) — par opposition à un bug de lecture (KeyError, TypeError…),
+    qui doit remonter plutôt que de se déguiser en « Garmin n'a pas répondu ».
+    """
+    if isinstance(exc, (GarminConnectConnectionError, GarminConnectAuthenticationError,
+                        GarminConnectTooManyRequestsError, ConnectionError, TimeoutError)):
+        return True
+    if _http_status(exc) is not None:
+        return True
+    return type(exc).__module__.split(".")[0] in ("requests", "urllib3", "curl_cffi")
+
+
+def skippable_activity_error(exc: BaseException) -> bool:
+    return _http_status(exc) in SKIPPABLE_ACTIVITY_STATUSES
+
+
+def _sweep_streams(folder: Path) -> None:
+    """Purge des streams expirés et des fichiers temporaires orphelins."""
+    now = time.time()
+    for f in folder.iterdir():
+        try:
+            if f.suffix == ".tmp" or now - f.stat().st_mtime > STREAMS_TTL:
+                f.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1063,7 +1640,8 @@ def safe_load_activities(
 ) -> tuple[pd.DataFrame, str | None]:
     """
     Encapsule `client.get_activities(limit)` avec des messages d'erreur lisibles.
-    Retourne (DataFrame, message). `message` est None en cas de succès.
+    Retourne (DataFrame, message). `message` est None en cas de succès ; il
+    est rendu en Markdown par les pages, d'où le texte d'exception échappé.
     """
     try:
         df = client.get_activities(limit=limit)
@@ -1077,10 +1655,10 @@ def safe_load_activities(
             "Garmin rate-limite les requêtes (429). Réessaie dans quelques minutes."
         )
     except GarminConnectConnectionError as e:
-        return pd.DataFrame(), f"Erreur réseau Garmin : {e}"
+        return pd.DataFrame(), f"Erreur réseau Garmin : {md_escape(e)}"
     except Exception as e:
         logger.exception("Erreur inattendue dans safe_load_activities")
-        return pd.DataFrame(), f"Erreur inattendue : {e}"
+        return pd.DataFrame(), f"Erreur inattendue : {md_escape(e)}"
 
 
 # ---------------------------------------------------------------------------
