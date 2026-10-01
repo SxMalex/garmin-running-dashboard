@@ -233,8 +233,9 @@ def training_block(activities: pd.DataFrame, pmc: pd.DataFrame, day: date,
         before = pmc[pd.to_datetime(pmc["date"]) <= eve]
         if not before.empty:
             last = before.iloc[-1]
-            ctl, atl = round(float(last["ctl"]), 1), round(float(last["atl"]), 1)
-            out.update(ctl=ctl, atl=atl, tsb=round(ctl - atl, 1))
+            # Le TSB de la série, relu (sa seule définition : compute_pmc_series).
+            out.update(ctl=round(float(last["ctl"]), 1), atl=round(float(last["atl"]), 1),
+                       tsb=float(last["tsb"]))
     return out
 
 

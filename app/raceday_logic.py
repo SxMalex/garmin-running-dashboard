@@ -113,9 +113,10 @@ def _haversine_m(lat1, lon1, lat2, lon2):
 
 
 _DTD_REFUSED = "GPX refusé : les déclarations DOCTYPE/ENTITY ne sont pas acceptées."
-JOIN_M = 200.0          # deux traces à moins de 200 m l'une de l'autre se suivent
-SEGMENT_GAP_M = 1000.0  # au-delà, deux segments d'une même trace ne sont plus une coupure GPS
+JOIN_M = 200.0          # boucle bouclée / tour enchaîné : départ et arrivée à moins de 200 m
+SEGMENT_GAP_M = 1000.0  # au-delà, deux segments ou deux traces ne sont plus une coupure GPS
 MIN_TRACK_M = 100.0
+ELE_RANGE_M = (-500.0, 9000.0)   # altitude plausible sur Terre ; hors plage : illisible
 
 
 def _reject_dtd(data: bytes) -> None:
@@ -128,8 +129,11 @@ def _reject_dtd(data: bytes) -> None:
     parser.EntityDeclHandler = refuse
     try:
         parser.Parse(data, True)
-    except (xml.parsers.expat.ExpatError, ValueError) as e:
-        # ValueError : encodage multi-octets déclaré sans BOM (« utf-16-le »)
+    except GpxError:
+        raise
+    except (xml.parsers.expat.ExpatError, ValueError, LookupError) as e:
+        # ValueError : encodage multi-octets déclaré sans BOM (« utf-16-le ») ;
+        # LookupError : encodage déclaré inconnu de Python (« EBCDIC-XYZ »).
         raise GpxError(f"GPX illisible : {e}") from None
 
 
@@ -157,6 +161,8 @@ def _points(parent, tag: str) -> tuple[list[tuple[float, float, float]], int]:
             bad += 1
             continue
         ele = next((_number(c.text) for c in el if _local(c.tag) == "ele"), math.nan)
+        if not ELE_RANGE_M[0] <= ele <= ELE_RANGE_M[1]:
+            ele = math.nan             # 1e308 : pente NaN, équivalent plat faux ; interpolée
         pts.append((lat, lon, ele))
     return pts, bad
 
@@ -177,10 +183,12 @@ def _best_course(pieces: list[np.ndarray]) -> tuple[pd.DataFrame | None, int]:
     """
     Pièces (une par trace, ou par route) → (le parcours retenu, nombre de
     parcours distincts). Deux pièces s'enchaînent si la suivante part à moins
-    de `JOIN_M` de la fin de la chaîne ET que la chaîne n'est pas déjà bouclée
-    (sinon deux variantes partant de la même arche s'additionnaient) — sauf si
-    la suivante est un TOUR de plus de la même boucle (même longueur, même
-    tracé : marathon en deux tours de semi, une trace par tour). Longueurs
+    de `SEGMENT_GAP_M` de la fin de la chaîne (le même seuil qu'entre deux
+    segments d'une trace : une pause GPS ne dépend pas de l'encodage) ET que la
+    chaîne n'est pas déjà bouclée (sinon deux variantes partant de la même
+    arche s'additionnaient) — sauf si la suivante est un TOUR de plus de la
+    même boucle (boucle fermée, même longueur, même tracé : marathon en deux
+    tours de semi, une trace par tour ; un aller-retour n'est pas un tour). Longueurs
     calculées en un seul passage vectoriel : un fichier de milliers de traces
     ne construit qu'un DataFrame, celui du parcours retenu.
     """
@@ -204,9 +212,10 @@ def _best_course(pieces: list[np.ndarray]) -> tuple[pd.DataFrame | None, int]:
         joined = gap(c["end"], first[j])
         prev = c["pieces"][-1]
         lap = (joined <= JOIN_M and length[prev] > 0
+               and gap(first[prev], last[prev]) <= JOIN_M
                and abs(length[j] / length[prev] - 1) <= LAP_TOLERANCE
                and _same_path(pieces[prev], pieces[j]))
-        if joined <= JOIN_M and (gap(c["start"], c["end"]) > JOIN_M or lap):
+        if joined <= SEGMENT_GAP_M and (gap(c["start"], c["end"]) > JOIN_M or lap):
             c["laps"] = c.get("laps", 1) + (1 if lap else 0)
             c["pieces"].append(j)
             c["len"] += joined + float(length[j])

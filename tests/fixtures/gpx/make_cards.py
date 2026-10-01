@@ -144,6 +144,23 @@ def build(target: Path = HERE) -> None:
          gpx(trk(trkpts(loop(10)), trkpts(loop(10, lat0=LAT0 + 0.3)))), km=10.0, note="parcours distincts")
     card("empty_track_with_route.gpx", gpx("<trk><name>vide</name><trkseg></trkseg></trk>" +
                                            rte(loop(10, step_m=25))), km=10.0, note="route")
+    # Semi en deux traces, la montre remise en route 400 m plus loin : la même pause
+    # entre deux segments était comptée, entre deux traces elle coupait le parcours.
+    semi = loop(21.0975)
+    card("semi_two_tracks_after_pause.gpx",
+         gpx(trk(trkpts(semi[:200]), name="Avant") + trk(trkpts(semi[208:]), name="Après")),
+         km=21.0975)
+    # Aller-retour en deux traces : enchaîné, mais ce n'est pas « 2 tours ».
+    out = [(LAT0 + k * 50 / M_PER_DEG_LAT, LON0, 150.0) for k in range(101)]
+    card("out_and_back_two_tracks.gpx",
+         gpx(trk(trkpts(out), name="Aller") + trk(trkpts(out[::-1]), name="Retour")), km=10.0)
+    # Encodage déclaré inconnu de Python : refus propre, pas une LookupError.
+    card("unknown_encoding.gpx",
+         gpx(trk(trkpts(loop(5)))).replace('encoding="UTF-8"', 'encoding="EBCDIC-XYZ"'),
+         error="illisible")
+    # Une altitude aberrante (1e308) : écartée, sinon pente NaN et équivalent plat faux.
+    card("absurd_elevation.gpx",
+         gpx(trk(re.sub(r"<ele>[^<]*</ele>", "<ele>1e308</ele>", trkpts(loop(5)), count=1))), km=5.0)
 
 
 if __name__ == "__main__":

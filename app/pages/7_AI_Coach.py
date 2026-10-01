@@ -183,8 +183,8 @@ def _load_at(activities_df: pd.DataFrame, asof: date) -> tuple[float, float, flo
     row = pmc[pd.to_datetime(pmc["date"]).dt.date == asof] if not pmc.empty else pmc
     if row.empty:
         return None
-    ctl, atl = round(float(row.iloc[0]["ctl"]), 1), round(float(row.iloc[0]["atl"]), 1)
-    return ctl, atl, round(ctl - atl, 1)
+    last = row.iloc[0]          # TSB relu de la série : sa seule définition
+    return round(float(last["ctl"]), 1), round(float(last["atl"]), 1), float(last["tsb"])
 
 
 def _format_forme_summary(client, activities_df: pd.DataFrame, asof: date | None = None) -> str:

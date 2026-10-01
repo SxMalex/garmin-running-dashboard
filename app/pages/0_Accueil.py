@@ -21,6 +21,7 @@ from home_logic import (
     health_signal,
     home_signals,
     spike_signal,
+    top_signals,
     planned_from_coach,
     planned_from_goal,
     planned_from_suggestion,
@@ -288,7 +289,7 @@ if _spike:
     _head.append(_spike)
 # Carte santé « rien à signaler » : en queue (elle informe sans chasser une alerte).
 _tail = [health_signal(_watch)] if _watch is not None and _watch.level == 0 else []
-_signals = [*_head, *_signals, *_tail][:4]
+_signals = top_signals([*_head, *_signals, *_tail])
 if _signals:
     st.subheader("Ce que tes données disent")
     st.caption("Des signaux qu'on ne voit pas à l'œil nu, recalculés à chaque visite.")

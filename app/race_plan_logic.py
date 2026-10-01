@@ -170,6 +170,7 @@ def athlete_baseline(
     assumptions = []
     since_4w = pd.Timestamp(today - timedelta(weeks=4))
     since_8w = pd.Timestamp(today - timedelta(weeks=8))
+    since_30d = pd.Timestamp(today - timedelta(days=30))
     df = activities_df if activities_df is not None else pd.DataFrame()
     if not df.empty:
         df = df.copy()
@@ -180,7 +181,10 @@ def athlete_baseline(
     recent8 = runs[runs["startTimeLocal"] >= since_8w] if not runs.empty else runs
 
     weekly_km = float(recent4["distance_km"].sum()) / 4 if not recent4.empty else 0.0
-    long_km = float(recent8["distance_km"].max()) if not recent8.empty else 0.0
+    # Plus longue sortie des 30 jours : la référence de l'alerte de pic
+    # (running_form_logic.run_spike), dont la sortie longue du plan part.
+    recent30 = runs[runs["startTimeLocal"] >= since_30d] if not runs.empty else runs
+    long_km = float(recent30["distance_km"].max()) if not recent30.empty else 0.0
     runs_per_week = len(recent4) / 4 if not recent4.empty else 0.0
     strength_8w = 0
     if not df.empty:
@@ -517,7 +521,10 @@ def _week_runs(phase, volume, monday, long_weekday, runs, race_date,
         n_shake = sum(1 for k in days_map.values() if k == "shakeout")
         easy_days = [d for d, k in days_map.items() if k == "easy"]
         remaining = volume - fixed - n_long * long_target - n_shake * 3.0
-        easy_km = max(remaining / len(easy_days), EASY_RUN_MIN_KM) if easy_days else 0.0
+        # Un footing ne dépasse pas la sortie longue : 52 km/sem. en 4 sorties
+        # avec une longue plafonnée à 12 km (5 km) donnaient 27 km d'endurance.
+        easy_km = (min(max(remaining / len(easy_days), EASY_RUN_MIN_KM),
+                       max(long_target, EASY_RUN_MIN_KM)) if easy_days else 0.0)
         for day, kind in days_map.items():
             if day in built or kind == "race":
                 continue
@@ -640,20 +647,40 @@ def build_race_plan(
     if target_time_s and race_time < predicted and race_time >= predicted * 0.95:
         p10 = _riegel(race_time, dist_km, 10.0) / 10.0
 
-    # 1) Courses de toutes les semaines.
+    # 1) Courses de toutes les semaines. La sortie longue progresse d'au plus
+    # 10 % sur la plus longue déjà faite ou prévue (règle des 10 %) : à 0,4 ×
+    # le volume, la première dépassait de 20 à 36 % la plus longue réelle, et
+    # l'alerte de pic signalait le plan contre lui-même.
     weeks_built = []
+    capped_weeks: list[int] = []
+    longest = baseline.get("long_run_km") or 0.0
     for idx, (phase, volume) in enumerate(zip(phases, volumes)):
         monday = first_monday + timedelta(weeks=idx)
+        if idx and volume < volumes[idx - 1] and weeks_built[-1][2] < volumes[idx - 1]:
+            # Semaine allégée ou affûtage après une semaine plafonnée : même baisse
+            # relative, sinon l'allégée annonçait plus que la semaine normale.
+            volume = round(volume * weeks_built[-1][2] / volumes[idx - 1], 1)
         runs = _runs_for_volume(runs_per_week, volume)
+        long_cap = profile["long_cap_km"]
+        if longest:
+            # arrondi vers le bas : la séance est arrondie au 0,1 km ensuite
+            long_cap = min(long_cap, max(LONG_RUN_MIN_KM,
+                                         int(longest * (1 + MAX_WEEKLY_GROWTH) * 10) / 10))
         built, long_day, prescribed = _week_runs(
             phase, volume, monday, long_run_weekday, runs, race_date, p10,
-            race_pace, idx + 1, context, profile["long_cap_km"])
+            race_pace, idx + 1, context, long_cap)
+        if longest:
+            longest = max([longest] + [b["distance_km"] for b in built.values() if b["kind"] == "long"])
         is_race_week = monday <= race_date < monday + timedelta(days=7)
         if not is_race_week and prescribed > volume * (1 + VOLUME_TOLERANCE):
             warnings.append(
                 f"Semaine {idx + 1} : {prescribed:.0f} km au lieu de {volume:.0f} km — c'est le "
                 "minimum pour 3 sorties structurées à tes allures."
             )
+            volume = round(prescribed, 1)
+        elif not is_race_week and prescribed < volume * (1 - VOLUME_TOLERANCE):
+            # Footings plafonnés à la sortie longue : on annonce ce qui est prescrit.
+            capped_weeks.append(idx + 1)
             volume = round(prescribed, 1)
         if monday <= race_date < monday + timedelta(days=7):
             built[race_date] = {
@@ -667,6 +694,13 @@ def build_race_plan(
                 "sources": [],
             }
         weeks_built.append((idx, phase, volume, monday, built))
+
+    if capped_weeks:
+        warnings.append(
+            f"Semaine(s) {', '.join(map(str, capped_weeks))} : volume annoncé plus bas que ton "
+            "volume habituel — avec ce nombre de sorties, il faudrait des footings plus longs "
+            "que la sortie longue. Ajoute une sortie par semaine pour garder ton volume."
+        )
 
     # 1 bis) Espacement ≥ 48 h entre séances clés, y compris d'une semaine à
     # l'autre (le nombre de sorties varie avec le volume, donc le motif aussi) :

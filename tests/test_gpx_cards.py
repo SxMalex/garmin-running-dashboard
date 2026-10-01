@@ -48,7 +48,8 @@ def test_thousands_of_tiny_tracks_parse_fast():
     assert len(data) < 5 * 1024 * 1024                  # sous le plafond : il faut vraiment le parser
     t0 = time.perf_counter()
     track = parse_gpx(data)
-    assert time.perf_counter() - t0 < 3.0
+    # 30 s avant la correction ; ~3 s ici, jusqu'à 6 s sur une machine chargée.
+    assert time.perf_counter() - t0 < 10.0
     assert "parcours distincts" in track.attrs["note"]
 
 
@@ -84,6 +85,13 @@ def test_trail_elevation_gain_is_not_inflated():
 def test_comma_decimal_elevation_is_read():
     prof = km_profile(parse_gpx((CARDS_DIR / "comma_decimal_elevation.gpx").read_bytes()))
     assert prof["gain"].sum() == pytest.approx(40, rel=0.15)        # pas 0 : l'altitude est lue
+
+
+def test_absurd_elevation_keeps_a_finite_profile():
+    """Revue #2 : `<ele>1e308</ele>` donnait une pente NaN et 26,9 km d'équivalent plat pour 5."""
+    prof = km_profile(parse_gpx((CARDS_DIR / "absurd_elevation.gpx").read_bytes()))
+    assert prof[["grade", "gain", "ele_end"]].notna().all().all()
+    assert prof["gain"].sum() == pytest.approx(30, rel=0.15)
 
 
 def test_route_and_track_uses_the_track_not_both():

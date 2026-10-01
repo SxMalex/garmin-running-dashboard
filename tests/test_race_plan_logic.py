@@ -493,7 +493,8 @@ def test_semaine_1_creee_un_samedi_n_annonce_que_le_prescrit():
     plan = _plan_from(SATURDAY)
     w1 = plan["weeks"][0]
     assert all(date.fromisoformat(s["date"]) >= SATURDAY for s in w1["sessions"])
-    assert w1["prescribed_km"] == _visible_km(w1) == 12.0
+    # une sortie longue, à +10 % de la plus longue des 30 jours (pas 0,4 × 30 km)
+    assert w1["prescribed_km"] == _visible_km(w1) == 11.5
     assert w1["volume_km"] == w1["prescribed_km"]
 
 
@@ -539,3 +540,15 @@ def test_volume_annonce_egal_prescrit_quel_que_soit_le_jour_de_creation(weekday,
         if not any(s["kind"] == "race" for s in w["sessions"]):
             assert w["prescribed_km"] <= w["volume_km"] * 1.10 + 0.2, (weekday, w["week"])
     assert plan["weeks"][0]["volume_km"] <= plan["summary"]["start_km"] + 0.05
+
+
+@pytest.mark.parametrize("distance", list(DISTANCE_PROFILE))
+@pytest.mark.parametrize("longest_km", [8.0, 10.0, 12.0, 16.0])
+def test_generated_plan_does_not_trigger_its_own_run_spike(distance, longest_km):
+    """Revue #2 : suivi à la lettre, le plan généré signalait sa propre première
+    sortie longue (14,4 km pour une plus longue de 12, 13,6 pour 10)."""
+    from running_form_logic import run_spike
+    df = history(km=longest_km - 4)                      # plus longue des 30 jours = longest_km
+    plan = build_race_plan(TODAY + timedelta(weeks=14), distance, athlete_baseline(df, TODAY), TODAY)
+    spike = run_spike(df, plan_sessions(plan), pd.Timestamp(TODAY))
+    assert spike["planned"] is None, spike["planned"]

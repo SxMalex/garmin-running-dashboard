@@ -208,11 +208,10 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   et il ne lit que la course, même sur le DataFrame complet.
   Le **TSB a une seule définition** : `tsb = round(ctl, 1) − round(atl, 1)` en fin
   de journée (la soustraction des deux chiffres affichés), posée dans
-  `compute_pmc_series()` et simplement relue par `compute_tsb()`, `tab_charge`,
-  le Comparatif et le Calendrier — ailleurs, seulement recomposée à partir des
-  MÊMES CTL/ATL arrondis de la série (Calendrier, Coach IA « situation au »), ce
-  qui donne le même chiffre (sinon 40,04 /
-  30,05 donnait +9,9 en haut de `3_Forme` et 10,0 dans l'onglet Charge). L'écart
+  `compute_pmc_series()` et simplement relue (colonne `tsb`, jamais recalculée)
+  par `compute_tsb()`, `tab_charge`, le Comparatif, le Calendrier et le Coach IA
+  « situation au » (sinon 40,04 / 30,05 donnait +9,9 en haut de `3_Forme` et
+  10,0 dans l'onglet Charge). L'écart
   au `ctl − atl` brut reste ≤ 0,1 sur la courbe. Libellé de fraîcheur des
   métriques : `forme_logic.tsb_metric_delta` (seuils `TSB_FRESH` / `TSB_FATIGUE`),
   le même partout. Une variante « fraîcheur d'avant-séance » ferait réapparaître
@@ -262,7 +261,11 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   de prescription = course récente > prédiction Garmin × 1,03 > entraînements —
   JAMAIS `reference_threshold_sec` (réservé au TSS) ; volume annoncé = volume
   prescrit (±10 %) — semaine 1 entamée comprise : elle annonce ce qui reste
-  prescrit et la progression démarre à la première semaine complète ; renfo
+  prescrit et la progression démarre à la première semaine complète ; sortie
+  longue à +10 % max de la plus longue faite (30 j, la référence de `run_spike`)
+  ou déjà prévue — sinon le plan déclenchait son propre pic de sortie ; footing
+  jamais plus long que la sortie longue (le volume annoncé baisse alors, et c'est
+  dit), semaine allégée réduite d'autant ; renfo
   jamais la veille d'une séance clé ni le jour de la sortie longue, arrêt J-9
   (règles sourcées dans `SOURCES`).
 - **Plan figé** : une fois validé, c'est `goal_store.validated.plan` qui
@@ -328,14 +331,18 @@ l'écoute *interne* au conteneur et doit rester telle quelle.
   pré-passe **expat** (tout encodage, toute position — un filtre sur les octets
   se contournait en UTF-16 ; expat ≥ 2.4.1 bloque de toute façon l'explosion
   d'entités). La trace (`trk`) prime sur la route (`rte`) — les mettre bout à
-  bout triplait la distance ; segments d'une même trace : écart compté jusqu'à 1 km
-  (coupure GPS), au-delà pièces séparées (`SEGMENT_GAP_M`) ; traces contiguës (≤ 200 m) enchaînées SAUF si la
-  chaîne est déjà bouclée (variantes 10 km / semi partant de la même arche) —
-  mais un tour de plus de la même boucle (±5 %, même tracé) s'enchaîne (marathon
-  en deux tours) ; sinon la plus longue. La route sert si la trace manque, est
+  bout triplait la distance ; segments ou traces qui se suivent : écart compté
+  jusqu'à 1 km (`SEGMENT_GAP_M`, coupure GPS — le même seuil quel que soit
+  l'encodage), au-delà pièces séparées ; pas d'enchaînement si la chaîne est
+  déjà bouclée (≤ 200 m, variantes 10 km / semi partant de la même arche) —
+  mais un tour de plus d'une boucle FERMÉE (±5 %, même tracé) s'enchaîne
+  (marathon en deux tours ; un aller-retour n'est pas un tour) ; sinon la plus
+  longue. Limite connue : une boucle et sa copie simplifiée passent pour deux
+  tours. La route sert si la trace manque, est
   inexploitable ou fait moins de la moitié de la route. Chaque choix est dit
-  (`attrs["note"]`). Point illisible écarté ; tracé < 100 m, profil vide ou
-  encodage illisible → `GpxError` (jamais une exception brute). Longueurs
+  (`attrs["note"]`). Point illisible écarté, altitude hors −500…9000 m
+  interpolée ; tracé < 100 m, profil vide ou encodage illisible ou inconnu →
+  `GpxError` (jamais une exception brute). Longueurs
   calculées en un passage vectoriel (24 000 traces < 0,5 s) et lecture mise en
   cache par la page (`_read_course`). Garde d'allure jugée à plat
   (`flat_equivalent_km`) : un KV à 17 min/km n'est pas une faute de frappe.

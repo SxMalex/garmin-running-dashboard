@@ -202,6 +202,16 @@ def spike_signal(spike: dict) -> dict | None:
     return None
 
 
+_SEVERITY = {"serious": 0, "warning": 1, "info": 2, "good": 3}
+
+
+def top_signals(signals: list[dict], n: int = 4) -> list[dict]:
+    """Les `n` signaux les plus graves, l'ordre d'arrivée départageant (tri
+    stable) : couper avant de trier faisait sauter « chaussures à 900 km »
+    derrière une carte verte."""
+    return sorted(signals, key=lambda s: _SEVERITY.get(s["status"], 2))[:n]
+
+
 def home_signals(risk: dict | None, ef_change: float | None,
                  shoes: list[dict] | None) -> list[dict]:
     """
