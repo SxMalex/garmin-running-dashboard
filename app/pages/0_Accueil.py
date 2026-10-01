@@ -13,11 +13,15 @@ import goal_store
 from coach_logic import target_label
 from formatting import md_escape, seconds_to_pace_str, weekday_fr
 from forme_logic import compute_forme_verdict, hrv_label, parse_recovery
+from illness_logic import health_watch, load_health_frame
 from home_logic import (
     HOME_HEADLINES,
     SHOE_RETIRE_KM,
     SHOE_WARN_KM,
+    health_signal,
     home_signals,
+    spike_signal,
+    top_signals,
     planned_from_coach,
     planned_from_goal,
     planned_from_suggestion,
@@ -34,6 +38,7 @@ from next_session_logic import (
     todays_session,
 )
 from physio_logic import efficiency_change, efficiency_trend
+from running_form_logic import planned_runs, run_spike
 from ui_helpers import (
     cache_nonce,
     cached_coach_context,
@@ -75,6 +80,13 @@ def load_today(athlete_id: int, cdate: str, nonce: int) -> dict:
     client = get_garmin_client()
     return parse_recovery(client.get_hrv(cdate), client.get_sleep(cdate),
                           client.get_daily_stats(cdate))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_health(athlete_id: int, cdate: str, nonce: int):
+    """Veille santé (même chemin que l'outil MCP health_watch)."""
+    return health_watch(load_health_frame(get_garmin_client(), date.fromisoformat(cdate)),
+                        pd.Timestamp(cdate))
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -264,6 +276,20 @@ _shoes = load_shoes(_athlete_id, cache_nonce())
 _pmc = compute_pmc_series(df, reference_threshold_sec(df))
 _signals = home_signals(load_risk(_pmc), efficiency_change(efficiency_trend(df), days=90),
                         _shoes)
+_head = []
+_watch = load_health(_athlete_id, TODAY.isoformat(), cache_nonce())
+if _watch is not None and _watch.level >= 1:
+    # En tête, mais seulement si elle alerte : la carte verte « rien à signaler »
+    # passait devant et chassait une vraie alerte (chaussures, ACWR) de la coupe à 4.
+    _head.append(health_signal(_watch))
+# Pic de sortie lu sur la même source que la semaine affichée (Run Coach s'il pilote).
+_spike = spike_signal(run_spike(df, planned_runs(_coach, goal_sessions, df, pd.Timestamp(TODAY)),
+                                pd.Timestamp(TODAY)))
+if _spike:
+    _head.append(_spike)
+# Carte santé « rien à signaler » : en queue (elle informe sans chasser une alerte).
+_tail = [health_signal(_watch)] if _watch is not None and _watch.level == 0 else []
+_signals = top_signals([*_head, *_signals, *_tail])
 if _signals:
     st.subheader("Ce que tes données disent")
     st.caption("Des signaux qu'on ne voit pas à l'œil nu, recalculés à chaque visite.")
@@ -271,6 +297,7 @@ if _signals:
     for i, (col, sig) in enumerate(zip(cols, _signals)):
         with col, st.container(key=f"card-signal-{i}"):
             html_block(signal_card(**sig))
+    explain("veille_sante")
 if _shoes:
     with st.expander(f"Toutes tes chaussures ({len(_shoes)})", icon=":material/steps:"):
         for shoe in sorted(_shoes, key=lambda s: (s["retired"], -(s["distance_km"] or 0))):

@@ -1,7 +1,7 @@
 """Pages en vrai navigateur : interactions que seuls le JS et le CSS rendent possibles."""
 
-from playwright.sync_api import expect
 
+from playwright.sync_api import expect
 from conftest import settle
 
 
@@ -170,3 +170,63 @@ def test_chart_pick_survives_a_filter_change(open_page):
     page.keyboard.press("Enter")
     settle(page)
     expect(page.get_by_text(title, exact=True).first).to_be_visible(timeout=15000)
+
+
+def test_race_day_gpx_upload_builds_the_pace_band(open_page, tmp_path):
+    pts = "".join(f'<trkpt lat="43.6" lon="{1.44 + k * 25 / 80600:.6f}"><ele>{150 + (60 if 120 < k < 160 else 0)}</ele></trkpt>'
+                  for k in range(400))                                   # ~10 km, une côte vers le km 3-4
+    gpx = tmp_path / "parcours.gpx"
+    gpx.write_text(f'<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg>{pts}'
+                   '</trkseg></trk></gpx>')
+    page = open_page("/jour-de-course")
+    page.locator('input[type="file"]').set_input_files(str(gpx))
+    settle(page)
+    page.get_by_role("textbox", name="Temps visé").fill("50:00")
+    page.keyboard.press("Enter")
+    settle(page)
+    expect(page.get_by_text("Bracelet d'allure")).to_be_visible()
+    expect(page.get_by_text("Dénivelé").first).to_be_visible()
+
+
+def test_calendar_two_clicks_compare_the_runs(open_page):
+    page = open_page("/calendrier")
+    # Mois précédent : le mois en cours n'a qu'une sortie les premiers jours
+    # (FakeGarmin, une tous les 3 jours) ; le précédent en a toujours ~10.
+    page.locator(".st-key-cal_prev button").first.click()
+    settle(page)
+    points = page.locator(".st-key-card-cal-grid .scatterlayer .trace:not(:first-child) .point")
+    points.first.wait_for()
+    assert points.count() >= 2
+    points.nth(0).click(force=True)
+    settle(page)
+    page.locator(".st-key-card-cal-grid .scatterlayer .trace:not(:first-child) .point").nth(1).click(force=True)
+    settle(page)
+    expect(page.get_by_text("De A à B")).to_be_visible(timeout=15000)
+    expect(page.get_by_text("Kilomètre par kilomètre")).to_be_visible()
+
+
+import re  # noqa: E402
+import pytest  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+
+CARDS = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "gpx"
+
+
+@pytest.mark.parametrize("card, target, expected", [
+    ("organizer_route_and_track.gpx", "50:00", re.compile(r"(9\.9\d|10\.0\d) km en")),  # pas 29 km
+    ("two_variants_10k_and_semi.gpx", "1:45", "parcours distincts"),     # variantes : la plus longue, dit
+    ("utf16_entity_bomb.gpx", None, "DOCTYPE/ENTITY"),                   # hostile : refus propre
+    ("degenerate_same_point.gpx", None, "trop court"),
+])
+def test_race_day_gpx_cards_in_the_browser(open_page, card, target, expected):
+    page = open_page("/jour-de-course")
+    page.locator('input[type="file"]').set_input_files(str(CARDS / card))
+    settle(page)
+    if target:
+        box = page.get_by_role("textbox", name="Temps visé")
+        box.fill(target)
+        page.keyboard.press("Enter")
+        settle(page)
+    expect(page.get_by_text(expected).first).to_be_visible(timeout=15000)
+    assert page.locator('[data-testid="stException"]').count() == 0

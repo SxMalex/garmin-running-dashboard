@@ -3,15 +3,17 @@ Serveur MCP : outils « raisonnement » (insights) et liste blanche de lecture.
 Aucun appel réseau : GarminClient autour du faux client de tests_ui/.
 """
 
+
 import json
 import shutil
 import sys
 from datetime import date, timedelta
 from pathlib import Path
-
 import pytest
 
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests_ui"))
+
 
 import garmin_client as gc  # noqa: E402
 import goal_store  # noqa: E402
@@ -88,10 +90,6 @@ def test_current_goal(client):
     assert g["goal"]["distance"] == "Semi-marathon" and g["plan"]["weeks"]
 
 
-# ---------------------------------------------------------------------------
-# Liste blanche (serveur en lecture seule)
-# ---------------------------------------------------------------------------
-
 server = pytest.importorskip("server")
 
 
@@ -126,7 +124,7 @@ def test_new_tools_registered():
     import asyncio
     names = {t.name for t in asyncio.run(server.mcp.list_tools())}
     assert {"daily_briefing", "training_load", "activity_analysis", "aerobic_trend",
-            "race_plan_preview", "current_goal", "garmin_call"} <= names
+            "race_plan_preview", "current_goal", "health_watch", "running_form", "garmin_call"} <= names
 
 
 def test_briefing_without_runs_does_not_crash(tmp_path, monkeypatch):
@@ -244,10 +242,6 @@ def test_client_built_with_an_id_carries_the_given_reliability():
     assert GarminClient(_Fake(), athlete_id=7, athlete_id_reliable=False).athlete_id_reliable is False
 
 
-# ---------------------------------------------------------------------------
-# Revue PR 1 (lot L)
-# ---------------------------------------------------------------------------
-
 def _goal_run_tomorrow():
     day = (date.today() + timedelta(days=1)).isoformat()
     return [{"date": day, "kind": "tempo", "title": "Seuil du plan", "distance_km": 9.0,
@@ -359,3 +353,63 @@ def test_aerobic_trend_stops_after_two_skipped_refusals_in_a_row(client, monkeyp
     monkeypatch.setattr(client.api, "get_activity_details", details)
     insights.aerobic_trend(client)
     assert len(calls) == 2
+
+
+def test_health_watch_tool_is_json_and_honest(client, monkeypatch):
+    import json
+    from datetime import date, timedelta
+    import insights
+    today = date.today()
+    nights = [(today - timedelta(days=i)).isoformat() for i in range(34, -1, -1)]
+    monkeypatch.setattr(client, "get_sleep_range", lambda s, e: [
+        {"calendarDate": d, "averageRespirationValue": 14.0 + (0.1 if i % 2 else 0)} for i, d in enumerate(nights)])
+    monkeypatch.setattr(client, "get_hrv_range", lambda s, e: [])
+    monkeypatch.setattr(client, "get_resting_hr_range", lambda s, e: [
+        {"calendarDate": d, "restingHR": 48 + (i % 3)} for i, d in enumerate(nights)])
+    out = insights.health_watch(client)
+    json.dumps(out)                                   # sérialisable tel quel
+    assert out["available"] and out["level"] == 0
+    by = {s["signal"]: s for s in out["signals"]}
+    assert by["HRV nocturne"]["status"] == "missing" and "caveat" in out
+    monkeypatch.setattr(client, "get_resting_hr_range", lambda s, e: [])
+    monkeypatch.setattr(client, "get_sleep_range", lambda s, e: [])
+    assert insights.health_watch(client) == {"available": False,
+                                              "note": "Pas de nuit mesurée ces 2 derniers jours."}
+
+
+def test_running_form_tool_is_json(client):
+    import json
+    import insights
+    out = insights.running_form(client)
+    json.dumps(out)
+    assert "spike" in out and "reading_guide" in out
+    assert isinstance(out["form_at_equal_pace"], list)
+    assert all("series" not in r for r in out["form_at_equal_pace"])
+
+
+def test_running_form_survives_a_run_coach_outage(client, monkeypatch):
+    """Intégration : load_coach_context relève désormais l'erreur Garmin — running_form plantait."""
+    def down(*a, **k):
+        raise RuntimeError("API Error 503")
+    monkeypatch.setattr(insights, "load_coach_context", down)
+    out = insights.running_form(client)
+    assert "spike" in out
+
+
+def test_prompt_situation_does_not_claim_no_goal_under_an_unconfirmed_account(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    import prompts
+    from fake_garmin import FakeGarmin
+    gc_ = GarminClient(FakeGarmin(), athlete_id=42, athlete_id_reliable=False)
+    sit = prompts.situation(gc_)
+    assert sit["goal"] == "inconnu"
+    text = prompts.ajuste_plan(sit, "voyage")
+    assert "Aucun objectif enregistré" not in text and "non confirmé" in text
+
+
+def test_running_form_surfaces_a_reading_bug(client, monkeypatch):
+    def broken(*a, **k):
+        raise KeyError("taskList")
+    monkeypatch.setattr(insights, "load_coach_context", broken)
+    with pytest.raises(KeyError):
+        insights.running_form(client)

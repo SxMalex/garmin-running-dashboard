@@ -18,6 +18,7 @@ import pandas as pd
 import goal_store
 from coach_logic import COACH_UNKNOWN, load_coach_context
 from forme_logic import compute_forme_verdict, parse_recovery
+from illness_logic import health_watch as _health_watch, load_health_frame
 from next_session_logic import (
     SESSION_TYPES,
     compute_pmc_series,
@@ -225,6 +226,49 @@ def race_plan_preview(gc, distance: str, race_date: str, runs_per_week: int = 4,
                            include_strength=include_strength)
     return _clean({"summary": plan["summary"], "warnings": plan["warnings"],
                    "baseline": baseline, "brief": plan_brief(plan), "weeks": plan["weeks"]})
+
+
+def health_watch(gc, today: date | None = None) -> dict:
+    """Veille santé de la dernière nuit : signaux qui dévient de la norme 30 j."""
+    today = today or date.today()
+    watch = _health_watch(load_health_frame(gc, today), pd.Timestamp(today))
+    if watch is None:
+        return {"available": False, "note": "Pas de nuit mesurée ces 2 derniers jours."}
+    return _clean({
+        "available": True, "level": watch.level, "title": watch.title, "message": watch.message,
+        "last_night": watch.last_night,
+        "signals": [{"signal": s.label, "unit": s.unit, "last_night": s.value, "baseline_30d": s.baseline,
+                     "delta": s.delta, "z": s.z, "flagged": s.flagged, "persistent": s.persistent,
+                     "status": s.status, "note": s.note} for s in watch.signals],
+        "caveat": "Pas un diagnostic : une grosse séance, l'alcool, la chaleur, l'altitude ou une "
+                  "nuit courte produisent les mêmes écarts. C'est la concordance qui compte.",
+    })
+
+
+def running_form(gc, today: date | None = None) -> dict:
+    """Foulée à allure égale (dérive sur 6 semaines) et pic de sortie (dernière / prévue)."""
+    from running_form_logic import form_report, planned_runs, run_spike
+    today = today or date.today()
+    df = _activities(gc)
+    report = [{k: v for k, v in r.items() if k != "series"} for r in form_report(df, pd.Timestamp(today))]
+    # Même source que la semaine de l'Accueil : Run Coach s'il pilote, sinon le plan Objectif.
+    try:
+        coach = load_coach_context(gc, today)
+    except Exception as exc:
+        if not is_garmin_failure(exc):
+            raise
+        coach = COACH_UNKNOWN          # panne : aucune séance prévue annoncée à la place
+    planned = planned_runs(coach, _validated_sessions(gc), df, pd.Timestamp(today))
+    spike = run_spike(df, planned, pd.Timestamp(today))
+    return _clean({
+        "form_at_equal_pace": report or "Pas de dynamique de course mesurée (capteur absent ?).",
+        "spike": spike,
+        "reading_guide": "delta = écart à allure égale entre les 6 dernières semaines et les 12 "
+                         "précédentes. Pic : ratio à la plus longue sortie des 30 jours (pour une "
+                         "séance prévue, ou à la plus longue séance prévue avant elle : "
+                         "ref_source) ; > 1,10 risque accru (BJSM 2025), > 1,30 élevé. "
+                         "level = comeback : reprise après un mois sans courir.",
+    })
 
 
 def current_goal(gc) -> dict:

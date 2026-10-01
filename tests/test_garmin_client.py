@@ -6,17 +6,21 @@ Aucun appel réseau — l'API Garmin est systématiquement stubée.
 
 import json
 import time
-
 import pandas as pd
 import pytest
 from pathlib import Path
+
+
 from garminconnect import (
     GarminConnectAuthenticationError,
     GarminConnectConnectionError,
     GarminConnectTooManyRequestsError,
 )
 
+
 import garmin_client as gc
+
+
 from garmin_client import (
     GarminClient,
     activity_row,
@@ -40,10 +44,6 @@ def _isolated_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(gc, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(gc, "API_COOLDOWN_S", 0)
 
-
-# ---------------------------------------------------------------------------
-# Fixtures de données Garmin réalistes (formes validées sur l'API réelle)
-# ---------------------------------------------------------------------------
 
 @pytest.fixture
 def garmin_activity():
@@ -120,10 +120,6 @@ class FakeApi:
         return self.activities[start:start + limit]
 
 
-# ---------------------------------------------------------------------------
-# activity_row / summarize_activity
-# ---------------------------------------------------------------------------
-
 class TestActivityRow:
     def test_columns_and_values(self, garmin_activity):
         row = activity_row(garmin_activity)
@@ -177,10 +173,6 @@ class TestSummarizeActivity:
         assert summary["avgPace"] == "—"
 
 
-# ---------------------------------------------------------------------------
-# build_streams
-# ---------------------------------------------------------------------------
-
 class TestBuildStreams:
     def test_keys(self, garmin_raw_details):
         streams = build_streams(garmin_raw_details)
@@ -229,10 +221,6 @@ class TestComputeGradeStream:
         assert compute_grade_stream([], []) == []
 
 
-# ---------------------------------------------------------------------------
-# compute_km_splits
-# ---------------------------------------------------------------------------
-
 class TestComputeKmSplits:
     def _streams(self, km: float, pace_sec: float = 300.0, step_m: float = 50.0):
         """Streams synthétiques à allure constante."""
@@ -274,10 +262,6 @@ class TestComputeKmSplits:
         assert compute_km_splits({"distance": [0], "time": [0]}) == []
 
 
-# ---------------------------------------------------------------------------
-# laps_to_splits
-# ---------------------------------------------------------------------------
-
 class TestLapsToSplits:
     def test_basic(self, garmin_lap):
         splits = laps_to_splits([garmin_lap])
@@ -292,10 +276,6 @@ class TestLapsToSplits:
         assert laps_to_splits([]) == []
         assert laps_to_splits(None) == []
 
-
-# ---------------------------------------------------------------------------
-# Cache disque
-# ---------------------------------------------------------------------------
 
 class TestDiskCache:
     def test_roundtrip(self):
@@ -407,10 +387,6 @@ class TestGetStreams:
         assert client.get_streams(7) == {}
 
 
-# ---------------------------------------------------------------------------
-# GarminClient.get_activities
-# ---------------------------------------------------------------------------
-
 class TestGetActivities:
     def test_dataframe_contract(self, garmin_activity):
         client = GarminClient(api=FakeApi([garmin_activity]), athlete_id=1)
@@ -424,9 +400,20 @@ class TestGetActivities:
         }
         # Contrat complet (19 colonnes, cf. CLAUDE.md) : trainingLoad porte le
         # PMC du sport croisé, son absence passerait inaperçue sans ce test.
-        assert set(df.columns) == expected
+        # + colonnes optionnelles de dynamique de course (NaN sans capteur).
+        from garmin_client import DYNAMICS_COLUMNS
+        assert set(df.columns) == expected | set(DYNAMICS_COLUMNS)
         assert df["trainingLoad"].iloc[0] == garmin_activity.get("activityTrainingLoad")
         assert pd.api.types.is_datetime64_any_dtype(df["startTimeLocal"])
+
+    def test_running_dynamics_are_optional(self, garmin_activity):
+        act = {**garmin_activity, "avgGroundContactTime": 252.4, "avgStrideLength": 104.2,
+               "avgVerticalRatio": 8.1, "avgPower": 290, "aerobicTrainingEffect": 3.4}
+        df = GarminClient(api=FakeApi([act]), athlete_id=1).get_activities(limit=10)
+        assert df["avgGroundContact_ms"].iloc[0] == 252.4 and df["avgPower_w"].iloc[0] == 290
+        assert df["aerobicTE"].iloc[0] == 3.4
+        plain = GarminClient(api=FakeApi([garmin_activity]), athlete_id=2).get_activities(limit=10)
+        assert plain["avgGroundContact_ms"].isna().all()
 
     def test_second_call_hits_cache(self, garmin_activity):
         api = FakeApi([garmin_activity])
@@ -459,10 +446,6 @@ class TestGetActivities:
         assert api.calls == 3
         assert len(sleeps) == api.calls
 
-
-# ---------------------------------------------------------------------------
-# safe_load_activities — traduction des erreurs
-# ---------------------------------------------------------------------------
 
 class _RaisingClient:
     def __init__(self, exc):
@@ -497,10 +480,6 @@ class TestSafeLoadActivities:
         _, err = safe_load_activities(_RaisingClient(exc), 10)
         assert "![](" not in err and "tiers" in err
 
-
-# ---------------------------------------------------------------------------
-# Séries quotidiennes par plage (page Comparatif annuel)
-# ---------------------------------------------------------------------------
 
 class TestDateWindows:
     def test_une_seule_fenetre_si_dans_la_limite(self):
@@ -645,10 +624,6 @@ class TestRangeMethods:
         assert len(api.paths) == 2      # les deux fenêtres ont été tentées
         assert len(rows) == 1           # seule la seconde a produit des lignes
 
-
-# ---------------------------------------------------------------------------
-# Écriture : push / retrait de séances (calendrier Garmin)
-# ---------------------------------------------------------------------------
 
 class WriteApi(FakeApi):
     def __init__(self, schedule_error=None, delete_error=None, library=None, schedules=None):
@@ -804,9 +779,6 @@ def test_training_plans_strict_bypasses_cache():
     assert api.calls == 2
 
 
-# ---------------------------------------------------------------------------
-# Session partagée, déconnexion, identifiant d'athlète (revue PR #1)
-# ---------------------------------------------------------------------------
 class _StubClient:
     """Imite garminconnect 0.3.6 : le rafraîchissement réécrit le tokenstore mémorisé."""
 
@@ -902,7 +874,6 @@ def test_athlete_id_survives_a_transient_failure(session_env):
     assert athlete_id not in (0, 777) and reliable is False
 
 
-# --- Matrice de cas limites de la session partagée (contre-revue B1-B5) -------
 class _SlowProfileClient(_StubClient):
     def __init__(self, store, delay, fail=0):
         super().__init__(store, fail=fail)
@@ -1108,7 +1079,6 @@ def test_account_without_display_name_is_not_remembered(session_env):
     assert not gcm._athlete_ids_path().exists()
 
 
-
 @pytest.mark.parametrize("written, kept", [("R1", False), ("reconnexion", True)])
 def test_refused_resume_removes_the_tokens_its_login_rewrote(session_env, written, kept):
     """Revue #1 : `login()` rafraîchit un jeton proche de l'expiration et réécrit le
@@ -1124,7 +1094,7 @@ def test_refused_resume_removes_the_tokens_its_login_rewrote(session_env, writte
     assert gcm.adopt_session(_StubApi(client), generation=generation) is False
     assert (store / "garmin_tokens.json").exists() is kept
 
-# --- Contre-revue 2 : la déconnexion doit gagner contre toute reprise concurrente ---
+
 def test_logout_wins_against_a_resume_started_during_a_slow_refresh(session_env, monkeypatch):
     """Rafraîchissement lent dans l'onglet A, déconnexion dans B, un onglet C relance un run."""
     import threading
@@ -1197,9 +1167,6 @@ def test_a_finished_recheck_does_not_forget_a_newer_one(session_env):
     assert gcm._SESSION["recheck"] is newer
 
 
-# ---------------------------------------------------------------------------
-# Revue PR #1, lot G — jetons garth hérités, planification déplacée, cooldown
-# ---------------------------------------------------------------------------
 class _LegacyGarmin:
     """Imite garminconnect 0.3.6 : ne lit QUE garmin_tokens.json du tokenstore."""
 
@@ -1439,7 +1406,6 @@ class TestWriteCooldown:
         self._paced(events, pages)
 
 
-
 def test_mcp_tokenstore_is_purged_of_garth_tokens_too(tmp_path, monkeypatch):
     """Lot G : le tokenstore du MCP gardait le secret OAuth1 longue durée de garth."""
     import garmin_client as gcm
@@ -1622,3 +1588,68 @@ def test_remove_tokens_of_edge_cases(session_env, monkeypatch, caplog):
     monkeypatch.setattr(type(f), "unlink", lambda self, **k: (_ for _ in ()).throw(OSError("verrouillé")))
     gcm._remove_tokens_of(str(store), {"x"})                    # suppression impossible : journalisé
     assert "non supprimés" in caplog.text
+
+
+def test_activity_weather_is_cached_and_tolerant(tmp_path, monkeypatch):
+    import garmin_client as gcm
+    monkeypatch.setattr(gcm, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(gcm, "API_COOLDOWN_S", 0)
+
+    class Api:
+        calls = 0
+        def get_activity_weather(self, activity_id):
+            Api.calls += 1
+            if activity_id == "2":
+                raise RuntimeError("404")
+            return {"temp": 77, "dewPoint": 60}
+
+    client = gcm.GarminClient(api=Api(), athlete_id=1)
+    assert client.get_activity_weather(1)["temp"] == 77
+    client.get_activity_weather(1)
+    assert Api.calls == 1                      # immuable : servi par le cache
+    assert client.get_activity_weather(2) == {}
+    # strict : l'échec remonte (la page ne le fige pas 24 h dans st.cache_data)
+    import pytest
+    with pytest.raises(RuntimeError):
+        client.get_activity_weather(2, strict=True)
+
+
+def test_weather_404_means_no_weather_and_is_cached(tmp_path, monkeypatch):
+    """Tapis : Garmin répond 404 — une réponse, pas une panne (ni relancée, ni redemandée)."""
+    import garmin_client as gcm
+    monkeypatch.setattr(gcm, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(gcm, "API_COOLDOWN_S", 0)
+
+    class Api:
+        calls = 0
+        def get_activity_weather(self, activity_id):
+            Api.calls += 1
+            raise RuntimeError("API Error 404 - Not Found")
+
+    client = gcm.GarminClient(api=Api(), athlete_id=1)
+    assert client.get_activity_weather(5, strict=True) == {}
+    assert client.get_activity_weather(5, strict=True) == {}
+    assert Api.calls == 1
+    # Un jour plus tard, l'absence est revérifiée (Garmin calcule parfois la météo après la synchro)
+    monkeypatch.setattr(gcm, "WEATHER_ABSENT_TTL", -1)
+    client.get_activity_weather(5, strict=True)
+    assert Api.calls == 2
+
+
+def test_weather_refusal_still_pauses(tmp_path, monkeypatch):
+    """Contre-validation : aucun cooldown sur le 404 ni en strict — un refus reste un appel réel."""
+    import garmin_client as gcm
+    monkeypatch.setattr(gcm, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(gcm, "API_COOLDOWN_S", 0.4)
+    sleeps = []
+    monkeypatch.setattr(gcm.time, "sleep", lambda s: sleeps.append(s))
+
+    class Api:
+        def get_activity_weather(self, activity_id):
+            raise RuntimeError("API Error 404 - Not Found" if activity_id == "1" else "API Error 503")
+
+    c = gcm.GarminClient(api=Api(), athlete_id=1)
+    c.get_activity_weather(1, strict=True)
+    with pytest.raises(RuntimeError):
+        c.get_activity_weather(2, strict=True)
+    assert sleeps == [0.4, 0.4]

@@ -11,6 +11,7 @@ from home_logic import (
     planned_from_goal,
     run_totals,
     short_label,
+    top_signals,
     week_days,
 )
 
@@ -201,3 +202,14 @@ def test_planned_from_suggestion_only_for_a_run_suggested_today():
                                                    "run": True}]
     assert planned_from_suggestion({**rec, "suggested_date": today + timedelta(days=1)}, today) == []
     assert planned_from_suggestion(None, today) == []
+
+
+def test_top_signals_keeps_the_serious_ones_before_cutting():
+    """Revue #2 : pic + « Charge sous contrôle » + « Efficacité stable » + chaussures
+    à 900 km — la coupe à 4 avant tri faisait sauter les chaussures."""
+    sig = lambda title, status: {"status": status, "title": title}
+    shown = top_signals([sig("Pic de sortie", "warning"), sig("Charge sous contrôle", "good"),
+                         sig("Efficacité stable", "info"), sig("Pegasus : 900 km", "serious"),
+                         sig("Rien à signaler", "good")])
+    assert [s["title"] for s in shown] == ["Pegasus : 900 km", "Pic de sortie",
+                                           "Efficacité stable", "Charge sous contrôle"]

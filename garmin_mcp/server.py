@@ -41,6 +41,7 @@ from garminconnect import Garmin  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 import insights  # noqa: E402
+import prompts  # noqa: E402
 from garmin_client import GarminClient, _purge_legacy_tokens  # noqa: E402
 
 DEFAULT_TOKENSTORE = "~/.garminconnect-mcp"  # ≠ dashboard hors Docker (~/.garminconnect)
@@ -152,6 +153,11 @@ def _use_dashboard_data_dir() -> None:
 # --------------------------------------------------------------------------- #
 
 
+# Prompts « /bilan_semaine », « /prepa_course »… (prompts.py) : adaptés à la
+# situation réelle (Run Coach, plan Objectif, veille santé) à chaque appel.
+prompts.register(mcp, lambda: _get_gc())
+
+
 @mcp.tool()
 def daily_briefing() -> dict[str, Any]:
     """Verdict du jour : fraîcheur (CTL/ATL/TSB), récupération (HRV, sommeil),
@@ -193,6 +199,23 @@ def race_plan_preview(
     rien n'est enregistré ni envoyé à Garmin. Chaque séance porte son « why »."""
     return insights.race_plan_preview(_get_gc(), distance, race_date, runs_per_week,
                                       long_run_weekday, target_time, include_strength)
+
+
+@mcp.tool()
+def health_watch() -> dict[str, Any]:
+    """Veille santé « est-ce que je couve quelque chose ? » : FC de repos, HRV,
+    respiration et SpO2 de la dernière nuit comparées à la norme personnelle des
+    30 derniers jours. Niveau 0 rien, 1 à surveiller, 2 plusieurs signaux
+    concordants (souvent 1 à 2 jours avant un rhume). Pas un diagnostic."""
+    return insights.health_watch(_get_gc())
+
+
+@mcp.tool()
+def running_form() -> dict[str, Any]:
+    """Forme de foulée à allure égale (contact au sol, ratio vertical, longueur de
+    foulée, puissance : dérive des 6 dernières semaines) et pic de sortie unique
+    (dernière sortie et prochaine sortie longue prévue vs la plus longue du mois)."""
+    return insights.running_form(_get_gc())
 
 
 @mcp.tool()

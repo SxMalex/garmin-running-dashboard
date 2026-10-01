@@ -471,6 +471,7 @@ def end_session() -> None:
 # propre dossier, un TTL long, et survivent au bouton « Actualiser » — sinon la
 # tendance de dérive re-téléchargerait N activités à chaque rafraîchissement.
 STREAMS_BUCKET = "streams"
+WEATHER_ABSENT_TTL = 86400      # une météo « absente » (404) est redemandée après un jour
 STREAMS_TTL = int(os.getenv("STREAMS_CACHE_TTL", str(30 * 86400)))
 
 
@@ -706,6 +707,28 @@ def summarize_activity(summary_dto: dict) -> dict:
     }
 
 
+# Dynamique de course (colonnes OPTIONNELLES, en plus du contrat des 19) :
+# NaN quand la montre ne la mesure pas. colonne → clés Garmin possibles
+# (liste d'activités « avg… », résumé de détail sans préfixe).
+DYNAMICS_COLUMNS = {
+    "avgGroundContact_ms": ("avgGroundContactTime", "groundContactTime"),
+    "avgVerticalOsc_cm": ("avgVerticalOscillation", "verticalOscillation"),
+    "avgVerticalRatio": ("avgVerticalRatio", "verticalRatio"),
+    "avgStride_cm": ("avgStrideLength", "strideLength"),
+    "avgPower_w": ("avgPower", "averagePower"),
+    "aerobicTE": ("aerobicTrainingEffect",),
+    "anaerobicTE": ("anaerobicTrainingEffect",),
+}
+
+
+def _first_number(act: dict, keys: tuple[str, ...]):
+    for k in keys:
+        v = act.get(k)
+        if isinstance(v, (int, float)) and v > 0:
+            return float(v)
+    return None
+
+
 def activity_row(act: dict) -> dict:
     """Convertit une activité Garmin (liste) en ligne du DataFrame commun."""
     distance_m = act.get("distance", 0) or 0
@@ -738,6 +761,7 @@ def activity_row(act: dict) -> dict:
         "workoutType": event_key or "uncategorized",
         "trainingLoad": act.get("activityTrainingLoad"),
         "vo2max": act.get("vO2MaxValue"),
+        **{col: _first_number(act, keys) for col, keys in DYNAMICS_COLUMNS.items()},
     }
 
 
@@ -960,6 +984,41 @@ class GarminClient:
             _cache_set(self.athlete_id, cache_key, result, bucket=STREAMS_BUCKET)
         time.sleep(API_COOLDOWN_S)
         return result
+
+    def get_activity_weather(self, activity_id: int, strict: bool = False) -> dict:
+        """
+        Météo relevée par Garmin pendant une activité (températures en °F).
+        Immuable : cache long des streams. {} si l'activité n'en a pas (tapis,
+        pas de GPS) — pas une erreur.
+
+        `strict=True` relève l'erreur API au lieu de renvoyer `{}` : un appelant
+        sous `st.cache_data` ne doit pas figer un échec passager (429) pour 24 h.
+        """
+        cache_key = f"weather_{activity_id}"
+        cached = _cache_get(self.athlete_id, cache_key, ttl=STREAMS_TTL, bucket=STREAMS_BUCKET)
+        if cached is not None and not (isinstance(cached, dict) and "_absent_at" in cached
+                                       and time.time() - cached["_absent_at"] > WEATHER_ABSENT_TTL):
+            return {} if isinstance(cached, dict) and "_absent_at" in cached else cached
+        try:
+            data = self.api.get_activity_weather(str(activity_id)) or {}
+        except Exception as e:
+            time.sleep(API_COOLDOWN_S)          # un refus reste un appel réel
+            # 404 = pas de météo pour cette activité (tapis) : une réponse, pas
+            # une panne — mise en cache comme telle. Le reste remonte en strict.
+            if _http_status(e) == 404:
+                # Marqueur daté : Garmin calcule parfois la météo après la synchro,
+                # l'absence est donc revérifiée au bout d'un jour (pas 30).
+                _cache_set(self.athlete_id, cache_key, {"_absent_at": time.time()},
+                           bucket=STREAMS_BUCKET)
+                return {}
+            if strict:
+                raise
+            logger.warning("Météo indisponible pour l'activité %s : %s", activity_id, e)
+            return {}
+        data = data if isinstance(data, dict) else {}
+        _cache_set(self.athlete_id, cache_key, data, bucket=STREAMS_BUCKET)
+        time.sleep(API_COOLDOWN_S)
+        return data
 
     def get_splits_aggregate(self, activity_ids: list[int]) -> pd.DataFrame:
         """

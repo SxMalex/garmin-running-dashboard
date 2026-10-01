@@ -1,5 +1,6 @@
 """Retours de revue de la PR #1 : un test par défaut signalé, qui échouait avant la correction."""
 
+
 import garmin_client
 
 
@@ -139,3 +140,35 @@ def test_activity_name_search_with_regex_characters_does_not_crash(logged_in):
     for query in ("10km (trail", "[", "a+*b", "Course 1"):
         box.set_value(query).run()
         assert not at.exception, (query, [e.value for e in at.exception])
+
+
+def test_ai_coach_slot_during_a_run_coach_outage(logged_in, monkeypatch):
+    """Intégration : le créneau du Coach IA appelait goal_store supprimé (NameError), et un
+    état Run Coach inconnu aurait annoncé le plan Objectif à sa place."""
+    from datetime import date, time, timedelta
+    import goal_store
+    import ui_helpers
+    from coach_logic import COACH_UNKNOWN
+    slot = date.today() + timedelta(days=1)
+    monkeypatch.setattr(ui_helpers, "cached_coach_context", lambda athlete_id, cdate=None: COACH_UNKNOWN)
+    monkeypatch.setattr(goal_store, "validated_sessions", lambda *a, **k: [
+        {"date": slot.isoformat(), "kind": "tempo", "title": "Tempo", "distance_km": 10}])
+    at = logged_in("7_AI_Coach.py", ai_slot_on=True, ai_slot_date=slot, ai_slot_time=time(7, 0)).run()
+    assert not at.exception, [e.value for e in at.exception]
+    prompt = at.code[0].value
+    assert "inconnu" in prompt and "plan Objectif validé" not in prompt and "ne la remplace pas" not in prompt
+
+
+def test_race_day_does_not_read_the_goal_under_a_fallback_id(logged_in, monkeypatch):
+    """Contre-validation : 10_Jour_de_course lisait goal_store sous un id de repli."""
+    import garmin_client
+    import goal_store
+    reads = []
+    monkeypatch.setattr(goal_store, "load", lambda athlete_id, **k: reads.append(athlete_id) or {})
+    at = logged_in("10_Jour_de_course.py")
+    garmin_client._SESSION.update(athlete_id=123456, reliable=False, checked_at=10**12)
+    at.session_state["garmin_athlete_id_reliable"] = False
+    reads.clear()
+    at.run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert 123456 not in reads

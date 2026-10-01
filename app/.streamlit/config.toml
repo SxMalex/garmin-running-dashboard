@@ -33,6 +33,10 @@ enableCORS = true
 # Sert app/static/ (polices embarquées) : aucune police chargée depuis un CDN,
 # donc aucune requête vers un tiers à l'ouverture du dashboard.
 enableStaticServing = true
+# Seul upload de l'app : le GPX de Jour de course (5 Mo max, vérifié aussi par
+# raceday_logic). Sans ce plafond, Streamlit monte jusqu'à 200 Mo en RAM avant
+# que la vérification ne s'applique.
+maxUploadSize = 5
 
 [client]
 # Pas de menu « Deploy » ni d'options de développement : l'en-tête du

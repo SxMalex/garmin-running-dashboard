@@ -159,6 +159,59 @@ def planned_from_coach(coach: dict | None) -> list[dict]:
     return out
 
 
+_WATCH_LEVEL_TEXT = {0: "Veille santé", 1: "À surveiller", 2: "Alerte santé"}
+
+
+def health_signal(watch) -> dict:
+    """Carte « veille santé » (illness_logic.HealthWatch) au format des signaux."""
+    body = watch.message
+    if watch.flagged:
+        details = ", ".join(f"{s.label} {s.value:g} {s.unit} (norme {s.baseline:g})"
+                            for s in watch.flagged)
+        body = f"{details}. {body}"
+    return {"status": watch.status, "level": _WATCH_LEVEL_TEXT[watch.level],
+            "title": watch.title, "body": body}
+
+
+def spike_signal(spike: dict) -> dict | None:
+    """Pic de sortie (running_form_logic.run_spike) : prévu d'abord, sinon le dernier."""
+    p, last = spike.get("planned"), spike.get("last")
+    if p and p["level"] == "comeback":
+        return {"status": "warning", "level": "À anticiper", "title": f"Reprise : {p['km']:g} km prévus",
+                "body": "Aucune course depuis plus d'un mois. Reprends par des sorties courtes et "
+                        "faciles (la moitié de ton volume d'avant) plutôt que cette distance d'emblée."}
+    if last and last["level"] == "comeback" and not p:
+        return {"status": "warning", "level": "À surveiller", "title": "Reprise après une coupure",
+                "body": f"{last['km']:.1f} km après plus d'un mois sans courir. Tendons et mollets "
+                        "réagissent avec retard : garde les prochaines sorties courtes et faciles."}
+    if p:
+        pct = f"+{(p['ratio'] - 1) * 100:.0f} %"
+        ref = (f"La plus longue séance prévue avant elle fait {p['ref_km']:.0f} km"
+               if p.get("ref_source") == "planned" else
+               f"Ta plus longue sortie du mois fait {p['ref_km']:.0f} km")
+        return {"status": "serious" if p["level"] == "high" else "warning", "level": "À anticiper",
+                "title": f"{p['km']:g} km prévus = {pct}",
+                "body": f"{ref}. Un saut de plus de "
+                        "10 % sur une seule sortie augmente le risque de blessure : raccourcis-la "
+                        "ou garde une allure très facile."}
+    if last and last["level"] != "ok":
+        pct = f"+{(last['ratio'] - 1) * 100:.0f} %"
+        return {"status": "warning", "level": "À surveiller", "title": f"Dernière sortie {pct} de distance",
+                "body": f"{last['km']:.1f} km contre {last['ref_km']:.0f} km au plus ce mois-ci. "
+                        "Écoute les tendons et mollets ces 48 h, et garde les prochaines sorties faciles."}
+    return None
+
+
+_SEVERITY = {"serious": 0, "warning": 1, "info": 2, "good": 3}
+
+
+def top_signals(signals: list[dict], n: int = 4) -> list[dict]:
+    """Les `n` signaux les plus graves, l'ordre d'arrivée départageant (tri
+    stable) : couper avant de trier faisait sauter « chaussures à 900 km »
+    derrière une carte verte."""
+    return sorted(signals, key=lambda s: _SEVERITY.get(s["status"], 2))[:n]
+
+
 def home_signals(risk: dict | None, ef_change: float | None,
                  shoes: list[dict] | None) -> list[dict]:
     """

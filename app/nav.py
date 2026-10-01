@@ -45,6 +45,7 @@ POLES: tuple[Pole, ...] = (
     )),
     Pole("training", "Entraînement", ":material/directions_run:", (
         PageDef("pages/1_Activities.py", "Activités", "activites", ":material/list:"),
+        PageDef("pages/11_Calendrier.py", "Calendrier", "calendrier", ":material/calendar_month:"),
         PageDef("pages/6_Heatmap.py", "Carte", "carte", ":material/map:"),
     )),
     Pole("progress", "Progrès", ":material/trending_up:", (
@@ -54,6 +55,7 @@ POLES: tuple[Pole, ...] = (
     )),
     Pole("goal", "Objectif", ":material/flag:", (
         PageDef("pages/9_Objectif.py", "Mon plan", "objectif", ":material/event:"),
+        PageDef("pages/10_Jour_de_course.py", "Jour de course", "jour-de-course", ":material/sports_score:"),
         PageDef("pages/7_AI_Coach.py", "Coach IA", "coach", ":material/auto_awesome:"),
     )),
 )
