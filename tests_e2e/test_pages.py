@@ -190,6 +190,10 @@ def test_race_day_gpx_upload_builds_the_pace_band(open_page, tmp_path):
 
 def test_calendar_two_clicks_compare_the_runs(open_page):
     page = open_page("/calendrier")
+    # Mois précédent : le mois en cours n'a qu'une sortie les premiers jours
+    # (FakeGarmin, une tous les 3 jours) ; le précédent en a toujours ~10.
+    page.locator(".st-key-cal_prev button").first.click()
+    settle(page)
     points = page.locator(".st-key-card-cal-grid .scatterlayer .trace:not(:first-child) .point")
     points.first.wait_for()
     assert points.count() >= 2

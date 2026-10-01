@@ -94,9 +94,11 @@ def browser(demo_url):
     with sync_api.sync_playwright() as p:
         b = _launch(p)
         # Premier chargement à froid : Streamlit peut afficher « Page not found »
-        # sur la toute première session du processus ; on le consomme ici.
+        # sur la toute première session du processus ; on le consomme ici, en
+        # attendant la fin du run (fermé trop tôt, l'onglet ne le consommait pas).
         warm = b.new_page()
         warm.goto(demo_url + "/", wait_until="networkidle")
+        settle(warm)
         warm.close()
         yield b
         b.close()
